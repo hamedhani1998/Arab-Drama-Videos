@@ -227,7 +227,7 @@ class ThreeSk : MainAPI() {
                             emitted += resolveUkrcdn(playerUrl, callback)
                         }
                         else -> {
-                            // جرّب استخراج m3u8 من صفحات السيرفرات الأخرى مباشرة
+                            // جرّب استخراج m3u8 من صفحة الـ embed مباشرة
                             val m3 = Regex("""https?://[^"'\s]+\.m3u8[^"'\s]*""").find(embedDoc.html())
                             if (m3 != null) {
                                 callback(newExtractorLink(
@@ -242,7 +242,24 @@ class ThreeSk : MainAPI() {
                                 })
                                 emitted++
                             } else {
-                                Log.w(TAG, "loadLinks server $t ($host): لا يمكن استخراج m3u8 (ربما خلف Cloudflare)")
+                                // سيرفر لا يملك m3u8 مباشر (SPA خلف Cloudflare مثل miravd/mwdy):
+                                // نخرجه كرابط فيديو ليظهر في القائمة ويتحمّل عبر WebView player
+                                callback(newExtractorLink(
+                                    name,
+                                    "سيرفر ${seenHost.size} (embed)",
+                                    playerUrl,
+                                    ExtractorLinkType.VIDEO
+                                ) {
+                                    this.referer = host
+                                    this.quality = -1
+                                    this.headers = mapOf(
+                                        "User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+                                        "Referer" to host,
+                                        "Accept" to "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
+                                    )
+                                })
+                                emitted++
+                                Log.w(TAG, "loadLinks server $t ($host): no direct m3u8, emitted VIDEO(embed)")
                             }
                         }
                     }
