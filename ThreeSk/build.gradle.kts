@@ -15,7 +15,7 @@ android {
     }
 }
 
-version = 2
+version = 3
 
 cloudstream {
     description = "قصة عشق - مسلسلات تركية مترجمة ومدبلجة"
