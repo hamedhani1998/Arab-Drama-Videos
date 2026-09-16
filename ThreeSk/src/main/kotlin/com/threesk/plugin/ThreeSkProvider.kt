@@ -39,29 +39,12 @@ class ThreeSk : MainAPI() {
             }
 
             // طريقة 2: إن لم تُوجد أقسام مفهرسة، نحلل كل البطاقات مباشرة
+            // (لا بناء روابط، لا زيارات لكل رابط — تحليل واحد سريع)
             if (all.isEmpty()) {
                 val cards = document.select("li.type_item_box a.type_item, li.type_item_wide_box a.type_item_wide")
                     .mapNotNull { it.toSearchResponse() }
                 if (cards.isNotEmpty()) {
                     all.add(HomePageList(request.name.ifBlank { "قصة عشق" }, cards))
-                }
-            }
-
-            // طريقة 3: إن فشلت، نبحث عن روابط تصير لصفحات أقسام
-            if (all.isEmpty()) {
-                document.select("a[href]").forEach { link ->
-                    val href = link.attr("href")
-                    val text = link.text().trim()
-                    if (href.isNotBlank() && text.isNotBlank() && href.startsWith("http") && href.contains(mainUrl)) {
-                        try {
-                            val subDoc = app.get(href).document
-                            val subCards = subDoc.select("li.type_item_box a.type_item, li.type_item_wide_box a.type_item_wide")
-                                .mapNotNull { it.toSearchResponse() }
-                            if (subCards.isNotEmpty()) {
-                                all.add(HomePageList(text, subCards))
-                            }
-                        } catch (_: Exception) {}
-                    }
                 }
             }
 
@@ -220,14 +203,15 @@ class ThreeSk : MainAPI() {
                 .find(finalHtml) ?: run {
                 Log.e(TAG, "loadLinks: embed URL not found"); return false
             }
-            val postId = embedM.groupValues[1]
+            // /embed/{index}/{postId}/{type}/
+            val postId = embedM.groupValues[2]
             val typeId = embedM.groupValues[3]
             Log.d(TAG, "loadLinks step3: postId=$postId typeId=$typeId")
 
-            // استكشاف الخوادم: embed/1/2/3/...
+            // استكشاف كل الخوادم المتاحة: embed/1/2/3/...
             var emitted = 0
             val seenHost = mutableSetOf<String>()
-            for (t in 1..6) {
+            for (t in 1..8) {
                 val embedUrl = "$mainUrl/embed/$t/$postId/$typeId/"
                 try {
                     val embedDoc = app.get(embedUrl).document
@@ -240,20 +224,26 @@ class ThreeSk : MainAPI() {
 
                     when {
                         host.contains("ukrcdn") -> {
-                            resolveUkrcdn(playerUrl, callback)
-                            emitted++
+                            emitted += resolveUkrcdn(playerUrl, callback)
                         }
                         else -> {
-                            callback(newExtractorLink(
-                                name,
-                                "سيرفر ${seenHost.size}",
-                                playerUrl,
-                                ExtractorLinkType.M3U8
-                            ) {
-                                this.referer = mainUrl
-                                this.headers = mapOf("User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
-                            })
-                            emitted++
+                            // جرّب استخراج m3u8 من صفحات السيرفرات الأخرى مباشرة
+                            val m3 = Regex("""https?://[^"'\s]+\.m3u8[^"'\s]*""").find(embedDoc.html())
+                            if (m3 != null) {
+                                callback(newExtractorLink(
+                                    name,
+                                    "سيرفر ${seenHost.size}",
+                                    m3.groupValues[0],
+                                    ExtractorLinkType.M3U8
+                                ) {
+                                    this.referer = host
+                                    this.quality = -1
+                                    this.headers = mapOf("User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
+                                })
+                                emitted++
+                            } else {
+                                Log.w(TAG, "loadLinks server $t ($host): لا يمكن استخراج m3u8 (ربما خلف Cloudflare)")
+                            }
                         }
                     }
                 } catch (e: Exception) {
@@ -271,26 +261,38 @@ class ThreeSk : MainAPI() {
     // ═════════════════════════════════════════════════════════════════════════
     //  ukrcdn resolver — يحول رابط ukrcdn إلى m3u8 مباشر
     // ═════════════════════════════════════════════════════════════════════════
-    private suspend fun resolveUkrcdn(embedUrl: String, callback: (ExtractorLink) -> Unit) {
-        try {
-            val uuid = Regex("""/e/([a-f0-9-]{36})""").find(embedUrl)?.groupValues?.get(1) ?: return
-            val gToken = Regex("""g=(\d+%3A[^"&]+)""").find(embedUrl)?.groupValues?.get(1) ?: return
+    private suspend fun resolveUkrcdn(embedUrl: String, callback: (ExtractorLink) -> Unit): Int {
+        return try {
+            val uuid = Regex("""/e/([a-f0-9-]{36})""").find(embedUrl)?.groupValues?.get(1) ?: return 0
 
-            val apiResp = app.get("https://ukrcdn.club/api/videos/$uuid/playback?g=$gToken").text
-            val videoUrl = Regex(""""url"\s*:\s*"([^"]+)"""").find(apiResp)?.groupValues?.get(1) ?: return
+            // نقرأ صفحة embed لنحصل على التوكين g=
+            val embedDoc = app.get(embedUrl, referer = mainUrl)
+            val gToken = Regex("""g\s*=\s*["']?([^"'\s&]+)["']?""").find(embedDoc.text)?.groupValues?.get(1)
+                ?: return 0
+            Log.d(TAG, "resolveUkrcdn g=$gToken")
 
+            val apiUrl = "https://ukrcdn.club/api/videos/$uuid/playback?g=$gToken"
+            val apiResp = app.get(apiUrl, referer = "https://ukrcdn.club/").text
+            // {"url":"https:\/\/s4.ukrcdn.xyz\/hls\/{uuid}\/master.m3u8?token=...&expires=..."}
+            val videoUrl = Regex(""""url"\s*:\s*"((?:[^"\\]|\\.)+)"""").find(apiResp)
+                ?.groupValues?.get(1)?.replace("\\/", "/") ?: return 0
+
+            if (videoUrl.isBlank()) return 0
             Log.d(TAG, "resolveUkrcdn: $videoUrl")
             callback(newExtractorLink(
                 name,
-                "ukrcdn",
+                "ukrcdn (مباشر)",
                 videoUrl,
                 ExtractorLinkType.M3U8
             ) {
                 this.referer = "https://ukrcdn.club/"
+                this.quality = -1
                 this.headers = mapOf("User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
             })
+            1
         } catch (e: Exception) {
             Log.w(TAG, "resolveUkrcdn failed: ${e.message}")
+            0
         }
     }
 }
