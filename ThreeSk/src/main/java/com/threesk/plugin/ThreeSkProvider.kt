@@ -3,14 +3,26 @@ package com.threesk.plugin
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
 import org.jsoup.Jsoup
+import java.net.HttpURLConnection
+import java.net.URL
+import java.net.URLEncoder
+import javax.net.ssl.HttpsURLConnection
+import javax.net.ssl.SSLContext
+import javax.net.ssl.X509TrustManager
+import java.security.SecureRandom
+import java.security.cert.X509Certificate
 
 /**
  * ThreeSk (قصة عشق) — Turkish drama series, Arabic-subtitled/dubbed.
  *
  * Site: https://3iskk.xyz
  *
+ * NOTE: NiceHttp's app.get (OkHttp) converts .xyz domains to punycode on Android
+ * causing UnknownHostException. We use raw HttpURLConnection + trust-all SSLContext
+ * instead, which works reliably for this domain.
+ *
  * Flow:
- *  - Home / w-srs/ : series cards (type_item_box → data-image poster, title, href)
+ *  - Home / w-srs/ : series cards (li.type_item_box a.type_item → data-image poster)
  *  - Search: /search/{term}/
  *  - Series detail: seasons-wrapper → ep-num[data-ep-num] href
  *  - Episode playback: 3-step POST chain:
@@ -36,12 +48,66 @@ class ThreeSk : MainAPI() {
         "أفلام"           to "/w-mvs/",
     )
 
-    private val UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-    private val defaultHeaders = mapOf("User-Agent" to UA, "Accept-Language" to "ar,en;q=0.9")
+    // ── SSL bypass (site certificate issues) ──────────────────────────────
+    private val unsafeSSL: SSLContext by lazy {
+        try {
+            val sc = SSLContext.getInstance("TLS")
+            sc.init(null, arrayOf(object : X509TrustManager {
+                override fun checkClientTrusted(chain: Array<X509Certificate>, authType: String) {}
+                override fun checkServerTrusted(chain: Array<X509Certificate>, authType: String) {}
+                override fun getAcceptedIssuers(): Array<X509Certificate> = arrayOf()
+            }), SecureRandom())
+            sc
+        } catch (_: Exception) { SSLContext.getDefault() }
+    }
+
+    private fun setupConn(conn: HttpURLConnection) {
+        conn.setRequestProperty("User-Agent",
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+        conn.setRequestProperty("Accept-Language", "ar,en;q=0.9")
+        conn.connectTimeout = 20_000
+        conn.readTimeout    = 20_000
+    }
+
+    private fun setupSSL(conn: HttpURLConnection) {
+        if (conn is HttpsURLConnection) {
+            conn.sslSocketFactory = unsafeSSL.socketFactory
+        }
+    }
+
+    /** GET with SSL bypass — follows redirects (default HttpURLConnection behavior) */
+    private fun safeGet(url: String, referer: String? = null): String? = try {
+        val conn = URL(url).openConnection() as HttpURLConnection
+        setupConn(conn)
+        conn.instanceFollowRedirects = true
+        if (referer != null) conn.setRequestProperty("Referer", referer)
+        setupSSL(conn)
+        val code = conn.responseCode
+        (if (code in 200..399) conn.inputStream else conn.errorStream)
+            ?.bufferedReader()?.use { it.readText() }
+    } catch (_: Exception) { null }
+
+    /** POST with SSL bypass */
+    private fun safePost(url: String, data: Map<String, String>, referer: String? = null): String? = try {
+        val conn = URL(url).openConnection() as HttpURLConnection
+        conn.requestMethod = "POST"; conn.doOutput = true
+        setupConn(conn)
+        conn.setRequestProperty("Content-Type", "application/x-www-form-urlencoded")
+        conn.setRequestProperty("Accept", "text/html,application/xhtml+xml,*/*;q=0.8")
+        if (referer != null) conn.setRequestProperty("Referer", referer)
+        setupSSL(conn)
+        val body = data.entries.joinToString("&") { (k, v) ->
+            "${URLEncoder.encode(k, "UTF-8")}=${URLEncoder.encode(v, "UTF-8")}" }
+        conn.outputStream.use { it.write(body.toByteArray()) }
+        val code = conn.responseCode
+        (if (code in 200..399) conn.inputStream else conn.errorStream)
+            ?.bufferedReader()?.use { it.readText() }
+    } catch (_: Exception) { null }
 
     // ── Card parsing (home / search / genre) ──────────────────────────────
-    private fun parseCards(doc: org.jsoup.nodes.Document): List<SearchResponse> =
-        doc.select("li.type_item_box a.type_item").mapNotNull { a ->
+    private fun parseCards(html: String): List<SearchResponse> {
+        val doc = Jsoup.parse(html)
+        return doc.select("li.type_item_box a.type_item").mapNotNull { a ->
             val href  = a.attr("href").ifBlank { return@mapNotNull null }
             val title = a.attr("title").ifBlank {
                 a.selectFirst(".item_title")?.text()
@@ -52,13 +118,14 @@ class ThreeSk : MainAPI() {
                 this.posterUrl = poster
             }
         }
+    }
 
     // ── getMainPage ───────────────────────────────────────────────────────
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse? {
         return try {
             val url = "$mainUrl${request.data.trimEnd('/')}/page/$page/"
-            val doc = app.get(url, referer = mainUrl, headers = defaultHeaders).document
-            val list = parseCards(doc)
+            val html = safeGet(url, mainUrl) ?: return null
+            val list = parseCards(html)
             if (list.isEmpty()) null else newHomePageResponse(request.name, list)
         } catch (_: Exception) { null }
     }
@@ -66,16 +133,17 @@ class ThreeSk : MainAPI() {
     // ── search ────────────────────────────────────────────────────────────
     override suspend fun search(query: String): List<SearchResponse> {
         return try {
-            val url = "$mainUrl/search/${java.net.URLEncoder.encode(query.trim(), "UTF-8")}/"
-            val doc = app.get(url, referer = mainUrl, headers = defaultHeaders).document
-            parseCards(doc)
+            val url = "$mainUrl/search/${URLEncoder.encode(query.trim(), "UTF-8")}/"
+            val html = safeGet(url, mainUrl) ?: return emptyList()
+            parseCards(html)
         } catch (_: Exception) { emptyList() }
     }
 
     // ── load (series detail → episodes) ───────────────────────────────────
     override suspend fun load(url: String): LoadResponse? {
         return try {
-            val doc = app.get(url, referer = mainUrl, headers = defaultHeaders).document
+            val html = safeGet(url, mainUrl) ?: return null
+            val doc  = Jsoup.parse(html)
 
             val title = doc.selectFirst("h1.title, .title")?.text()
                 ?: doc.title().substringBefore("موقع").trim()
@@ -86,7 +154,6 @@ class ThreeSk : MainAPI() {
 
             val description = doc.selectFirst(".description")?.text()
 
-            // Seasons → episodes
             val episodes = mutableListOf<Episode>()
             doc.select(".seasons-wrapper .seasons-selection ul li[data-value]").forEach { seasonLi ->
                 val seasonNum = seasonLi.attr("data-value").toIntOrNull() ?: return@forEach
@@ -136,7 +203,6 @@ class ThreeSk : MainAPI() {
     //  {t} = server index. Each {t} maps to a distinct player host:
     //    ukrcdn.club  → CF-free, direct m3u8 via /api/videos/{uuid}/playback
     //    miravd/mwdy  → Cloudflare-challenged → emit embed URL (WebView resolves)
-    // We enumerate {t}=1..N and emit one link per server that resolves.
     override suspend fun loadLinks(
         url: String,
         isCasting: Boolean,
@@ -148,33 +214,23 @@ class ThreeSk : MainAPI() {
 
         return try {
             // Step 1: episode page → gateway form (⚠️ must be aa.3isk.icu, NOT the search box 3iskk.xyz/)
-            val epHtml     = app.get(url, referer = mainUrl, headers = defaultHeaders).text
+            val epHtml     = safeGet(url, mainUrl) ?: return false
             val doc        = Jsoup.parse(epHtml)
             val formAction = doc.selectFirst("form[action*=\"aa.3isk.icu\"]")?.attr("action") ?: return false
             val newsValue  = doc.selectFirst("input[name=news]")?.attr("value") ?: return false
 
             // Step 2: POST → middle page
-            val middleHtml = app.post(formAction,
-                data     = mapOf("news" to newsValue, "u" to "", "submit" to "submit"),
-                referer  = url,
-                headers  = defaultHeaders + mapOf(
-                    "Content-Type" to "application/x-www-form-urlencoded",
-                    "Accept" to "text/html,application/xhtml+xml,*/*;q=0.8"
-                )).text
+            val middleHtml = safePost(formAction,
+                mapOf("news" to newsValue, "u" to "", "submit" to "submit"), url) ?: return false
 
             val myUrl   = Regex("""var myUrl\s*=\s*"([^"]+)"""").find(middleHtml)?.groupValues?.get(1) ?: return false
             val inputVl = Regex("""myInput\.value\s*=\s*"([^"]+)"""").find(middleHtml)?.groupValues?.get(1) ?: return false
 
             // Step 3: POST → final page with embed iframe 3iskk.xyz/embed/{t}/{pid}/{type}/
-            val finalHtml = app.post(myUrl,
-                data     = mapOf("news" to inputVl, "u" to "", "submit" to "submit"),
-                referer  = formAction,
-                headers  = defaultHeaders + mapOf(
-                    "Content-Type" to "application/x-www-form-urlencoded",
-                    "Accept" to "text/html,application/xhtml+xml,*/*;q=0.8"
-                )).text
+            val finalHtml = safePost(myUrl,
+                mapOf("news" to inputVl, "u" to "", "submit" to "submit"), formAction) ?: return false
 
-            // Parse the embed URL → postid + type. Server index is 1..N (unused indices return an empty-src iframe).
+            // Parse the embed URL → postid + type
             val embedM = Regex("""(?:https?://[\w.-]+)?/embed/\d+/(\d+)/(\d+)/""")
                 .find(finalHtml) ?: return false
             val postId = embedM.groupValues[1]
@@ -184,17 +240,14 @@ class ThreeSk : MainAPI() {
             val seenHost = mutableSetOf<String>()
 
             // Enumerate servers: probe embed/{t}/{pid}/{type} for each t → resolve player host → emit.
-            // Servers are 1-indexed and contiguous; unused indices return an empty-src iframe (skipped).
             for (t in 1..6) {
                 val embedUrl  = "$mainUrl/embed/$t/$postId/$typeId/"
-                val embedHtml = try {
-                    app.get(embedUrl, referer = url, headers = defaultHeaders).text
-                } catch (_: Exception) { continue }
+                val embedHtml = safeGet(embedUrl, url) ?: continue
 
                 // Real player page (inside embed's iframe): miravd.com/..., mwdy.cc/..., ukrcdn.club/e/{uuid}
                 val playerUrl = Regex("""<iframe[^>]*src="([^"]+)"""", RegexOption.IGNORE_CASE)
                     .find(embedHtml)?.groupValues?.get(1) ?: continue
-                val host = try { java.net.URL(playerUrl).host } catch (_: Exception) { continue }
+                val host = try { URL(playerUrl).host } catch (_: Exception) { continue }
                 if (host.isBlank() || !seenHost.add(host)) continue
 
                 when {
@@ -208,7 +261,7 @@ class ThreeSk : MainAPI() {
                         callback(newExtractorLink(name, "سيرفر ${seenHost.size}$epLabel", embedUrl, ExtractorLinkType.M3U8) {
                             this.referer = mainUrl
                             this.headers = mapOf(
-                                "User-Agent" to UA,
+                                "User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
                                 "Referer" to "$mainUrl/"
                             )
                         })
@@ -230,21 +283,17 @@ class ThreeSk : MainAPI() {
         epLabel: String,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
-        val page = try {
-            app.get(pageUrl, referer = mainUrl, headers = defaultHeaders).text
-        } catch (_: Exception) { return false }
+        val page = safeGet(pageUrl, mainUrl) ?: return false
         val apiUrl = Regex("""https?://[^"\s]+/api/videos/[^"\s]+/playback[^"\s]*""")
             .find(page)?.value?.replace("\\/", "/") ?: return false
-        val json = try {
-            app.get(apiUrl, referer = pageUrl, headers = defaultHeaders).text
-        } catch (_: Exception) { return false }
+        val json = safeGet(apiUrl, pageUrl) ?: return false
         val master = Regex(""""url"\s*:\s*"([^"]+)"""").find(json)?.groupValues?.get(1)?.replace("\\/", "/")
             ?: return false
 
         callback(newExtractorLink(name, "سيرفر ukrcdn$epLabel · HLS", master, ExtractorLinkType.M3U8) {
             this.referer = "https://ukrcdn.club/"
             this.headers = mapOf(
-                "User-Agent" to UA,
+                "User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
                 "Referer" to "https://ukrcdn.club/"
             )
         })
