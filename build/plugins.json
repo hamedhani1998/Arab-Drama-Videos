@@ -167,17 +167,17 @@
   {
     "url": "https://raw.githubusercontent.com/hamedhani1998/arab-videos/builds/ThreeSk.cs3",
     "status": 1,
-    "version": 5,
+    "version": 6,
     "name": "ThreeSk",
     "internalName": "ThreeSk",
     "authors": ["hamedhani1998"],
     "description": "قصة عشق - مسلسلات تركية مترجمة ومدبلجة",
-    "fileSize": 23011,
+    "fileSize": 25187,
     "repositoryUrl": "https://github.com/hamedhani1998/arab-videos",
     "language": "ar",
     "tvTypes": ["TvSeries", "Movie"],
     "apiVersion": 1,
-    "fileHash": "sha256-540cdb7f8b900a6a0c975e99aedf7f7b4e7f6f745fd6f17e968739958d546774"
+    "fileHash": "sha256-63bb6cb3cacbcf9a3bdff77074068ec073161a21ef89a41335e67d8ce60729d8"
   },
   {
     "url": "https://raw.githubusercontent.com/hamedhani1998/arab-videos/builds/MinuteDrama.cs3",
