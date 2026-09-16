@@ -223,7 +223,7 @@
         "iconUrl": "https://3iskk.xyz/wp-content/uploads/2026/04/3isk-favicon1.png",
         "apiVersion": 1,
         "repositoryUrl": "https://github.com/hamedhani1998/arab-videos",
-        "fileSize": 27962,
+        "fileSize": 31743,
         "status": 1,
         "language": "ar",
         "authors": [
@@ -233,11 +233,12 @@
             "TvSeries",
             "Movie"
         ],
-        "version": 11,
+        "version": 12,
         "internalName": "ThreeSk",
         "description": "قصة عشق - مسلسلات تركية مترجمة ومدبلجة",
         "url": "https://github.com/hamedhani1998/arab-videos/raw/refs/heads/main/build/ThreeSk.cs3",
-        "name": "قصة عشق"
+        "name": "قصة عشق",
+        "fileHash": "sha256-11ba8ca836b03956afab1171f378ccc2c230bc72caf74c1b85ade1b2b6b8b1fc"
     },
     {
         "apiVersion": 1,

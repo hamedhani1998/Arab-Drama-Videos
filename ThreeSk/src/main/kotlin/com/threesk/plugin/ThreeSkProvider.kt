@@ -242,26 +242,44 @@ class ThreeSk : MainAPI() {
                 try {
                     // referer الموسّع = صفحة الـ r2 التي أنتجتها
                     val embedDoc = app.get(embedUrl, referer = r2.url, headers = headers).document
+                    val embedHtml = embedDoc.html()
                     val playerUrl = embedDoc.selectFirst("iframe")?.attr("src")
-                        ?: Regex("""(?:data-src|src)\s*=\s*["']([^"']+)["']""").find(embedDoc.html())
+                        ?: Regex("""(?:data-src|src)\s*=\s*["']([^"']+)["']""").find(embedHtml)
                             ?.groupValues?.get(1)
-                        ?: continue
+
+                    // صفحة الـ embed قد تعيد only cf challenge (src فارغ) — سجل القطعة
+                    if (playerUrl.isNullOrBlank()) {
+                        Log.d(TAG, "loadLinks server $t: no iframe src (len=${embedHtml.length})")
+                        continue
+                    }
                     val host = try { java.net.URL(playerUrl).host } catch (_: Exception) { continue }
                     if (host.isBlank() || !seenHost.add(host)) continue
 
-                    Log.d(TAG, "loadLinks server $t: host=$host")
+                    Log.d(TAG, "loadLinks server $t: host=$host url=$playerUrl")
 
                     when {
                         host.contains("ukrcdn") -> {
                             emitted += resolveUkrcdn(playerUrl, r2.url, callback)
                         }
                         else -> {
-                            val m3 = Regex("""https?://[^"'\s]+\.m3u8[^"'\s]*""").find(embedDoc.html())
-                            if (m3 != null) {
+                            // غير ukrcdn: جرّب فتح صفحة الـ target نفسها مع referer وابحث عن m3u8
+                            var m3u8Url: String? = Regex("""https?://[^"'\s]+\.m3u8[^"'\s]*""").find(embedHtml)
+                                ?.groupValues?.get(0)
+                            if (m3u8Url == null && (host.contains("miravd") || host.contains("mwdy"))) {
+                                try {
+                                    val targetDoc = app.get(playerUrl, referer = embedUrl, headers = headers)
+                                    m3u8Url = Regex("""https?://[^"'\s]+\.m3u8[^"'\s]*""")
+                                        .find(targetDoc.text)?.groupValues?.get(0)
+                                    Log.d(TAG, "loadLinks server $t: target($host) m3u8=${m3u8Url?.take(80)}")
+                                } catch (e: Exception) {
+                                    Log.w(TAG, "loadLinks server $t: open target($host) failed: ${e.message}")
+                                }
+                            }
+                            if (m3u8Url != null) {
                                 callback(newExtractorLink(
                                     name,
                                     "سيرفر ${seenHost.size}",
-                                    m3.groupValues[0],
+                                    m3u8Url,
                                     ExtractorLinkType.M3U8
                                 ) {
                                     this.referer = host
@@ -312,8 +330,12 @@ class ThreeSk : MainAPI() {
             val uuid = Regex("""/e/([a-f0-9-]{36})""").find(embedUrl)?.groupValues?.get(1) ?: return 0
 
             // نقرأ صفحة embed (referer = صفحة الـ r2 التي أنتجتها) لنحصل على التوكين g=
-            val embedDoc = app.get(embedUrl, referer = refererFromPrev)
-            val gToken = Regex("""g\s*=\s*["']?([^"'\s&]+)["']?""").find(embedDoc.text)?.groupValues?.get(1)
+            val embedResp = app.get(embedUrl, referer = refererFromPrev)
+            val embedHtml = embedResp.text
+            // الـ g token يظهر فقط داخل مسار API: playback?g=timestamp%3Ahex...
+            // (regex واسع مثل g\s*= يلتقط g=document.getElementById أولاً — خطأ)
+            val gToken = Regex("""(?:playback|api/videos)[^"'\s]*[?&]g=([0-9a-zA-Z%._:-]+)""")
+                .find(embedHtml)?.groupValues?.get(1)
                 ?: return 0
             Log.d(TAG, "resolveUkrcdn g=$gToken")
 
