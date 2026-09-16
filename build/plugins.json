@@ -1,197 +1,261 @@
 [
-  {
-    "url": "https://raw.githubusercontent.com/hamedhani1998/arab-videos/builds/Drama4All.cs3",
-    "status": 1,
-    "version": 3,
-    "name": "Drama4All",
-    "internalName": "Drama4All",
-    "authors": ["hamedhani1998"],
-    "description": "دراما للجميع - مسلسلات وأفلام مترجمة",
-    "fileSize": 25401,
-    "repositoryUrl": "https://github.com/hamedhani1998/arab-videos",
-    "language": "ar",
-    "tvTypes": ["TvSeries", "Movie"],
-    "apiVersion": 1,
-    "fileHash": "sha256-1a1d34492786eba640788b0779b096ba60eb8ad4f0fab1701215b5cebca44574"
-  },
-  {
-    "url": "https://raw.githubusercontent.com/hamedhani1998/arab-videos/builds/NartoDrama.cs3",
-    "status": 1,
-    "version": 44,
-    "name": "NartoDrama",
-    "internalName": "NartoDrama",
-    "authors": ["hamedhani1998"],
-    "description": "Narto Drama - مسلسلات دراما مترجمة",
-    "fileSize": 38403,
-    "repositoryUrl": "https://github.com/hamedhani1998/arab-videos",
-    "language": "ar",
-    "tvTypes": ["TvSeries", "Movie"],
-    "apiVersion": 1,
-    "fileHash": "sha256-d4d6c3c38cf96645665f1093fdb0225e0e60fffd1f103be7bce57ee599bbdcc5"
-  },
-  {
-    "url": "https://raw.githubusercontent.com/hamedhani1998/arab-videos/builds/NartoEdge.cs3",
-    "status": 1,
-    "version": 15,
-    "name": "NartoEdge",
-    "internalName": "NartoEdge",
-    "authors": ["hamedhani1998"],
-    "description": "Edge Narto Drama - مسلسلات دراما مترجمة",
-    "fileSize": 38394,
-    "repositoryUrl": "https://github.com/hamedhani1998/arab-videos",
-    "language": "ar",
-    "tvTypes": ["TvSeries", "Movie"],
-    "apiVersion": 1,
-    "fileHash": "sha256-b918e0551d02883d0d7ec8db79610a71c9baa71fc827c5117b07708b49340252"
-  },
-  {
-    "url": "https://raw.githubusercontent.com/hamedhani1998/arab-videos/builds/ShortTV.cs3",
-    "status": 1,
-    "version": 1,
-    "name": "ShortTV",
-    "internalName": "ShortTV",
-    "authors": ["hamedhani1998"],
-    "description": "ShortTV - مسلسلات دراما قصيرة عمودية",
-    "fileSize": 23033,
-    "repositoryUrl": "https://github.com/hamedhani1998/arab-videos",
-    "language": "ar",
-    "tvTypes": ["TvSeries", "Movie"],
-    "apiVersion": 1,
-    "fileHash": "sha256-mWa30KoAsVMxpqIdg3bZLYmP3GS5bxSEC1K/WMfO7TY="
-  },
-  {
-    "url": "https://raw.githubusercontent.com/hamedhani1998/arab-videos/builds/StardustTV.cs3",
-    "status": 1,
-    "version": 1,
-    "name": "StardustTV",
-    "internalName": "StardustTV",
-    "authors": ["hamedhani1998"],
-    "description": "StardustTV - مسلسلات دراما قصيرة عمودية",
-    "fileSize": 16416,
-    "repositoryUrl": "https://github.com/hamedhani1998/arab-videos",
-    "language": "ar",
-    "tvTypes": ["TvSeries", "Movie"],
-    "apiVersion": 1,
-    "fileHash": "sha256-8qtxKcTB6rKsidF+kOolPH1A6iKlsmt63Alx/y6zE78="
-  },
-  {
-    "url": "https://raw.githubusercontent.com/hamedhani1998/arab-videos/builds/FlexTV.cs3",
-    "status": 1,
-    "version": 1,
-    "name": "FlexTV",
-    "internalName": "FlexTV",
-    "authors": ["hamedhani1998"],
-    "description": "FlexTV - مسلسلات دراما قصيرة عمودية",
-    "fileSize": 16761,
-    "repositoryUrl": "https://github.com/hamedhani1998/arab-videos",
-    "language": "ar",
-    "tvTypes": ["TvSeries", "Movie"],
-    "apiVersion": 1,
-    "fileHash": "sha256-irpizU4JDT0aX66HeFETNEzSe5zzvxpR3eyAlQsF+3A="
-  },
-  {
-    "url": "https://raw.githubusercontent.com/hamedhani1998/arab-videos/builds/NetShort.cs3",
-    "status": 1,
-    "version": 1,
-    "name": "NetShort",
-    "internalName": "NetShort",
-    "authors": ["hamedhani1998"],
-    "description": "NetShort - مسلسلات دراما قصيرة عمودية",
-    "fileSize": 27118,
-    "repositoryUrl": "https://github.com/hamedhani1998/arab-videos",
-    "language": "ar",
-    "tvTypes": ["TvSeries", "Movie"],
-    "apiVersion": 1,
-    "fileHash": "sha256-s9U5sWdeRlCcL7HP+M89qpgZAOmLIvpqY4+P/pSUo60="
-  },
-  {
-    "url": "https://raw.githubusercontent.com/hamedhani1998/arab-videos/builds/ReelShort.cs3",
-    "status": 1,
-    "version": 1,
-    "name": "ReelShort",
-    "internalName": "ReelShort",
-    "authors": ["hamedhani1998"],
-    "description": "ReelShort - مسلسلات دراما قصيرة عمودية",
-    "fileSize": 23861,
-    "repositoryUrl": "https://github.com/hamedhani1998/arab-videos",
-    "language": "ar",
-    "tvTypes": ["TvSeries", "Movie"],
-    "apiVersion": 1,
-    "fileHash": "sha256-XZBaI94mgy9h1AryufhHqIf1hbuj5rFkhFKaxxra8Ww="
-  },
-  {
-    "url": "https://raw.githubusercontent.com/hamedhani1998/arab-videos/builds/OnShort.cs3",
-    "status": 1,
-    "version": 1,
-    "name": "OnShort",
-    "internalName": "OnShort",
-    "authors": ["hamedhani1998"],
-    "description": "OnShort - مسلسلات دراما قصيرة (عربي)",
-    "fileSize": 41345,
-    "repositoryUrl": "https://github.com/hamedhani1998/arab-videos",
-    "language": "ar",
-    "tvTypes": ["TvSeries", "Movie"],
-    "apiVersion": 1,
-    "fileHash": "sha256-5e0f4b1d9c9a4e5e8a9b0f1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c"
-  },
-  {
-    "url": "https://raw.githubusercontent.com/hamedhani1998/arab-videos/builds/DeepDrama.cs3",
-    "status": 1,
-    "version": 14,
-    "name": "DeepDrama",
-    "internalName": "DeepDrama",
-    "authors": ["hamedhani1998"],
-    "description": "Deep Drama - مسلسلات دراما عربية مترجمة",
-    "fileSize": 37599,
-    "repositoryUrl": "https://github.com/hamedhani1998/arab-videos",
-    "language": "ar",
-    "tvTypes": ["TvSeries", "Movie"],
-    "apiVersion": 1,
-    "fileHash": "sha256-4cc03b7a0e533104664d24a7c714e7b39dc6dc468fc9cff9d578398619815736"
-  },
-  {
-    "url": "https://raw.githubusercontent.com/hamedhani1998/arab-videos/builds/Reelree.cs3",
-    "status": 1,
-    "version": 2,
-    "name": "Reelree",
-    "internalName": "Reelree",
-    "authors": ["hamedhani1998"],
-    "description": "Reelree - مسلسلات دراما قصيرة عمودية مترجمة ومدبلجة",
-    "fileSize": 22697,
-    "repositoryUrl": "https://github.com/hamedhani1998/arab-videos",
-    "language": "ar",
-    "tvTypes": ["TvSeries", "Movie"],
-    "apiVersion": 1,
-    "fileHash": "sha256-8d2e689b41b5f16b6984272ade673b116db98b75eaa46f983f8533260122d0cf"
-  },
-  {
-    "url": "https://raw.githubusercontent.com/hamedhani1998/arab-videos/builds/ThreeSk.cs3",
-    "status": 1,
-    "version": 6,
-    "name": "ThreeSk",
-    "internalName": "ThreeSk",
-    "authors": ["hamedhani1998"],
-    "description": "قصة عشق - مسلسلات تركية مترجمة ومدبلجة",
-    "fileSize": 25187,
-    "repositoryUrl": "https://github.com/hamedhani1998/arab-videos",
-    "language": "ar",
-    "tvTypes": ["TvSeries", "Movie"],
-    "apiVersion": 1,
-    "fileHash": "sha256-63bb6cb3cacbcf9a3bdff77074068ec073161a21ef89a41335e67d8ce60729d8"
-  },
-  {
-    "url": "https://raw.githubusercontent.com/hamedhani1998/arab-videos/builds/MinuteDrama.cs3",
-    "status": 1,
-    "version": 1,
-    "name": "MinuteDrama",
-    "internalName": "MinuteDrama",
-    "authors": ["hamedhani1998"],
-    "description": "MinuteDrama - مسلسلات دراما قصيرة إنجليزية",
-    "fileSize": 21546,
-    "repositoryUrl": "https://github.com/hamedhani1998/arab-videos",
-    "language": "ar",
-    "tvTypes": ["TvSeries"],
-    "apiVersion": 1,
-    "fileHash": "sha256-9d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0d1e2f3"
-  }
+    {
+        "url": "https://raw.githubusercontent.com/hamedhani1998/arab-videos/refs/heads/main/build/Drama4All.cs3",
+        "status": 1,
+        "version": 3,
+        "name": "Drama4All",
+        "internalName": "Drama4All",
+        "authors": [
+            "hamedhani1998"
+        ],
+        "description": "دراما للجميع - مسلسلات وأفلام مترجمة",
+        "fileSize": 25401,
+        "repositoryUrl": "https://github.com/hamedhani1998/arab-videos",
+        "language": "ar",
+        "tvTypes": [
+            "TvSeries",
+            "Movie"
+        ],
+        "apiVersion": 1,
+        "fileHash": "sha256-1a1d34492786eba640788b0779b096ba60eb8ad4f0fab1701215b5cebca44574"
+    },
+    {
+        "url": "https://raw.githubusercontent.com/hamedhani1998/arab-videos/refs/heads/main/build/NartoDrama.cs3",
+        "status": 1,
+        "version": 44,
+        "name": "NartoDrama",
+        "internalName": "NartoDrama",
+        "authors": [
+            "hamedhani1998"
+        ],
+        "description": "Narto Drama - مسلسلات دراما مترجمة",
+        "fileSize": 38403,
+        "repositoryUrl": "https://github.com/hamedhani1998/arab-videos",
+        "language": "ar",
+        "tvTypes": [
+            "TvSeries",
+            "Movie"
+        ],
+        "apiVersion": 1,
+        "fileHash": "sha256-d4d6c3c38cf96645665f1093fdb0225e0e60fffd1f103be7bce57ee599bbdcc5"
+    },
+    {
+        "url": "https://raw.githubusercontent.com/hamedhani1998/arab-videos/refs/heads/main/build/NartoEdge.cs3",
+        "status": 1,
+        "version": 15,
+        "name": "NartoEdge",
+        "internalName": "NartoEdge",
+        "authors": [
+            "hamedhani1998"
+        ],
+        "description": "Edge Narto Drama - مسلسلات دراما مترجمة",
+        "fileSize": 38394,
+        "repositoryUrl": "https://github.com/hamedhani1998/arab-videos",
+        "language": "ar",
+        "tvTypes": [
+            "TvSeries",
+            "Movie"
+        ],
+        "apiVersion": 1,
+        "fileHash": "sha256-b918e0551d02883d0d7ec8db79610a71c9baa71fc827c5117b07708b49340252"
+    },
+    {
+        "url": "https://raw.githubusercontent.com/hamedhani1998/arab-videos/refs/heads/main/build/ShortTV.cs3",
+        "status": 1,
+        "version": 1,
+        "name": "ShortTV",
+        "internalName": "ShortTV",
+        "authors": [
+            "hamedhani1998"
+        ],
+        "description": "ShortTV - مسلسلات دراما قصيرة عمودية",
+        "fileSize": 23033,
+        "repositoryUrl": "https://github.com/hamedhani1998/arab-videos",
+        "language": "ar",
+        "tvTypes": [
+            "TvSeries",
+            "Movie"
+        ],
+        "apiVersion": 1,
+        "fileHash": "sha256-mWa30KoAsVMxpqIdg3bZLYmP3GS5bxSEC1K/WMfO7TY="
+    },
+    {
+        "url": "https://raw.githubusercontent.com/hamedhani1998/arab-videos/refs/heads/main/build/StardustTV.cs3",
+        "status": 1,
+        "version": 1,
+        "name": "StardustTV",
+        "internalName": "StardustTV",
+        "authors": [
+            "hamedhani1998"
+        ],
+        "description": "StardustTV - مسلسلات دراما قصيرة عمودية",
+        "fileSize": 16416,
+        "repositoryUrl": "https://github.com/hamedhani1998/arab-videos",
+        "language": "ar",
+        "tvTypes": [
+            "TvSeries",
+            "Movie"
+        ],
+        "apiVersion": 1,
+        "fileHash": "sha256-8qtxKcTB6rKsidF+kOolPH1A6iKlsmt63Alx/y6zE78="
+    },
+    {
+        "url": "https://raw.githubusercontent.com/hamedhani1998/arab-videos/refs/heads/main/build/FlexTV.cs3",
+        "status": 1,
+        "version": 1,
+        "name": "FlexTV",
+        "internalName": "FlexTV",
+        "authors": [
+            "hamedhani1998"
+        ],
+        "description": "FlexTV - مسلسلات دراما قصيرة عمودية",
+        "fileSize": 16761,
+        "repositoryUrl": "https://github.com/hamedhani1998/arab-videos",
+        "language": "ar",
+        "tvTypes": [
+            "TvSeries",
+            "Movie"
+        ],
+        "apiVersion": 1,
+        "fileHash": "sha256-irpizU4JDT0aX66HeFETNEzSe5zzvxpR3eyAlQsF+3A="
+    },
+    {
+        "url": "https://raw.githubusercontent.com/hamedhani1998/arab-videos/refs/heads/main/build/NetShort.cs3",
+        "status": 1,
+        "version": 1,
+        "name": "NetShort",
+        "internalName": "NetShort",
+        "authors": [
+            "hamedhani1998"
+        ],
+        "description": "NetShort - مسلسلات دراما قصيرة عمودية",
+        "fileSize": 27118,
+        "repositoryUrl": "https://github.com/hamedhani1998/arab-videos",
+        "language": "ar",
+        "tvTypes": [
+            "TvSeries",
+            "Movie"
+        ],
+        "apiVersion": 1,
+        "fileHash": "sha256-s9U5sWdeRlCcL7HP+M89qpgZAOmLIvpqY4+P/pSUo60="
+    },
+    {
+        "url": "https://raw.githubusercontent.com/hamedhani1998/arab-videos/refs/heads/main/build/ReelShort.cs3",
+        "status": 1,
+        "version": 1,
+        "name": "ReelShort",
+        "internalName": "ReelShort",
+        "authors": [
+            "hamedhani1998"
+        ],
+        "description": "ReelShort - مسلسلات دراما قصيرة عمودية",
+        "fileSize": 23861,
+        "repositoryUrl": "https://github.com/hamedhani1998/arab-videos",
+        "language": "ar",
+        "tvTypes": [
+            "TvSeries",
+            "Movie"
+        ],
+        "apiVersion": 1,
+        "fileHash": "sha256-XZBaI94mgy9h1AryufhHqIf1hbuj5rFkhFKaxxra8Ww="
+    },
+    {
+        "url": "https://raw.githubusercontent.com/hamedhani1998/arab-videos/refs/heads/main/build/OnShort.cs3",
+        "status": 1,
+        "version": 1,
+        "name": "OnShort",
+        "internalName": "OnShort",
+        "authors": [
+            "hamedhani1998"
+        ],
+        "description": "OnShort - مسلسلات دراما قصيرة (عربي)",
+        "fileSize": 41345,
+        "repositoryUrl": "https://github.com/hamedhani1998/arab-videos",
+        "language": "ar",
+        "tvTypes": [
+            "TvSeries",
+            "Movie"
+        ],
+        "apiVersion": 1,
+        "fileHash": "sha256-5e0f4b1d9c9a4e5e8a9b0f1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c"
+    },
+    {
+        "url": "https://raw.githubusercontent.com/hamedhani1998/arab-videos/refs/heads/main/build/DeepDrama.cs3",
+        "status": 1,
+        "version": 14,
+        "name": "DeepDrama",
+        "internalName": "DeepDrama",
+        "authors": [
+            "hamedhani1998"
+        ],
+        "description": "Deep Drama - مسلسلات دراما عربية مترجمة",
+        "fileSize": 37599,
+        "repositoryUrl": "https://github.com/hamedhani1998/arab-videos",
+        "language": "ar",
+        "tvTypes": [
+            "TvSeries",
+            "Movie"
+        ],
+        "apiVersion": 1,
+        "fileHash": "sha256-4cc03b7a0e533104664d24a7c714e7b39dc6dc468fc9cff9d578398619815736"
+    },
+    {
+        "url": "https://raw.githubusercontent.com/hamedhani1998/arab-videos/refs/heads/main/build/Reelree.cs3",
+        "status": 1,
+        "version": 2,
+        "name": "Reelree",
+        "internalName": "Reelree",
+        "authors": [
+            "hamedhani1998"
+        ],
+        "description": "Reelree - مسلسلات دراما قصيرة عمودية مترجمة ومدبلجة",
+        "fileSize": 22697,
+        "repositoryUrl": "https://github.com/hamedhani1998/arab-videos",
+        "language": "ar",
+        "tvTypes": [
+            "TvSeries",
+            "Movie"
+        ],
+        "apiVersion": 1,
+        "fileHash": "sha256-8d2e689b41b5f16b6984272ade673b116db98b75eaa46f983f8533260122d0cf"
+    },
+    {
+        "url": "https://raw.githubusercontent.com/hamedhani1998/arab-videos/refs/heads/main/build/ThreeSk.cs3",
+        "status": 1,
+        "version": 7,
+        "name": "ThreeSk",
+        "internalName": "ThreeSk",
+        "authors": [
+            "hamedhani1998"
+        ],
+        "description": "قصة عشق - مسلسلات تركية مترجمة ومدبلجة",
+        "fileSize": 23245,
+        "repositoryUrl": "https://github.com/hamedhani1998/arab-videos",
+        "language": "ar",
+        "tvTypes": [
+            "TvSeries",
+            "Movie"
+        ],
+        "apiVersion": 1,
+        "fileHash": "sha256-377dd3130b432269972fda294ef2a704f98d5404a847d19f4b2b15dd4f14e240"
+    },
+    {
+        "url": "https://raw.githubusercontent.com/hamedhani1998/arab-videos/refs/heads/main/build/MinuteDrama.cs3",
+        "status": 1,
+        "version": 1,
+        "name": "MinuteDrama",
+        "internalName": "MinuteDrama",
+        "authors": [
+            "hamedhani1998"
+        ],
+        "description": "MinuteDrama - مسلسلات دراما قصيرة إنجليزية",
+        "fileSize": 21546,
+        "repositoryUrl": "https://github.com/hamedhani1998/arab-videos",
+        "language": "ar",
+        "tvTypes": [
+            "TvSeries"
+        ],
+        "apiVersion": 1,
+        "fileHash": "sha256-9d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0d1e2f3"
+    }
 ]
