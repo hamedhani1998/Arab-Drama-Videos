@@ -118,7 +118,8 @@ class ThreeSk : MainAPI() {
 
     // ── search ────────────────────────────────────────────────────────────
     override suspend fun search(query: String): List<SearchResponse> {
-        val url = "$mainUrl/?s=${URLEncoder.encode(query.trim(), "UTF-8")}"
+        // Canonical path — the site redirects both `?s=` and `/search/` here.
+        val url = "$mainUrl/search/${URLEncoder.encode(query.trim(), "UTF-8")}/"
         val doc = Jsoup.parse(safeGet(url, mainUrl) ?: return emptyList())
         return parseCards(doc)
     }
@@ -180,17 +181,25 @@ class ThreeSk : MainAPI() {
         }
     }
 
-    // ── loadLinks (3-step POST chain → embed URL) ─────────────────────────
+    // ── loadLinks ─────────────────────────────────────────────────────────
+    // Episode page → 3-step POST chain → final iframe 3iskk.xyz/embed/{t}/{pid}/{type}/
+    //  {t} = server index. Each {t} maps to a distinct player host:
+    //    ukrcdn.club  → CF-free, direct m3u8 via /api/videos/{uuid}/playback
+    //    miravd/mwdy  → Cloudflare-challenged → emit embed URL (WebView resolves)
+    // We enumerate {t}=1..N and emit one link per server that resolves.
     override suspend fun loadLinks(
         url: String,
         isCasting: Boolean,
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
-        // Step 1: episode page → gateway form
+        val qa = Regex("""(?:season-(\d+))?.*?episode-(\d+)(?:/|$)""").find(url)
+        val epLabel = if (qa != null && qa.groupValues[2].isNotBlank()) " EP${qa.groupValues[2]}" else ""
+
+        // Step 1: episode page → gateway form (⚠️ must be aa.3isk.icu, the search box is 3iskk.xyz/)
         val epHtml     = safeGet(url, mainUrl) ?: return false
         val doc        = Jsoup.parse(epHtml)
-        val formAction = doc.selectFirst("form[action*=3isk]")?.attr("action") ?: return false
+        val formAction = doc.selectFirst("form[action*=\"aa.3isk.icu\"]")?.attr("action") ?: return false
         val newsValue  = doc.selectFirst("input[name=news]")?.attr("value")     ?: return false
 
         // Step 2: POST → middle page
@@ -200,20 +209,75 @@ class ThreeSk : MainAPI() {
         val myUrl   = Regex("""var myUrl\s*=\s*"([^"]+)"""").find(middleHtml)?.groupValues?.get(1) ?: return false
         val inputVl = Regex("""myInput\.value\s*=\s*"([^"]+)"""").find(middleHtml)?.groupValues?.get(1) ?: return false
 
-        // Step 3: POST → final page with embed iframe
+        // Step 3: POST → final page with embed iframe 3iskk.xyz/embed/{t}/{pid}/{type}/
         val finalHtml = safePost(myUrl,
             mapOf("news" to inputVl, "u" to "", "submit" to "submit"), formAction) ?: return false
 
-        val embedUrl = Regex("""<iframe[^>]*src="([^"]+)"""", RegexOption.IGNORE_CASE)
-            .find(finalHtml)?.groupValues?.get(1) ?: return false
+        // Parse the embed URL → postid + type. Server index is 1..N (unused indices 404).
+        val embedM = Regex("""(?:https?://[\w.-]+)?/embed/\d+/(\d+)/(\d+)/""")
+            .find(finalHtml) ?: return false
+        val postId = embedM.groupValues[1]
+        val typeId = embedM.groupValues[2]
 
-        // Emit the 3iskk.xyz/embed URL — CloudStream loads it in its WebView
-        // which then loads the Cloudflare-protected mwdy.cc player iframe
-        callback(newExtractorLink(name, "$name · تشغيل", embedUrl, ExtractorLinkType.M3U8) {
-            this.referer = mainUrl
+        var emitted = 0
+        val seenHost = mutableSetOf<String>()
+
+        // Enumerate servers: probe embed/{t}/{pid}/{type} for each t → resolve player host → emit.
+        // Servers are 1-indexed and contiguous; unused indices return an empty-src iframe (skipped).
+        for (t in 1..6) {
+            val embedUrl = "$mainUrl/embed/$t/$postId/$typeId/"
+            val embedHtml = safeGet(embedUrl, url) ?: continue
+
+            // Real player page (inside embed's iframe): miravd.com/..., mwdy.cc/..., ukrcdn.club/e/{uuid}
+            val playerUrl = Regex("""<iframe[^>]*src="([^"]+)"""", RegexOption.IGNORE_CASE)
+                .find(embedHtml)?.groupValues?.get(1) ?: continue
+            val host = try { URL(playerUrl).host } catch (_: Exception) { continue }
+            if (host.isBlank() || !seenHost.add(host)) continue
+
+            when {
+                // ── ukrcdn.club: CF-free direct m3u8 ───────────────────────
+                host.contains("ukrcdn") -> {
+                    resolveUkrcdn(playerUrl, epLabel, callback)?.let { emitted++ }
+                }
+                // ── miravd / mwdy and other CF-challenged hosts: emit embed URL,
+                //    CloudStream's internal WebView executes the CF-JS → reaches player
+                else -> {
+                    callback(newExtractorLink(name, "سيرفر ${seenHost.size}$epLabel", embedUrl, ExtractorLinkType.M3U8) {
+                        this.referer = mainUrl
+                        this.headers = mapOf(
+                            "User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                            "Referer" to "$mainUrl/"
+                        )
+                    })
+                    emitted++
+                }
+            }
+        }
+        return emitted > 0
+    }
+
+    /**
+     * ukrcdn.club → direct master.m3u8 (CF-free).
+     * Page https://ukrcdn.club/e/{uuid} → extract `g=` token from inline fetch() script →
+     * GET https://ukrcdn.club/api/videos/{uuid}/playback?g={token} → JSON {"url": master.m3u8}.
+     */
+    private suspend fun resolveUkrcdn(
+        pageUrl: String,
+        epLabel: String,
+        callback: (ExtractorLink) -> Unit
+    ): Boolean {
+        val page = safeGet(pageUrl, mainUrl) ?: return false
+        val apiUrl = Regex("""https?://[^"\s]+/api/videos/[^"\s]+/playback[^"\s]*""")
+            .find(page)?.value?.replace("\\/", "/") ?: return false
+        val master = safeGet(apiUrl, pageUrl)?.let { json ->
+            Regex(""""url"\s*:\s*"([^"]+)"""").find(json)?.groupValues?.get(1)?.replace("\\/", "/")
+        } ?: return false
+
+        callback(newExtractorLink(name, "سيرفر ukrcdn$epLabel · HLS", master, ExtractorLinkType.M3U8) {
+            this.referer = "https://ukrcdn.club/"
             this.headers = mapOf(
                 "User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-                "Referer" to "$mainUrl/"
+                "Referer" to "https://ukrcdn.club/"
             )
         })
         return true
