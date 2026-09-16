@@ -167,56 +167,85 @@ class ThreeSk : MainAPI() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
+        // نفس أسلوب re-3arabi: سلسلة POST مع تمرير referer في كل طلب
+        // (referer الصحيح هو ما يجعل موقع Cloudflare يعيد iframe حقيقي بدل صفحة challenge)
         return try {
             Log.d(TAG, "loadLinks: $data")
-            // الخطوة 1: صفحة الحلقة → نموذج aa.3isk.icu
-            val epDoc = app.get(data).document
-            val formAction = epDoc.selectFirst("form[action*=aa.3isk.icu]")?.attr("action") ?: run {
-                Log.e(TAG, "loadLinks: gateway form aa.3isk.icu not found"); return false
-            }
-            val newsValue = epDoc.selectFirst("input[name=news]")?.attr("value") ?: run {
-                Log.e(TAG, "loadLinks: input[name=news] not found"); return false
-            }
-            Log.d(TAG, "loadLinks step1: form=$formAction")
+            val headers = mapOf(
+                "User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                "Accept" to "*/*"
+            )
 
-            // الخطوة 2: POST إلى aa.3isk.icu → الصفحة المتوسطة
-            val middleHtml = app.post(
-                formAction,
-                data = mapOf("news" to newsValue, "u" to "", "submit" to "submit"),
-                referer = data
-            ).text
-            val myUrl = Regex("""var myUrl\s*=\s*"([^"]+)"""").find(middleHtml)?.groupValues?.get(1) ?: run {
-                Log.e(TAG, "loadLinks: myUrl not found"); return false
+            // الخطوة 0: صفحة الحلقة → form + news field
+            val r0 = app.get(data, headers = headers)
+            val soup0 = r0.document
+            var watchForm = soup0.selectFirst("button.single-watch-btn")?.parent()
+            if (watchForm == null) {
+                watchForm = soup0.select("form").firstOrNull {
+                    it.attr("action").contains("3isk") || it.attr("action").contains("aa.3isk")
+                }
             }
-            val inputVl = Regex("""myInput\.value\s*=\s*"([^"]+)"""").find(middleHtml)?.groupValues?.get(1) ?: run {
-                Log.e(TAG, "loadLinks: myInput.value not found"); return false
+            val formAction = watchForm?.attr("action") ?: run {
+                Log.e(TAG, "loadLinks: no watch form"); return false
             }
-            Log.d(TAG, "loadLinks step2: myUrl=$myUrl")
+            val formData = (watchForm?.select("input[type=hidden]")
+                ?.associate { it.attr("name") to it.attr("value") } ?: emptyMap()).toMutableMap()
+            val watchBtn = soup0.selectFirst("button.single-watch-btn")
+            if (watchBtn != null && watchBtn.attr("name").isNotBlank())
+                formData[watchBtn.attr("name")] = watchBtn.attr("value")
+            Log.d(TAG, "loadLinks STEP1: POST $formAction fields=${formData.size}")
 
-            // الخطوة 3: POST إلى myUrl → صفحة embed
-            val finalHtml = app.post(
-                myUrl,
-                data = mapOf("news" to inputVl, "u" to "", "submit" to "submit"),
-                referer = formAction
-            ).text
-            val embedM = Regex("""(?:https?://[\w.-]+)?/embed/(\d+)/(\d+)/(\d+)/""")
-                .find(finalHtml) ?: run {
-                Log.e(TAG, "loadLinks: embed URL not found"); return false
+            // الخطوة 1: POST → صفحة myUrl + myInput
+            val r1 = app.post(formAction, data = formData, referer = data, headers = headers)
+            val mMyurl = Regex("""var\s+myUrl\s*=\s*["']([^"']+)["']""").find(r1.text)
+            val mNews = Regex("""myInput\.value\s*=\s*["']([^"']+)["']""").find(r1.text)
+            if (mMyurl == null || mNews == null) {
+                Log.e(TAG, "loadLinks: myUrl/myInput not found, len=${r1.text.length}")
+                return false
             }
-            // /embed/{index}/{postId}/{type}/
-            val postId = embedM.groupValues[2]
-            val typeId = embedM.groupValues[3]
-            Log.d(TAG, "loadLinks step3: postId=$postId typeId=$typeId")
+            val nextPost = mMyurl.groupValues[1]
+            val newsVal = mNews.groupValues[1]
+            Log.d(TAG, "loadLinks STEP2: POST $nextPost")
 
-            // استكشاف كل الخوادم المتاحة: embed/1/2/3/...
+            // الخطوة 2: POST → صفحة الـ embed (iframe ukrcdn بداخلها)
+            val r2 = app.post(
+                nextPost,
+                data = mapOf("news" to newsVal, "u" to "", "submit" to "submit"),
+                referer = r1.url,
+                headers = headers
+            )
+            val iframesOnR2 = r2.document.select("iframe").mapNotNull { it.attr("src").ifBlank { null } }
+            if (iframesOnR2.isEmpty()) {
+                Log.e(TAG, "loadLinks: no iframe after POST2 (len=${r2.text.length})")
+                // fallback: embed عبر WordPress بحيث يجلب الموقع الرسمي - out
+                return false
+            }
+            val baseIframe = iframesOnR2[0]
+            Log.d(TAG, "loadLinks STEP3: base iframe=$baseIframe")
+
+            // الحصول على postId/type من الـ embed للاستكشاف عبر embed/1..N
+            val embedM = Regex("""(?:https?://[\w.-]+)?/embed/(\d+)/(\d+)/(\d+)/""").find(baseIframe)
+            val postId = embedM?.groupValues?.get(2)
+            val typeId = embedM?.groupValues?.get(3)
+            val trailing = embedM?.groupValues?.get(3)
+                ?.let { "/$it/" }
+
             var emitted = 0
             val seenHost = mutableSetOf<String>()
-            for (t in 1..8) {
-                val embedUrl = "$mainUrl/embed/$t/$postId/$typeId/"
+            val serversToProbe = if (postId != null && typeId != null) 1..8 else 1..1
+            for (t in serversToProbe) {
+                val embedUrl = if (postId != null && typeId != null) {
+                    "$mainUrl/embed/$t/$postId/$typeId/"
+                } else {
+                    baseIframe
+                }
                 try {
-                    val embedDoc = app.get(embedUrl).document
-                    val playerUrl = embedDoc.selectFirst("iframe")?.attr("src") ?: continue
-                    if (playerUrl.isBlank()) continue
+                    // referer الموسّع = صفحة الـ r2 التي أنتجتها
+                    val embedDoc = app.get(embedUrl, referer = r2.url, headers = headers).document
+                    val playerUrl = embedDoc.selectFirst("iframe")?.attr("src")
+                        ?: Regex("""(?:data-src|src)\s*=\s*["']([^"']+)["']""").find(embedDoc.html())
+                            ?.groupValues?.get(1)
+                        ?: continue
                     val host = try { java.net.URL(playerUrl).host } catch (_: Exception) { continue }
                     if (host.isBlank() || !seenHost.add(host)) continue
 
@@ -224,10 +253,9 @@ class ThreeSk : MainAPI() {
 
                     when {
                         host.contains("ukrcdn") -> {
-                            emitted += resolveUkrcdn(playerUrl, callback)
+                            emitted += resolveUkrcdn(playerUrl, r2.url, callback)
                         }
                         else -> {
-                            // جرّب استخراج m3u8 من صفحة الـ embed مباشرة
                             val m3 = Regex("""https?://[^"'\s]+\.m3u8[^"'\s]*""").find(embedDoc.html())
                             if (m3 != null) {
                                 callback(newExtractorLink(
@@ -242,8 +270,6 @@ class ThreeSk : MainAPI() {
                                 })
                                 emitted++
                             } else {
-                                // سيرفر لا يملك m3u8 مباشر (SPA خلف Cloudflare مثل miravd/mwdy):
-                                // نخرجه كرابط فيديو ليظهر في القائمة ويتحمّل عبر WebView player
                                 callback(newExtractorLink(
                                     name,
                                     "سيرفر ${seenHost.size} (embed)",
@@ -259,7 +285,6 @@ class ThreeSk : MainAPI() {
                                     )
                                 })
                                 emitted++
-                                Log.w(TAG, "loadLinks server $t ($host): no direct m3u8, emitted VIDEO(embed)")
                             }
                         }
                     }
@@ -278,12 +303,16 @@ class ThreeSk : MainAPI() {
     // ═════════════════════════════════════════════════════════════════════════
     //  ukrcdn resolver — يحول رابط ukrcdn إلى m3u8 مباشر
     // ═════════════════════════════════════════════════════════════════════════
-    private suspend fun resolveUkrcdn(embedUrl: String, callback: (ExtractorLink) -> Unit): Int {
+    private suspend fun resolveUkrcdn(
+        embedUrl: String,
+        refererFromPrev: String,
+        callback: (ExtractorLink) -> Unit
+    ): Int {
         return try {
             val uuid = Regex("""/e/([a-f0-9-]{36})""").find(embedUrl)?.groupValues?.get(1) ?: return 0
 
-            // نقرأ صفحة embed لنحصل على التوكين g=
-            val embedDoc = app.get(embedUrl, referer = mainUrl)
+            // نقرأ صفحة embed (referer = صفحة الـ r2 التي أنتجتها) لنحصل على التوكين g=
+            val embedDoc = app.get(embedUrl, referer = refererFromPrev)
             val gToken = Regex("""g\s*=\s*["']?([^"'\s&]+)["']?""").find(embedDoc.text)?.groupValues?.get(1)
                 ?: return 0
             Log.d(TAG, "resolveUkrcdn g=$gToken")
