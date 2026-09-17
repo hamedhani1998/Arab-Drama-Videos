@@ -1,26 +1,16 @@
-plugins {
-    id("com.android.library")
-    id("org.jetbrains.kotlin.android")
-}
-
-android {
-    namespace = "com.threesk.plugin"
-    compileSdk = 35
-    defaultConfig {
-        minSdk = 21
-    }
-    compileOptions {
-        sourceCompatibility = JavaVersion.VERSION_17
-        targetCompatibility = JavaVersion.VERSION_17
-    }
-}
-
-version = 12
+version = 13
 
 cloudstream {
     description = "قصة عشق - مسلسلات تركية مترجمة ومدبلجة"
     authors = listOf("hamedhani1998")
-    status = 1
-    tvTypes = listOf("TvSeries", "Movie")
     language = "ar"
+
+    status = 1
+
+    tvTypes = listOf(
+        "TvSeries",
+        "Movie"
+    )
+
+    iconUrl = "https://3iskk.xyz/wp-content/uploads/2026/04/3isk-favicon1.png"
 }

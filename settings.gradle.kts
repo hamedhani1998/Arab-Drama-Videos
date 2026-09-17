@@ -1,7 +1,6 @@
-rootProject.name = "arab-videos"
+rootProject.name = "CloudstreamPlugins"
 
-// يكتشف الوحدات تلقائياً — كل مجلد يحتوي build.gradle.kts يُضمَّن كوحدة.
-// لإخفاء وحدة، أضف اسمها إلى قائمة disabled.
+
 val disabled = listOf<String>()
 
 File(rootDir, ".").eachDir { dir ->

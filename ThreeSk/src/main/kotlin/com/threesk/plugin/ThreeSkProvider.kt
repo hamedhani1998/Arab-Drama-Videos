@@ -2,7 +2,7 @@ package com.threesk.plugin
 
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
-import org.jsoup.Jsoup
+import org.jsoup.nodes.Element
 import android.util.Log
 
 class ThreeSk : MainAPI() {
@@ -12,64 +12,33 @@ class ThreeSk : MainAPI() {
     override var lang = "ar"
     override val hasMainPage = true
 
-    private companion object {
-        const val TAG = "ThreeSk"
-    }
-
-    // ═════════════════════════════════════════════════════════════════════════
-    //  getMainPage — يجلب الصفحة الرئيسية ويحلل كل الأقسام من HTML مباشرة
-    //  (كما في re-3arabi — لا بناء روابط صفحة بصفحة، لا ترميز عربي في المضيف)
-    // ═════════════════════════════════════════════════════════════════════════
-    override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse? {
-        return try {
-            Log.d(TAG, "getMainPage called with name=${request.name} data=${request.data}")
-            val url = if (request.data.isNotBlank()) "$mainUrl${request.data}" else mainUrl
-            Log.d(TAG, "getMainPage fetching: $url")
-            val document = app.get(url).document
-            val all = ArrayList<HomePageList>()
-
-            // طريقة 1: تحليل الأقسام المفهرسة (sections)
-            document.select("section.home-items-sec").forEach { section ->
-                val title = section.selectFirst(".sec-title")?.text() ?: return@forEach
-                val items = section.select("li.type_item_box a.type_item, li.type_item_wide_box a.type_item_wide")
-                    .mapNotNull { it.toSearchResponse() }
-                if (items.isNotEmpty()) {
-                    all.add(HomePageList(title, items))
+    private fun Element.toSearchResponse(): SearchResponse? {
+        val encodedUrl = this.attr("data-clse")
+        val href = if (encodedUrl.isNotBlank()) {
+            try {
+                try {
+                    String(android.util.Base64.decode(encodedUrl, android.util.Base64.DEFAULT))
+                } catch (_: Exception) {
+                    try {
+                        String(android.util.Base64.decode(encodedUrl, android.util.Base64.URL_SAFE))
+                    } catch (_: Exception) {
+                        String(android.util.Base64.decode(encodedUrl, android.util.Base64.NO_WRAP or android.util.Base64.NO_PADDING))
+                    }
                 }
+            } catch (e: Exception) {
+                Log.e("ThreeSk", "Base64 decoding failed for '$encodedUrl'. Falling back to href. Error: ${e.message}")
+                this.attr("href")
             }
-
-            // طريقة 2: إن لم تُوجد أقسام مفهرسة، نحلل كل البطاقات مباشرة
-            // (لا بناء روابط، لا زيارات لكل رابط — تحليل واحد سريع)
-            if (all.isEmpty()) {
-                val cards = document.select("li.type_item_box a.type_item, li.type_item_wide_box a.type_item_wide")
-                    .mapNotNull { it.toSearchResponse() }
-                if (cards.isNotEmpty()) {
-                    all.add(HomePageList(request.name.ifBlank { "قصة عشق" }, cards))
-                }
-            }
-
-            Log.d(TAG, "getMainPage: ${all.size} sections, ${all.sumOf { it.list.size }} total cards")
-            if (all.isEmpty()) null
-            else newHomePageResponse(all)
-        } catch (e: Exception) {
-            Log.e(TAG, "getMainPage EXCEPTION: ${e.message}", e)
-            null
+        } else {
+            this.attr("href")
         }
-    }
 
-    // ═════════════════════════════════════════════════════════════════════════
-    //  toSearchResponse — يحوّل بطاقة HTML إلى نتيجة بحث
-    // ═════════════════════════════════════════════════════════════════════════
-    private fun org.jsoup.nodes.Element.toSearchResponse(): SearchResponse? {
-        val href = this.attr("href")
         if (href.isBlank()) return null
-        val title = this.attr("title").ifBlank { null }
-            ?: this.selectFirst(".item_title")?.text()
-            ?: this.text().trim()
-        if (title.isBlank()) return null
+        val title = this.attr("title")
         val posterUrl = this.selectFirst("img")?.let {
             it.attr("data-image").ifBlank { it.attr("src") }
         }
+
         return when {
             href.contains("/tvshows/") -> newTvSeriesSearchResponse(title, href) { this.posterUrl = posterUrl }
             href.contains("/movies/") -> newMovieSearchResponse(title, href) { this.posterUrl = posterUrl }
@@ -77,290 +46,423 @@ class ThreeSk : MainAPI() {
                 val seriesTitle = title.substringBefore(" الحلقة").trim()
                 newTvSeriesSearchResponse(seriesTitle.ifBlank { title }, href) { this.posterUrl = posterUrl }
             }
-            else -> newTvSeriesSearchResponse(title, href) { this.posterUrl = posterUrl }
+            else -> null
         }
     }
 
-    // ═════════════════════════════════════════════════════════════════════════
-    //  search
-    // ═════════════════════════════════════════════════════════════════════════
-    override suspend fun search(query: String): List<SearchResponse>? {
-        return try {
-            val url = "$mainUrl/search/$query/"
-            Log.d(TAG, "search: $url")
-            val document = app.get(url).document
-            document.select("li.type_item_box a.type_item").mapNotNull { it.toSearchResponse() }
-        } catch (e: Exception) {
-            Log.e(TAG, "search EXCEPTION: ${e.message}", e)
-            null
+    override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
+        val document = app.get(mainUrl).document
+        val all = ArrayList<HomePageList>()
+
+        document.select("section.home-items-sec").forEach { section ->
+            val title = section.selectFirst(".sec-title")?.text() ?: return@forEach
+            val items = section.select("li.type_item_box a.type_item, li.type_item_wide_box a.type_item_wide")
+                .mapNotNull { it.toSearchResponse() }
+            if (items.isNotEmpty()) {
+                all.add(HomePageList(title, items))
+            }
+        }
+        return newHomePageResponse(all)
+    }
+
+    override suspend fun search(query: String): List<SearchResponse> {
+        val url = "$mainUrl/search/$query/"
+        val document = app.get(url).document
+        return document.select("ul.search-page li.type_item_box a.type_item").mapNotNull {
+            it.toSearchResponse()
         }
     }
 
-    // ═════════════════════════════════════════════════════════════════════════
-    //  load — تفاصيل المسلسل + الحلقات
-    // ═════════════════════════════════════════════════════════════════════════
+    private fun decodeBase64Compat(encoded: String): String? {
+        var s = encoded.trim()
+        val mod = s.length % 4
+        if (mod != 0) {
+            s += "=".repeat(4 - mod)
+        }
+        val flagsToTry = listOf(
+            android.util.Base64.DEFAULT,
+            android.util.Base64.NO_WRAP,
+            android.util.Base64.URL_SAFE or android.util.Base64.NO_PADDING or android.util.Base64.NO_WRAP
+        )
+        for (flags in flagsToTry) {
+            try {
+                val bytes = android.util.Base64.decode(s, flags)
+                return try {
+                    String(bytes, Charsets.UTF_8)
+                } catch (e: Exception) {
+                    String(bytes)
+                }
+            } catch (ignored: IllegalArgumentException) {
+            }
+        }
+        return null
+    }
+
     override suspend fun load(url: String): LoadResponse? {
-        return try {
-            Log.d(TAG, "load: $url")
-            val doc = app.get(url).document
-            val title = doc.selectFirst("h1.title, .title")?.text()
-                ?: doc.title().substringBefore("موقع").trim()
-            val poster = doc.selectFirst(".poster-wrapper img")?.let {
-                it.attr("data-image").ifBlank { it.attr("src") }
-            } ?: doc.selectFirst("meta[property=og:image]")?.attr("content")
-            val description = doc.selectFirst(".description")?.text()
+        if (url.contains("/episodes/")) {
+            val episodePage = app.get(url).document
+            val seriesUrl = episodePage.selectFirst("a.single-serie-btn")?.attr("href")
+            if (seriesUrl.isNullOrBlank()) return null
+            return load(seriesUrl)
+        }
 
-            val episodes = mutableListOf<Episode>()
+        val document = app.get(url).document
+        val title = document.selectFirst("div.single_info h1.title")?.text()
+            ?.replace("مترجم", "")?.replace("مدبلج", "")?.trim()
+            ?: return null
 
-            // تحليل المواسم والحلقات
-            doc.select(".seasons-wrapper .seasons-selection ul li[data-value]").forEach { seasonLi ->
-                val seasonNum = seasonLi.attr("data-value").toIntOrNull() ?: return@forEach
-                doc.select("#season-num-$seasonNum a.ep-num").forEach { a ->
-                    val epUrl = a.attr("href")
-                    val epNum = a.attr("data-ep-num").toIntOrNull()
-                        ?: Regex("episode-(\\d+)").find(epUrl)?.groupValues?.get(1)?.toIntOrNull()
-                    val epTitle = a.selectFirst(".cl_srt")?.text()
-                        ?: a.attr("title").ifBlank { null }
-                        ?: epNum?.let { "الحلقة $it" }
-                    if (epUrl.isNotBlank())
-                        episodes.add(newEpisode(epUrl) {
-                            this.name = epTitle
-                            this.season = seasonNum
-                            this.episode = epNum
-                        })
-                }
-            }
+        val poster = document.selectFirst("div.poster-wrapper img")?.attr("src")
+        val description = document.selectFirst("div.description span[data-nosnippet]")?.text()
+        val tvType = if (url.contains("/tvshows/")) TvType.TvSeries else TvType.Movie
 
-            // إن لم تُوجد حلقات بالمواسم، نبحث عن حلقات مباشرة
-            if (episodes.isEmpty()) {
-                doc.select("a.ep-num[href*=episodes]").forEach { a ->
-                    val epUrl = a.attr("href")
-                    val epNum = a.attr("data-ep-num").toIntOrNull()
-                        ?: Regex("episode-(\\d+)").find(epUrl)?.groupValues?.get(1)?.toIntOrNull()
-                    if (epUrl.isNotBlank())
-                        episodes.add(newEpisode(epUrl) {
-                            this.name = epNum?.let { "الحلقة $it" }
-                            this.season = 1
-                            this.episode = epNum
-                        })
-                }
-            }
-
-            Log.d(TAG, "load: title=$title episodes=${episodes.size}")
-            if (episodes.isEmpty()) null
-            else newTvSeriesLoadResponse(title, url, TvType.TvSeries, episodes) {
+        if (tvType == TvType.Movie) {
+            return newMovieLoadResponse(title, url, tvType, url) {
                 this.posterUrl = poster
                 this.plot = description
             }
-        } catch (e: Exception) {
-            Log.e(TAG, "load EXCEPTION: ${e.message}", e)
-            null
+        }
+
+        val episodes = ArrayList<Episode>()
+
+        document.select("div.season-eps").forEach { seasonDiv ->
+            val seasonNum = seasonDiv.attr("id").removePrefix("season-num-").toIntOrNull() ?: 1
+
+            seasonDiv.select("a.ep-num").forEach { epA ->
+                val rawUrl = epA.attr("data-clse").ifBlank { epA.attr("href") }
+                if (rawUrl.isBlank()) return@forEach
+
+                val epUrl = if (rawUrl.startsWith("http")) {
+                    rawUrl
+                } else {
+                    try {
+                        decodeBase64Compat(rawUrl) ?: epA.attr("href")
+                    } catch (e: Exception) {
+                        epA.attr("href")
+                    }
+                }
+
+                val epNum = epA.attr("data-ep-num").toIntOrNull()
+                val epName = epA.attr("title").ifBlank { "الحلقة $epNum" }
+
+                episodes.add(
+                    newEpisode(epUrl) {
+                        name = epName
+                        episode = epNum
+                        season = seasonNum
+                        posterUrl = poster
+                    }
+                )
+            }
+        }
+
+        if (episodes.isEmpty()) return null
+
+        return newTvSeriesLoadResponse(title, url, tvType, episodes.sortedBy { it.episode }) {
+            this.posterUrl = poster
+            this.plot = description
         }
     }
 
-    // ═════════════════════════════════════════════════════════════════════════
-    //  loadLinks — سلسلة POST الثلاثية → خوادم متعددة
-    // ═════════════════════════════════════════════════════════════════════════
     override suspend fun loadLinks(
         data: String,
         isCasting: Boolean,
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
-        // نفس أسلوب re-3arabi: سلسلة POST مع تمرير referer في كل طلب
-        // (referer الصحيح هو ما يجعل موقع Cloudflare يعيد iframe حقيقي بدل صفحة challenge)
-        return try {
-            Log.d(TAG, "loadLinks: $data")
-            val headers = mapOf(
-                "User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-                "Accept" to "*/*"
-            )
+        fun jsStringUnescape(s: String): String {
+            val regex = Regex("""\\u[0-9a-fA-F]{4}|\\x[0-9a-fA-F]{2}|\\.|\\n|\\r|\\t""")
+            return regex.replace(s) { m ->
+                val esc = m.value
+                try {
+                    when {
+                        esc.startsWith("\\x") -> esc.substring(2).toInt(16).toChar().toString()
+                        esc.startsWith("\\u") -> esc.substring(2).toInt(16).toChar().toString()
+                        esc == "\\n" -> "\n"
+                        esc == "\\r" -> "\r"
+                        esc == "\\t" -> "\t"
+                        esc == "\\'" -> "'"
+                        esc == "\\\"" -> "\""
+                        esc == "\\\\" -> "\\"
+                        else -> if (esc.length >= 2 && esc[0] == '\\') esc.substring(1) else esc
+                    }
+                } catch (_: Exception) { esc }
+            }
+        }
 
-            // الخطوة 0: صفحة الحلقة → form + news field
-            val r0 = app.get(data, headers = headers)
-            val soup0 = r0.document
-            var watchForm = soup0.selectFirst("button.single-watch-btn")?.parent()
-            if (watchForm == null) {
-                watchForm = soup0.select("form").firstOrNull {
-                    it.attr("action").contains("3isk") || it.attr("action").contains("aa.3isk")
+        fun intToBase36(n0: Int): String {
+            if (n0 == 0) return "0"
+            var n = n0
+            val chars = "0123456789abcdefghijklmnopqrstuvwxyz"
+            val sb = StringBuilder()
+            while (n > 0) {
+                sb.append(chars[n % 36])
+                n /= 36
+            }
+            return sb.reverse().toString()
+        }
+
+        fun parseJsStringAt(text: String, idxInit: Int): Pair<String?, Int> {
+            var idx = idxInit
+            if (idx >= text.length) return Pair(null, idx)
+            val quote = text[idx]
+            if (quote != '"' && quote != '\'') return Pair(null, idx)
+            idx += 1
+            val out = StringBuilder()
+            while (idx < text.length) {
+                val ch = text[idx]
+                if (ch == '\\') {
+                    if (idx + 1 < text.length) {
+                        out.append(text.substring(idx, idx + 2))
+                        idx += 2
+                    } else { idx++ }
+                } else if (ch == quote) {
+                    return Pair(jsStringUnescape(out.toString()), idx + 1)
+                } else {
+                    out.append(ch)
+                    idx++
                 }
             }
-            val formAction = watchForm?.attr("action") ?: run {
-                Log.e(TAG, "loadLinks: no watch form"); return false
-            }
-            val formData = (watchForm?.select("input[type=hidden]")
-                ?.associate { it.attr("name") to it.attr("value") } ?: emptyMap()).toMutableMap()
-            val watchBtn = soup0.selectFirst("button.single-watch-btn")
-            if (watchBtn != null && watchBtn.attr("name").isNotBlank())
-                formData[watchBtn.attr("name")] = watchBtn.attr("value")
-            Log.d(TAG, "loadLinks STEP1: POST $formAction fields=${formData.size}")
+            return Pair(null, idx)
+        }
 
-            // الخطوة 1: POST → صفحة myUrl + myInput
-            val r1 = app.post(formAction, data = formData, referer = data, headers = headers)
+        fun findMatchingBrace(text: String, startIdx: Int): Int {
+            if (startIdx < 0 || startIdx >= text.length || text[startIdx] != '{') return -1
+            var depth = 0
+            var i = startIdx
+            while (i < text.length) {
+                val ch = text[i]
+                if (ch == '{') depth++
+                else if (ch == '}') {
+                    depth--
+                    if (depth == 0) return i
+                }
+                i++
+            }
+            return -1
+        }
+
+        fun unpackPackerFromEval(evalText: String): Pair<String?, String?> {
+            try {
+                val startFn = evalText.indexOf("function(p,a,c,k,e,d)")
+                if (startFn == -1) return Pair(null, "no function signature")
+                val braceOpen = evalText.indexOf('{', startFn)
+                if (braceOpen == -1) return Pair(null, "no opening brace")
+                val braceClose = findMatchingBrace(evalText, braceOpen)
+                if (braceClose == -1) return Pair(null, "no matching brace")
+                val argsStart = evalText.indexOf('(', braceClose)
+                if (argsStart == -1) return Pair(null, "no args start")
+                var i = argsStart + 1
+                while (i < evalText.length && evalText[i].isWhitespace()) i++
+                val (pVal, newI) = parseJsStringAt(evalText, i); i = newI
+                if (pVal == null) return Pair(null, "cannot parse p string")
+                while (i < evalText.length && (evalText[i].isWhitespace() || evalText[i] == ',')) i++
+                val aMatch = Regex("""\d+""").find(evalText.substring(i))
+                if (aMatch == null) return Pair(null, "cannot parse a")
+                val aVal = aMatch.value.toInt()
+                i += aMatch.range.last + 1
+                while (i < evalText.length && (evalText[i].isWhitespace() || evalText[i] == ',')) i++
+                val cMatch = Regex("""\d+""").find(evalText.substring(i))
+                if (cMatch == null) return Pair(null, "cannot parse c")
+                val cVal = cMatch.value.toInt()
+                i += cMatch.range.last + 1
+                while (i < evalText.length && (evalText[i].isWhitespace() || evalText[i] == ',')) i++
+                val kList = mutableListOf<String>()
+                if (i < evalText.length && (evalText[i] == '"' || evalText[i] == '\'')) {
+                    val (kStr, i2) = parseJsStringAt(evalText, i)
+                    i = i2
+                    if (kStr != null) { kList.addAll(kStr.split("|")) }
+                } else {
+                    val m2 = Regex("""(['"])(.*?)\1\s*\.split\s*\(\s*['"]\|['"]\s*\)""", RegexOption.DOT_MATCHES_ALL).find(evalText)
+                    if (m2 != null) { kList.addAll(m2.groupValues[2].split("|")) }
+                }
+                var p = pVal
+                for (idx in cVal - 1 downTo 0) {
+                    val key = intToBase36(idx)
+                    if (idx < kList.size && kList[idx].isNotEmpty()) {
+                        p = Regex("\\b" + Regex.escape(key) + "\\b").replace(p ?: "") { kList[idx] }
+                    }
+                }
+                return Pair(p, null)
+            } catch (e: Exception) {
+                return Pair(null, "exception:${e.message}")
+            }
+        }
+
+        fun analyzeAndSaveEvalScripts(htmlText: String): List<String> {
+            try {
+                val doc = org.jsoup.Jsoup.parse(htmlText)
+                val scripts = doc.select("script")
+                val found = mutableListOf<String>()
+                for (s in scripts) {
+                    val content = s.data().ifBlank { s.html() }
+                    if (content.contains("eval(")) {
+                        val m = Regex("""eval\s*\(\s*function\s*\(\s*p\s*,\s*a\s*,\s*c\s*,\s*k\s*,\s*e\s*,\s*d\s*\)\s*\{""").find(content)
+                        if (m != null) {
+                            val start = m.range.first
+                            val sample = if (content.length > start + 10000) content.substring(start, start + 10000) else content.substring(start)
+                            val (unpacked, _) = unpackPackerFromEval(sample)
+                            if (unpacked != null) {
+                                val mediaRegex = Regex("""(https?://[^\s"']+\.(?:m3u8|mp4|webm|mov)[^\s"']*)""", RegexOption.IGNORE_CASE)
+                                mediaRegex.findAll(unpacked).forEach { found.add(it.groupValues[1]) }
+                            }
+                        }
+                    }
+                }
+                return found
+            } catch (e: Exception) {
+                Log.e("ThreeSk", "analyzeAndSaveEvalScripts error", e)
+                return emptyList()
+            }
+        }
+
+        fun getAllIframeSrcs(doc: org.jsoup.nodes.Document): List<String> {
+            return doc.select("iframe").mapNotNull { it.attr("src").ifBlank { null } }
+        }
+
+        suspend fun processSingleEmbedServer(
+            embedUrl: String,
+            refererFromPrevPage: String,
+            headersBase: Map<String, String>,
+            serverLabel: String = "unknown"
+        ): Set<String> {
+            val result = mutableSetOf<String>()
+            try {
+                val hdrs = headersBase.toMutableMap()
+                hdrs["Referer"] = refererFromPrevPage
+                val rIf1 = try {
+                    app.get(embedUrl, referer = refererFromPrevPage, headers = hdrs)
+                } catch (e: Exception) {
+                    Log.w("ThreeSk", "GET embed $embedUrl failed", e)
+                    return result
+                }
+                val text1 = rIf1.text
+
+                Regex("""(https?://[^\s"']+\.(?:m3u8|mp4|webm|mov)[^\s"']*)""", RegexOption.IGNORE_CASE)
+                    .findAll(text1).forEach { result.add(it.groupValues[1]) }
+
+                analyzeAndSaveEvalScripts(text1).forEach { result.add(it) }
+
+                val docIf1 = rIf1.document
+                val iframe1Srcs = getAllIframeSrcs(docIf1)
+                if (iframe1Srcs.isNotEmpty()) {
+                    val iframe2Src = iframe1Srcs[0]
+                    val hdrs2 = hdrs.toMutableMap()
+                    hdrs2["Referer"] = embedUrl
+                    val rFinal = try {
+                        app.get(iframe2Src, referer = embedUrl, headers = hdrs2)
+                    } catch (e: Exception) { null }
+                    if (rFinal != null) {
+                        val t = rFinal.text
+                        Regex("""(https?://[^\s"']+\.(?:m3u8|mp4|webm|mov)[^\s"']*)""", RegexOption.IGNORE_CASE)
+                            .findAll(t).forEach { result.add(it.groupValues[1]) }
+                        analyzeAndSaveEvalScripts(t).forEach { result.add(it) }
+                    }
+                }
+            } catch (e: Exception) {
+                Log.e("ThreeSk", "processSingleEmbedServer exception", e)
+            }
+            return result
+        }
+
+        try {
+            val headers = mapOf(
+                "User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+            )
+
+            val r0 = app.get(data, headers = headers)
+            val soup0 = r0.document
+
+            var watchForm = soup0.selectFirst("button.single-watch-btn")?.parent()
+            if (watchForm == null) {
+                for (f in soup0.select("form")) {
+                    val act = f.attr("action")
+                    if (act.contains("3isk") || act.contains("aa.3isk") || act.contains("watch")) {
+                        watchForm = f
+                        break
+                    }
+                }
+            }
+            if (watchForm == null) {
+                Log.e("ThreeSk", "No watch form found")
+                return false
+            }
+
+            val firstPostUrl = watchForm.attr("action")
+            val firstFormData = watchForm.select("input[type=hidden]")
+                .associate { it.attr("name") to it.attr("value") }.toMutableMap()
+
+            val watchBtn = soup0.selectFirst("button.single-watch-btn")
+            if (watchBtn != null) {
+                val btnName = watchBtn.attr("name")
+                if (btnName.isNotBlank()) firstFormData[btnName] = watchBtn.attr("value")
+            }
+
+            val r1 = app.post(firstPostUrl, data = firstFormData, referer = data, headers = headers)
             val mMyurl = Regex("""var\s+myUrl\s*=\s*["']([^"']+)["']""").find(r1.text)
             val mNews = Regex("""myInput\.value\s*=\s*["']([^"']+)["']""").find(r1.text)
             if (mMyurl == null || mNews == null) {
-                Log.e(TAG, "loadLinks: myUrl/myInput not found, len=${r1.text.length}")
+                Log.e("ThreeSk", "Failed to extract myUrl or news from POST1")
                 return false
             }
+
             val nextPost = mMyurl.groupValues[1]
             val newsVal = mNews.groupValues[1]
-            Log.d(TAG, "loadLinks STEP2: POST $nextPost")
 
-            // الخطوة 2: POST → صفحة الـ embed (iframe ukrcdn بداخلها)
-            val r2 = app.post(
-                nextPost,
-                data = mapOf("news" to newsVal, "u" to "", "submit" to "submit"),
-                referer = r1.url,
-                headers = headers
-            )
-            val iframesOnR2 = r2.document.select("iframe").mapNotNull { it.attr("src").ifBlank { null } }
-            if (iframesOnR2.isEmpty()) {
-                Log.e(TAG, "loadLinks: no iframe after POST2 (len=${r2.text.length})")
-                // fallback: embed عبر WordPress بحيث يجلب الموقع الرسمي - out
+            val r2 = app.post(nextPost, data = mapOf("news" to newsVal, "u" to "", "submit" to "submit"), referer = r1.url, headers = headers)
+            val soup2 = r2.document
+            val iframeSrcsOnR2 = getAllIframeSrcs(soup2)
+            if (iframeSrcsOnR2.isEmpty()) {
+                Log.e("ThreeSk", "No iframe found on page after POST2")
                 return false
             }
-            val baseIframe = iframesOnR2[0]
-            Log.d(TAG, "loadLinks STEP3: base iframe=$baseIframe")
 
-            // الحصول على postId/type من الـ embed للاستكشاف عبر embed/1..N
-            val embedM = Regex("""(?:https?://[\w.-]+)?/embed/(\d+)/(\d+)/(\d+)/""").find(baseIframe)
-            val postId = embedM?.groupValues?.get(2)
-            val typeId = embedM?.groupValues?.get(3)
-            val trailing = embedM?.groupValues?.get(3)
-                ?.let { "/$it/" }
+            val baseIframeSrc = iframeSrcsOnR2[0]
+            val foundAllMediaLinks = mutableMapOf<String, MutableSet<String>>()
 
-            var emitted = 0
-            val seenHost = mutableSetOf<String>()
-            val serversToProbe = if (postId != null && typeId != null) 1..8 else 1..1
-            for (t in serversToProbe) {
-                val embedUrl = if (postId != null && typeId != null) {
-                    "$mainUrl/embed/$t/$postId/$typeId/"
-                } else {
-                    baseIframe
+            val embedMatch = Regex("""(https://3iskk\.xyz/embed/)(\d+)/(.*)""").find(baseIframeSrc)
+            if (embedMatch != null) {
+                val baseUrlPrefix = embedMatch.groupValues[1]
+                val trailingPart = embedMatch.groupValues[3]
+                for (serverNum in 1..5) {
+                    val currentEmbedUrl = "$baseUrlPrefix$serverNum/$trailingPart"
+                    val mediaLinks = processSingleEmbedServer(currentEmbedUrl, r2.url, headers, serverLabel = serverNum.toString())
+                    if (mediaLinks.isNotEmpty()) {
+                        mediaLinks.forEach { link ->
+                            foundAllMediaLinks.getOrPut(link) { mutableSetOf() }.add(serverNum.toString())
+                        }
+                    }
                 }
-                try {
-                    // referer الموسّع = صفحة الـ r2 التي أنتجتها
-                    val embedDoc = app.get(embedUrl, referer = r2.url, headers = headers).document
-                    val embedHtml = embedDoc.html()
-                    val playerUrl = embedDoc.selectFirst("iframe")?.attr("src")
-                        ?: Regex("""(?:data-src|src)\s*=\s*["']([^"']+)["']""").find(embedHtml)
-                            ?.groupValues?.get(1)
-
-                    // صفحة الـ embed قد تعيد only cf challenge (src فارغ) — سجل القطعة
-                    if (playerUrl.isNullOrBlank()) {
-                        Log.d(TAG, "loadLinks server $t: no iframe src (len=${embedHtml.length})")
-                        continue
+            } else {
+                val mediaLinks = processSingleEmbedServer(baseIframeSrc, r2.url, headers, serverLabel = "base")
+                if (mediaLinks.isNotEmpty()) {
+                    mediaLinks.forEach {
+                        foundAllMediaLinks.getOrPut(it) { mutableSetOf() }.add("base")
                     }
-                    val host = try { java.net.URL(playerUrl).host } catch (_: Exception) { continue }
-                    if (host.isBlank() || !seenHost.add(host)) continue
-
-                    Log.d(TAG, "loadLinks server $t: host=$host url=$playerUrl")
-
-                    when {
-                        host.contains("ukrcdn") -> {
-                            emitted += resolveUkrcdn(playerUrl, r2.url, callback)
-                        }
-                        else -> {
-                            // غير ukrcdn: جرّب فتح صفحة الـ target نفسها مع referer وابحث عن m3u8
-                            var m3u8Url: String? = Regex("""https?://[^"'\s]+\.m3u8[^"'\s]*""").find(embedHtml)
-                                ?.groupValues?.get(0)
-                            if (m3u8Url == null && (host.contains("miravd") || host.contains("mwdy"))) {
-                                try {
-                                    val targetDoc = app.get(playerUrl, referer = embedUrl, headers = headers)
-                                    m3u8Url = Regex("""https?://[^"'\s]+\.m3u8[^"'\s]*""")
-                                        .find(targetDoc.text)?.groupValues?.get(0)
-                                    Log.d(TAG, "loadLinks server $t: target($host) m3u8=${m3u8Url?.take(80)}")
-                                } catch (e: Exception) {
-                                    Log.w(TAG, "loadLinks server $t: open target($host) failed: ${e.message}")
-                                }
-                            }
-                            if (m3u8Url != null) {
-                                callback(newExtractorLink(
-                                    name,
-                                    "سيرفر ${seenHost.size}",
-                                    m3u8Url,
-                                    ExtractorLinkType.M3U8
-                                ) {
-                                    this.referer = host
-                                    this.quality = -1
-                                    this.headers = mapOf("User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
-                                })
-                                emitted++
-                            } else {
-                                callback(newExtractorLink(
-                                    name,
-                                    "سيرفر ${seenHost.size} (embed)",
-                                    playerUrl,
-                                    ExtractorLinkType.VIDEO
-                                ) {
-                                    this.referer = host
-                                    this.quality = -1
-                                    this.headers = mapOf(
-                                        "User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-                                        "Referer" to host,
-                                        "Accept" to "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
-                                    )
-                                })
-                                emitted++
-                            }
-                        }
-                    }
-                } catch (e: Exception) {
-                    Log.w(TAG, "loadLinks server $t failed: ${e.message}")
                 }
             }
-            Log.d(TAG, "loadLinks: emitted $emitted links")
-            emitted > 0
+
+            if (foundAllMediaLinks.isEmpty()) {
+                Log.e("ThreeSk", "No media links were extracted")
+                return false
+            }
+
+            for ((link, servers) in foundAllMediaLinks) {
+                callback.invoke(
+                    newExtractorLink(
+                        source = this.name,
+                        name = "${this.name} - سيرفر ${servers.joinToString(",")}",
+                        url = link,
+                        type = ExtractorLinkType.M3U8
+                    ) {
+                        this.quality = Qualities.Unknown.value
+                    }
+                )
+            }
+            return true
+
         } catch (e: Exception) {
-            Log.e(TAG, "loadLinks EXCEPTION: ${e.message}", e)
-            false
-        }
-    }
-
-    // ═════════════════════════════════════════════════════════════════════════
-    //  ukrcdn resolver — يحول رابط ukrcdn إلى m3u8 مباشر
-    // ═════════════════════════════════════════════════════════════════════════
-    private suspend fun resolveUkrcdn(
-        embedUrl: String,
-        refererFromPrev: String,
-        callback: (ExtractorLink) -> Unit
-    ): Int {
-        return try {
-            val uuid = Regex("""/e/([a-f0-9-]{36})""").find(embedUrl)?.groupValues?.get(1) ?: return 0
-
-            // نقرأ صفحة embed (referer = صفحة الـ r2 التي أنتجتها) لنحصل على التوكين g=
-            val embedResp = app.get(embedUrl, referer = refererFromPrev)
-            val embedHtml = embedResp.text
-            // الـ g token يظهر فقط داخل مسار API: playback?g=timestamp%3Ahex...
-            // (regex واسع مثل g\s*= يلتقط g=document.getElementById أولاً — خطأ)
-            val gToken = Regex("""(?:playback|api/videos)[^"'\s]*[?&]g=([0-9a-zA-Z%._:-]+)""")
-                .find(embedHtml)?.groupValues?.get(1)
-                ?: return 0
-            Log.d(TAG, "resolveUkrcdn g=$gToken")
-
-            val apiUrl = "https://ukrcdn.club/api/videos/$uuid/playback?g=$gToken"
-            val apiResp = app.get(apiUrl, referer = "https://ukrcdn.club/").text
-            // {"url":"https:\/\/s4.ukrcdn.xyz\/hls\/{uuid}\/master.m3u8?token=...&expires=..."}
-            val videoUrl = Regex(""""url"\s*:\s*"((?:[^"\\]|\\.)+)"""").find(apiResp)
-                ?.groupValues?.get(1)?.replace("\\/", "/") ?: return 0
-
-            if (videoUrl.isBlank()) return 0
-            Log.d(TAG, "resolveUkrcdn: $videoUrl")
-            callback(newExtractorLink(
-                name,
-                "ukrcdn (مباشر)",
-                videoUrl,
-                ExtractorLinkType.M3U8
-            ) {
-                this.referer = "https://ukrcdn.club/"
-                this.quality = -1
-                this.headers = mapOf("User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
-            })
-            1
-        } catch (e: Exception) {
-            Log.w(TAG, "resolveUkrcdn failed: ${e.message}")
-            0
+            Log.e("ThreeSk", "Unexpected error in loadLinks", e)
+            return false
         }
     }
 }

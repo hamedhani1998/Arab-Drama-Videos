@@ -1,6 +1,6 @@
 {
-  "name": "Arab Drama Sources",
-  "description": "مصادر الدراما العربية - إضافات Cloudstream",
+  "name": "arab-videos عربي",
+  "description": "مشاهدة الافلام والمسلسلات العربية والتركية",
   "manifestVersion": 1,
   "pluginLists": ["https://raw.githubusercontent.com/hamedhani1998/arab-videos/refs/heads/main/plugins.json"]
 }
