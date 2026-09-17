@@ -6,6 +6,9 @@ import org.jsoup.nodes.Element
 import android.util.Log
 
 class ThreeSk : MainAPI() {
+    companion object {
+        private const val TAG = "ThreeSk"
+    }
     override var mainUrl = "https://3iskk.xyz"
     override var name = "قصة عشق"
     override val supportedTypes = setOf(TvType.TvSeries, TvType.Movie)
@@ -168,122 +171,255 @@ class ThreeSk : MainAPI() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
+        Log.d(TAG, "loadLinks START for: $data")
         val headers = mapOf(
             "User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
         )
 
-        try {
-            val r0 = app.get(data, headers = headers)
-            val soup0 = r0.document
+        fun jsStringUnescape(s: String): String {
+            val regex = Regex("""\\u[0-9a-fA-F]{4}|\\x[0-9a-fA-F]{2}|\\.|\\n|\\r|\\t""")
+            return regex.replace(s) { m ->
+                val esc = m.value
+                try {
+                    when {
+                        esc.startsWith("\\x") -> esc.substring(2).toInt(16).toChar().toString()
+                        esc.startsWith("\\u") -> esc.substring(2).toInt(16).toChar().toString()
+                        esc == "\\n" -> "\n"
+                        esc == "\\r" -> "\r"
+                        esc == "\\t" -> "\t"
+                        esc == "\\'" -> "'"
+                        esc == "\\\"" -> "\""
+                        esc == "\\\\" -> "\\"
+                        else -> if (esc.length >= 2 && esc[0] == '\\') esc.substring(1) else esc
+                    }
+                } catch (_: Exception) { esc }
+            }
+        }
 
-            var embedBaseUrl = soup0.selectFirst("meta[itemprop=embedURL]")?.attr("content")?.ifBlank { null }
+        fun intToBase36Local(n0: Int): String {
+            if (n0 == 0) return "0"
+            var n = n0
+            val chars = "0123456789abcdefghijklmnopqrstuvwxyz"
+            val sb = StringBuilder()
+            while (n > 0) { sb.append(chars[n % 36]); n /= 36 }
+            return sb.reverse().toString()
+        }
 
-            if (embedBaseUrl.isNullOrBlank()) {
-                val watchForm = soup0.selectFirst("form[method=post]")?.let { form ->
-                    val action = form.attr("action")
-                    if (action.contains("3isk") || action.contains("watch")) form else null
+        fun parseJsStringAt(text: String, idxInit: Int): Pair<String?, Int> {
+            var idx = idxInit
+            if (idx >= text.length) return Pair(null, idx)
+            val quote = text[idx]
+            if (quote != '"' && quote != '\'') return Pair(null, idx)
+            idx += 1
+            val out = StringBuilder()
+            while (idx < text.length) {
+                val ch = text[idx]
+                if (ch == '\\') {
+                    if (idx + 1 < text.length) { out.append(text.substring(idx, idx + 2)); idx += 2 }
+                    else idx++
+                } else if (ch == quote) { return Pair(jsStringUnescape(out.toString()), idx + 1) }
+                else { out.append(ch); idx++ }
+            }
+            return Pair(null, idx)
+        }
+
+        fun findMatchingBrace(text: String, startIdx: Int): Int {
+            if (startIdx < 0 || startIdx >= text.length || text[startIdx] != '{') return -1
+            var depth = 0; var i = startIdx
+            while (i < text.length) {
+                val ch = text[i]
+                if (ch == '{') depth++
+                else if (ch == '}') { depth--; if (depth == 0) return i }
+                i++
+            }
+            return -1
+        }
+
+        fun unpackPackerFromEval(evalText: String): String? {
+            try {
+                val startFn = evalText.indexOf("function(p,a,c,k,e,d)")
+                if (startFn == -1) return null
+                val braceOpen = evalText.indexOf('{', startFn)
+                if (braceOpen == -1) return null
+                val braceClose = findMatchingBrace(evalText, braceOpen)
+                if (braceClose == -1) return null
+                val argsStart = evalText.indexOf('(', braceClose)
+                if (argsStart == -1) return null
+                var i = argsStart + 1
+                while (i < evalText.length && evalText[i].isWhitespace()) i++
+                val (pVal, newI) = parseJsStringAt(evalText, i); i = newI
+                if (pVal == null) return null
+                while (i < evalText.length && (evalText[i].isWhitespace() || evalText[i] == ',')) i++
+                val aMatch = Regex("""\d+""").find(evalText.substring(i)) ?: return null
+                val aVal = aMatch.value.toInt()
+                i += aMatch.range.last + 1
+                while (i < evalText.length && (evalText[i].isWhitespace() || evalText[i] == ',')) i++
+                val cMatch = Regex("""\d+""").find(evalText.substring(i)) ?: return null
+                val cVal = cMatch.value.toInt()
+                i += cMatch.range.last + 1
+                while (i < evalText.length && (evalText[i].isWhitespace() || evalText[i] == ',')) i++
+                val kList = mutableListOf<String>()
+                if (i < evalText.length && (evalText[i] == '"' || evalText[i] == '\'')) {
+                    val (kStr, i2) = parseJsStringAt(evalText, i); i = i2
+                    if (kStr != null) kList.addAll(kStr.split("|"))
+                } else {
+                    val m2 = Regex("""(['"])(.*?)\1\s*\.split\s*\(\s*['"]\|['"]\s*\)""", RegexOption.DOT_MATCHES_ALL).find(evalText)
+                    if (m2 != null) kList.addAll(m2.groupValues[2].split("|"))
                 }
-
-                if (watchForm == null) {
-                    Log.e("ThreeSk", "No watch form or embedURL found on $data")
-                    return false
-                }
-
-                val postUrl = watchForm.attr("action")
-                val formData = watchForm.select("input[type=hidden]")
-                    .associateTo(mutableMapOf()) { it.attr("name") to it.attr("value") }
-
-                val watchBtn = soup0.selectFirst("button.single-watch-btn")
-                if (watchBtn != null) {
-                    val btnName = watchBtn.attr("name")
-                    if (btnName.isNotBlank()) formData[btnName] = watchBtn.attr("value").ifBlank { "submit" }
-                }
-
-                val r1 = app.post(postUrl, data = formData, referer = data, headers = headers)
-                val r1Text = r1.text
-                val mMyurl = Regex("""var\s+myUrl\s*=\s*["']([^"']+)["']""").find(r1Text)
-                val mNews = Regex("""myInput\.value\s*=\s*["']([^"']+)["']""").find(r1Text)
-
-                if (mMyurl != null && mNews != null) {
-                    val r2 = app.post(
-                        mMyurl.groupValues[1],
-                        data = mapOf("news" to mNews.groupValues[1], "u" to "", "submit" to "submit"),
-                        referer = r1.url, headers = headers
-                    )
-                    val soup2 = r2.document
-                    val iframeSrc = soup2.selectFirst("iframe[src]")?.attr("src")?.ifBlank { null }
-                        ?: soup2.selectFirst("iframe[data-src]")?.attr("data-src")?.ifBlank { null }
-                    if (iframeSrc != null) {
-                        embedBaseUrl = iframeSrc
+                var p = pVal
+                for (idx in cVal - 1 downTo 0) {
+                    val key = intToBase36Local(idx)
+                    if (idx < kList.size && kList[idx].isNotEmpty()) {
+                        p = Regex("\\b" + Regex.escape(key) + "\\b").replace(p ?: "", kList[idx])
                     }
                 }
-            }
+                return p
+            } catch (_: Exception) { return null }
+        }
 
-            if (embedBaseUrl.isNullOrBlank()) {
-                Log.e("ThreeSk", "Could not find embed URL")
-                return false
-            }
-
-            Log.d("ThreeSk", "Embed base URL: $embedBaseUrl")
-
-            val embedPrefix = mainUrl + "/embed/"
-            val trailingPart = if (embedBaseUrl.startsWith(embedPrefix)) {
-                embedBaseUrl.removePrefix(embedPrefix)
-            } else {
-                null
-            }
-
-            val embedUrls = mutableListOf<String>()
-            if (trailingPart != null) {
-                for (n in 1..10) {
-                    embedUrls.add("$embedPrefix$n/$trailingPart")
-                }
-            } else {
-                embedUrls.add(embedBaseUrl)
-            }
-
-            val foundMediaLinks = mutableSetOf<String>()
-
-            for (embedUrl in embedUrls) {
-                try {
-                    val rEmbed = app.get(embedUrl, referer = data, headers = headers)
-                    val embedText = rEmbed.text
-
-                    Regex("""(https?://[^\s"'<>]+\.(?:m3u8|mp4|webm|mov)[^\s"'<>]*)""", RegexOption.IGNORE_CASE)
-                        .findAll(embedText).forEach { foundMediaLinks.add(it.groupValues[1]) }
-
-                    analyzeAndUnpackScripts(embedText).forEach { foundMediaLinks.add(it) }
-
-                    val embedDoc = rEmbed.document
-                    embedDoc.select("iframe").forEach { innerIframe ->
-                        val innerSrc = innerIframe.attr("src").ifBlank { innerIframe.attr("data-src") }
-                        if (innerSrc.isNotBlank() && innerSrc.startsWith("http")) {
-                            try {
-                                val rInner = app.get(innerSrc, referer = embedUrl, headers = headers)
-                                val innerText = rInner.text
-                                Regex("""(https?://[^\s"'<>]+\.(?:m3u8|mp4|webm|mov)[^\s"'<>]*)""", RegexOption.IGNORE_CASE)
-                                    .findAll(innerText).forEach { foundMediaLinks.add(it.groupValues[1]) }
-                                analyzeAndUnpackScripts(innerText).forEach { foundMediaLinks.add(it) }
-                            } catch (_: Exception) {}
+        fun analyzeAndUnpackScripts(htmlText: String): List<String> {
+            try {
+                val doc = org.jsoup.Jsoup.parse(htmlText)
+                val found = mutableListOf<String>()
+                for (s in doc.select("script")) {
+                    val content = s.data().ifBlank { s.html() }
+                    if (content.contains("eval(")) {
+                        val m = Regex("""eval\s*\(\s*function\s*\(\s*p\s*,\s*a\s*,\s*c\s*,\s*k\s*,\s*e\s*,\s*d\s*\)\s*\{""").find(content)
+                        if (m != null) {
+                            val start = m.range.first
+                            val sample = if (content.length > start + 10000) content.substring(start, start + 10000) else content.substring(start)
+                            val unpacked = unpackPackerFromEval(sample)
+                            if (unpacked != null) {
+                                Regex("""(https?://[^\s"']+\.(?:m3u8|mp4|webm|mov)[^\s"']*)""", RegexOption.IGNORE_CASE)
+                                    .findAll(unpacked).forEach { found.add(it.groupValues[1]) }
+                            }
                         }
                     }
+                }
+                return found
+            } catch (_: Exception) { return emptyList() }
+        }
 
-                    if (foundMediaLinks.isNotEmpty()) break
-                } catch (_: Exception) {}
+        suspend fun processSingleEmbedServer(
+            embedUrl: String,
+            refererFromPrevPage: String,
+            headersBase: Map<String, String>,
+            serverLabel: String = "unknown"
+        ): Set<String> {
+            val result = mutableSetOf<String>()
+            try {
+                val hdrs = headersBase.toMutableMap()
+                hdrs["Referer"] = refererFromPrevPage
+                val rIf1 = try { app.get(embedUrl, referer = refererFromPrevPage, headers = hdrs) }
+                catch (_: Exception) { return result }
+                val text1 = rIf1.text
+
+                Regex("""(https?://[^\s"']+\.(?:m3u8|mp4|webm|mov)[^\s"']*)""", RegexOption.IGNORE_CASE)
+                    .findAll(text1).forEach { result.add(it.groupValues[1]) }
+                analyzeAndUnpackScripts(text1).forEach { result.add(it) }
+
+                val docIf1 = rIf1.document
+                val iframe1Srcs = docIf1.select("iframe").mapNotNull { it.attr("src").ifBlank { null } }
+                if (iframe1Srcs.isNotEmpty()) {
+                    val hdrs2 = hdrs.toMutableMap()
+                    hdrs2["Referer"] = embedUrl
+                    val rFinal = try { app.get(iframe1Srcs[0], referer = embedUrl, headers = hdrs2) }
+                    catch (_: Exception) { null }
+                    if (rFinal != null) {
+                        val t = rFinal.text
+                        Regex("""(https?://[^\s"']+\.(?:m3u8|mp4|webm|mov)[^\s"']*)""", RegexOption.IGNORE_CASE)
+                            .findAll(t).forEach { result.add(it.groupValues[1]) }
+                        analyzeAndUnpackScripts(t).forEach { result.add(it) }
+                    }
+                }
+            } catch (_: Exception) {}
+            return result
+        }
+
+        try {
+            val r0 = try { app.get(data, headers = headers) }
+            catch (_: Exception) { return false }
+
+            val soup0 = r0.document
+            var watchForm: org.jsoup.nodes.Element? = null
+            for (f in soup0.select("form")) {
+                val act = f.attr("action")
+                if (act.contains("3isk") || act.contains("watch")) { watchForm = f; break }
             }
 
-            if (foundMediaLinks.isEmpty()) {
-                Log.e("ThreeSk", "No media links found from any server")
+            if (watchForm == null) {
+                Log.e(TAG, "No watch form found on $data")
                 return false
             }
 
-            for (link in foundMediaLinks) {
+            val firstPostUrl = watchForm.attr("action")
+            val firstFormData = watchForm.select("input[type=hidden]")
+                .associateTo(mutableMapOf()) { it.attr("name") to it.attr("value") }
+
+            val watchBtn = soup0.selectFirst("button.single-watch-btn")
+            if (watchBtn != null) {
+                val btnName = watchBtn.attr("name")
+                if (btnName.isNotBlank()) firstFormData[btnName] = watchBtn.attr("value")
+            }
+
+            val r1 = try { app.post(firstPostUrl, data = firstFormData, referer = data, headers = headers) }
+            catch (_: Exception) { return false }
+
+            val mMyurl = Regex("""var\s+myUrl\s*=\s*["']([^"']+)["']""").find(r1.text)
+            val mNews = Regex("""myInput\.value\s*=\s*["']([^"']+)["']""").find(r1.text)
+            if (mMyurl == null || mNews == null) {
+                Log.e(TAG, "Failed to extract myUrl/news from POST1")
+                return false
+            }
+
+            val nextPost = mMyurl.groupValues[1]
+            val newsVal = mNews.groupValues[1]
+
+            val r2 = try { app.post(nextPost, data = mapOf("news" to newsVal, "u" to "", "submit" to "submit"), referer = r1.url, headers = headers) }
+            catch (_: Exception) { return false }
+
+            val soup2 = r2.document
+            val iframeSrcsOnR2 = soup2.select("iframe").mapNotNull { it.attr("src").ifBlank { null } }
+            if (iframeSrcsOnR2.isEmpty()) {
+                Log.e(TAG, "No iframe found after POST2")
+                return false
+            }
+            val baseIframeSrc = iframeSrcsOnR2[0]
+            Log.d(TAG, "Base iframe src: $baseIframeSrc")
+
+            val foundAllMediaLinks = mutableMapOf<String, MutableSet<String>>()
+            val embedMatch = Regex("""(https?://[^/]+/embed/)(\d+)/(.*)""").find(baseIframeSrc)
+            if (embedMatch != null) {
+                val baseUrlPrefix = embedMatch.groupValues[1]
+                val trailingPart = embedMatch.groupValues[3]
+                for (serverNum in 1..5) {
+                    val currentEmbedUrl = "$baseUrlPrefix$serverNum/$trailingPart"
+                    val mediaLinks = processSingleEmbedServer(currentEmbedUrl, r2.url, headers, serverNum.toString())
+                    if (mediaLinks.isNotEmpty()) {
+                        mediaLinks.forEach { link ->
+                            foundAllMediaLinks.getOrPut(link) { mutableSetOf() }.add(serverNum.toString())
+                        }
+                    }
+                }
+            } else {
+                val mediaLinks = processSingleEmbedServer(baseIframeSrc, r2.url, headers, "base")
+                if (mediaLinks.isNotEmpty()) {
+                    mediaLinks.forEach { foundAllMediaLinks.getOrPut(it) { mutableSetOf() }.add("base") }
+                }
+            }
+
+            if (foundAllMediaLinks.isEmpty()) {
+                Log.e(TAG, "No media links found")
+                return false
+            }
+
+            for ((link, _) in foundAllMediaLinks) {
                 callback.invoke(
                     newExtractorLink(
                         source = this.name,
                         name = this.name,
                         url = link,
-                        type = if (link.contains(".m3u8")) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
+                        type = ExtractorLinkType.M3U8
                     ) {
                         this.quality = Qualities.Unknown.value
                     }
@@ -292,133 +428,8 @@ class ThreeSk : MainAPI() {
             return true
 
         } catch (e: Exception) {
-            Log.e("ThreeSk", "loadLinks error", e)
+            Log.e(TAG, "loadLinks error", e)
             return false
         }
-    }
-
-    private fun analyzeAndUnpackScripts(htmlText: String): List<String> {
-        val result = mutableListOf<String>()
-        try {
-            val doc = org.jsoup.Jsoup.parse(htmlText)
-            for (script in doc.select("script")) {
-                val content = script.data().ifBlank { script.html() }
-
-                Regex("""(https?://[^\s"'<>]+\.(?:m3u8|mp4|webm|mov)[^\s"'<>]*)""", RegexOption.IGNORE_CASE)
-                    .findAll(content).forEach { result.add(it.groupValues[1]) }
-
-                if (content.contains("eval(")) {
-                    try {
-                        val unpacked = unpackPacker(content)
-                        if (unpacked != null) {
-                            Regex("""(https?://[^\s"'<>]+\.(?:m3u8|mp4|webm|mov)[^\s"'<>]*)""", RegexOption.IGNORE_CASE)
-                                .findAll(unpacked).forEach { result.add(it.groupValues[1]) }
-                        }
-                    } catch (_: Exception) {}
-                }
-            }
-        } catch (_: Exception) {}
-        return result
-    }
-
-    private fun unpackPacker(script: String): String? {
-        try {
-            val packerMatch = Regex("""eval\s*\(\s*function\s*\(\s*p\s*,\s*a\s*,\s*c\s*,\s*k\s*,\s*e\s*,\s*d\s*\)""").find(script) ?: return null
-            val start = packerMatch.range.first
-
-            var braceCount = 0
-            var fnStart = -1
-            for (i in start until script.length) {
-                if (script[i] == '{') {
-                    if (fnStart == -1) fnStart = i
-                    braceCount++
-                } else if (script[i] == '}') {
-                    braceCount--
-                    if (braceCount == 0) {
-                        val body = script.substring(fnStart + 1, i)
-
-                        val pMatch = Regex("""function\s*\(\s*p\s*,\s*a\s*,\s*c\s*,\s*k\s*,\s*e\s*,\s*d\s*\)\s*\{[^}]*return\s+p""").find(script.substring(start, i + 200))
-
-                        val pStart = script.indexOf("function(p,a,c,k,e,d)", start)
-                        if (pStart == -1) return null
-
-                        val argsStart = script.indexOf('(', pStart + "function(p,a,c,k,e,d)".length)
-                        if (argsStart == -1) return null
-
-                        val argsEnd = script.indexOf(");", argsStart)
-                        if (argsEnd == -1) return null
-
-                        val args = script.substring(argsStart + 1, argsEnd)
-
-                        var inStr = false
-                        var strChar = ' '
-                        var currentArg = StringBuilder()
-                        val argList = mutableListOf<String>()
-                        var escaped = false
-
-                        for (ch in args) {
-                            if (escaped) {
-                                currentArg.append(ch)
-                                escaped = false
-                                continue
-                            }
-                            if (ch == '\\') {
-                                escaped = true
-                                currentArg.append(ch)
-                                continue
-                            }
-                            if (!inStr && (ch == '"' || ch == '\'')) {
-                                inStr = true
-                                strChar = ch
-                                continue
-                            }
-                            if (inStr && ch == strChar) {
-                                inStr = false
-                                continue
-                            }
-                            if (!inStr && ch == ',') {
-                                argList.add(currentArg.toString())
-                                currentArg = StringBuilder()
-                                continue
-                            }
-                            if (!inStr && ch == ' ') continue
-                            currentArg.append(ch)
-                        }
-                        if (currentArg.isNotEmpty()) argList.add(currentArg.toString())
-
-                        if (argList.size < 3) return null
-
-                        val p = argList[0].trim('"', '\'')
-                        val a = argList[1].toIntOrNull() ?: return null
-                        val c = argList[2].toIntOrNull() ?: return null
-                        val kStr = if (argList.size > 3) argList[3].trim('"', '\'') else ""
-
-                        val k = kStr.split("|")
-
-                        var result = p
-                        for (idx in c - 1 downTo 0) {
-                            if (idx < k.size && k[idx].isNotEmpty()) {
-                                val base36Key = intToBase36(idx)
-                                result = result.replace(Regex("\\b${Regex.escape(base36Key)}\\b"), k[idx])
-                            }
-                        }
-                        return result
-                    }
-                }
-            }
-        } catch (_: Exception) {}
-        return null
-    }
-
-    private fun intToBase36(n: Int): String {
-        if (n == 0) return "0"
-        var num = n
-        val chars = "0123456789abcdefghijklmnopqrstuvwxyz"
-        val sb = StringBuilder()
-        while (num > 0) {
-            sb.append(chars[num % 36])
-            num /= 36
-        }
-        return sb.reverse().toString()
     }
 }
