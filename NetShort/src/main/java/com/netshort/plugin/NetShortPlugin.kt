@@ -2,10 +2,11 @@ package com.netshort.plugin
 
 import com.lagradost.cloudstream3.plugins.CloudstreamPlugin
 import com.lagradost.cloudstream3.plugins.Plugin
+import android.content.Context
 
 @CloudstreamPlugin
 class NetShortPlugin : Plugin() {
-    override fun load() {
+    override fun load(context: Context) {
         registerMainAPI(NetShortProvider())
     }
 }
