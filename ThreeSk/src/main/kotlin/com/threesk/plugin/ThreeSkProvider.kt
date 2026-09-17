@@ -169,135 +169,127 @@ class ThreeSk : MainAPI() {
         callback: (ExtractorLink) -> Unit
     ): Boolean {
         val headers = mapOf(
-            "User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
-            "Referer" to "$mainUrl/"
+            "User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
         )
 
         try {
             val r0 = app.get(data, headers = headers)
             val soup0 = r0.document
 
-            val watchForm = soup0.selectFirst("form[method=post]")?.let { form ->
-                val action = form.attr("action")
-                if (action.contains("3isk") || action.contains("watch")) form else null
+            var embedBaseUrl = soup0.selectFirst("meta[itemprop=embedURL]")?.attr("content")?.ifBlank { null }
+
+            if (embedBaseUrl.isNullOrBlank()) {
+                val watchForm = soup0.selectFirst("form[method=post]")?.let { form ->
+                    val action = form.attr("action")
+                    if (action.contains("3isk") || action.contains("watch")) form else null
+                }
+
+                if (watchForm == null) {
+                    Log.e("ThreeSk", "No watch form or embedURL found on $data")
+                    return false
+                }
+
+                val postUrl = watchForm.attr("action")
+                val formData = watchForm.select("input[type=hidden]")
+                    .associateTo(mutableMapOf()) { it.attr("name") to it.attr("value") }
+
+                val watchBtn = soup0.selectFirst("button.single-watch-btn")
+                if (watchBtn != null) {
+                    val btnName = watchBtn.attr("name")
+                    if (btnName.isNotBlank()) formData[btnName] = watchBtn.attr("value").ifBlank { "submit" }
+                }
+
+                val r1 = app.post(postUrl, data = formData, referer = data, headers = headers)
+                val r1Text = r1.text
+                val mMyurl = Regex("""var\s+myUrl\s*=\s*["']([^"']+)["']""").find(r1Text)
+                val mNews = Regex("""myInput\.value\s*=\s*["']([^"']+)["']""").find(r1Text)
+
+                if (mMyurl != null && mNews != null) {
+                    val r2 = app.post(
+                        mMyurl.groupValues[1],
+                        data = mapOf("news" to mNews.groupValues[1], "u" to "", "submit" to "submit"),
+                        referer = r1.url, headers = headers
+                    )
+                    val soup2 = r2.document
+                    val iframeSrc = soup2.selectFirst("iframe[src]")?.attr("src")?.ifBlank { null }
+                        ?: soup2.selectFirst("iframe[data-src]")?.attr("data-src")?.ifBlank { null }
+                    if (iframeSrc != null) {
+                        embedBaseUrl = iframeSrc
+                    }
+                }
             }
 
-            if (watchForm == null) {
-                Log.e("ThreeSk", "No watch form found on $data")
+            if (embedBaseUrl.isNullOrBlank()) {
+                Log.e("ThreeSk", "Could not find embed URL")
                 return false
             }
 
-            val postUrl = watchForm.attr("action")
-            val formData = watchForm.select("input[type=hidden]")
-                .associateTo(mutableMapOf()) { it.attr("name") to it.attr("value") }
+            Log.d("ThreeSk", "Embed base URL: $embedBaseUrl")
 
-            val watchBtn = soup0.selectFirst("button.single-watch-btn")
-            if (watchBtn != null) {
-                val btnName = watchBtn.attr("name")
-                if (btnName.isNotBlank()) formData[btnName] = watchBtn.attr("value").ifBlank { "submit" }
+            val embedPrefix = mainUrl + "/embed/"
+            val trailingPart = if (embedBaseUrl.startsWith(embedPrefix)) {
+                embedBaseUrl.removePrefix(embedPrefix)
+            } else {
+                null
             }
 
-            val r1 = app.post(postUrl, data = formData, referer = data, headers = headers)
-
-            val r1Text = r1.text
-            val mMyurl = Regex("""var\s+myUrl\s*=\s*["']([^"']+)["']""").find(r1Text)
-            val mNews = Regex("""myInput\.value\s*=\s*["']([^"']+)["']""").find(r1Text)
-
-            if (mMyurl != null && mNews != null) {
-                val nextPost = mMyurl.groupValues[1]
-                val newsVal = mNews.groupValues[1]
-
-                val r2 = app.post(nextPost, data = mapOf("news" to newsVal, "u" to "", "submit" to "submit"), referer = r1.url, headers = headers)
-                val soup2 = r2.document
-
-                val embedHost = "https://3iskk.xyz"
-                val embedUrls = mutableListOf<String>()
-
-                soup2.select("iframe").forEach { iframe ->
-                    val src = iframe.attr("src").ifBlank { iframe.attr("data-src") }
-                    if (src.isNotBlank()) {
-                        embedUrls.add(src)
-                    }
+            val embedUrls = mutableListOf<String>()
+            if (trailingPart != null) {
+                for (n in 1..10) {
+                    embedUrls.add("$embedPrefix$n/$trailingPart")
                 }
-
-                if (embedUrls.isEmpty()) {
-                    Log.e("ThreeSk", "No iframes found after POST2")
-                    return false
-                }
-
-                val foundMediaLinks = mutableSetOf<String>()
-
-                for (embedUrl in embedUrls) {
-                    val serverNums = mutableListOf<Int>()
-
-                    val embedMatch = Regex("""(\d+)/(.+)""").find(embedUrl)
-                    if (embedMatch != null) {
-                        for (n in 1..10) serverNums.add(n)
-                    } else {
-                        serverNums.add(0)
-                    }
-
-                    for (num in serverNums) {
-                        val currentUrl = if (num == 0) {
-                            embedUrl
-                        } else if (embedMatch != null) {
-                            "$embedHost/embed/$num/${embedMatch.groupValues[2]}"
-                        } else {
-                            embedUrl
-                        }
-
-                        try {
-                            val hdrs = headers.toMutableMap()
-                            hdrs["Referer"] = r2.url
-                            val rEmbed = app.get(currentUrl, referer = r2.url, headers = hdrs)
-                            val embedText = rEmbed.text
-
-                            Regex("""(https?://[^\s"'<>]+\.(?:m3u8|mp4|webm|mov)[^\s"'<>]*)""", RegexOption.IGNORE_CASE)
-                                .findAll(embedText).forEach { foundMediaLinks.add(it.groupValues[1]) }
-
-                            analyzeAndUnpackScripts(embedText).forEach { foundMediaLinks.add(it) }
-
-                            val embedDoc = rEmbed.document
-                            embedDoc.select("iframe").forEach { innerIframe ->
-                                val innerSrc = innerIframe.attr("src").ifBlank { innerIframe.attr("data-src") }
-                                if (innerSrc.isNotBlank() && innerSrc.startsWith("http")) {
-                                    try {
-                                        val hdrsInner = headers.toMutableMap()
-                                        hdrsInner["Referer"] = currentUrl
-                                        val rInner = app.get(innerSrc, referer = currentUrl, headers = hdrsInner)
-                                        val innerText = rInner.text
-                                        Regex("""(https?://[^\s"'<>]+\.(?:m3u8|mp4|webm|mov)[^\s"'<>]*)""", RegexOption.IGNORE_CASE)
-                                            .findAll(innerText).forEach { foundMediaLinks.add(it.groupValues[1]) }
-                                        analyzeAndUnpackScripts(innerText).forEach { foundMediaLinks.add(it) }
-                                    } catch (_: Exception) {}
-                                }
-                            }
-                        } catch (_: Exception) {}
-                    }
-                }
-
-                if (foundMediaLinks.isEmpty()) {
-                    Log.e("ThreeSk", "No media links found")
-                    return false
-                }
-
-                for (link in foundMediaLinks) {
-                    callback.invoke(
-                        newExtractorLink(
-                            source = this.name,
-                            name = this.name,
-                            url = link,
-                            type = if (link.contains(".m3u8")) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
-                        ) {
-                            this.quality = Qualities.Unknown.value
-                        }
-                    )
-                }
-                return true
+            } else {
+                embedUrls.add(embedBaseUrl)
             }
 
-            Log.e("ThreeSk", "Failed to extract myUrl/news from POST response")
-            return false
+            val foundMediaLinks = mutableSetOf<String>()
+
+            for (embedUrl in embedUrls) {
+                try {
+                    val rEmbed = app.get(embedUrl, referer = data, headers = headers)
+                    val embedText = rEmbed.text
+
+                    Regex("""(https?://[^\s"'<>]+\.(?:m3u8|mp4|webm|mov)[^\s"'<>]*)""", RegexOption.IGNORE_CASE)
+                        .findAll(embedText).forEach { foundMediaLinks.add(it.groupValues[1]) }
+
+                    analyzeAndUnpackScripts(embedText).forEach { foundMediaLinks.add(it) }
+
+                    val embedDoc = rEmbed.document
+                    embedDoc.select("iframe").forEach { innerIframe ->
+                        val innerSrc = innerIframe.attr("src").ifBlank { innerIframe.attr("data-src") }
+                        if (innerSrc.isNotBlank() && innerSrc.startsWith("http")) {
+                            try {
+                                val rInner = app.get(innerSrc, referer = embedUrl, headers = headers)
+                                val innerText = rInner.text
+                                Regex("""(https?://[^\s"'<>]+\.(?:m3u8|mp4|webm|mov)[^\s"'<>]*)""", RegexOption.IGNORE_CASE)
+                                    .findAll(innerText).forEach { foundMediaLinks.add(it.groupValues[1]) }
+                                analyzeAndUnpackScripts(innerText).forEach { foundMediaLinks.add(it) }
+                            } catch (_: Exception) {}
+                        }
+                    }
+
+                    if (foundMediaLinks.isNotEmpty()) break
+                } catch (_: Exception) {}
+            }
+
+            if (foundMediaLinks.isEmpty()) {
+                Log.e("ThreeSk", "No media links found from any server")
+                return false
+            }
+
+            for (link in foundMediaLinks) {
+                callback.invoke(
+                    newExtractorLink(
+                        source = this.name,
+                        name = this.name,
+                        url = link,
+                        type = if (link.contains(".m3u8")) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
+                    ) {
+                        this.quality = Qualities.Unknown.value
+                    }
+                )
+            }
+            return true
 
         } catch (e: Exception) {
             Log.e("ThreeSk", "loadLinks error", e)
