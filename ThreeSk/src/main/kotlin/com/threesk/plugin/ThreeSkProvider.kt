@@ -98,6 +98,8 @@ class ThreeSk : MainAPI() {
     }
 
     override suspend fun load(url: String): LoadResponse? {
+        // Episodes are served from /watch/episodes/... and carry their own player;
+        // series pages live at /watch/tvshows/... . Both are real loadable URLs.
         if (url.contains("/episodes/") || url.contains("/watch/episodes/")) {
             val episodePage = app.get(url).document
             val seriesUrl = episodePage.selectFirst("a.single-serie-btn")?.attr("href")
@@ -115,7 +117,8 @@ class ThreeSk : MainAPI() {
         val poster = document.selectFirst("div.poster-wrapper img")?.attr("src")
         val description = document.selectFirst("div.description span[data-nosnippet]")?.text()
             ?: document.selectFirst(".description")?.text()
-        val tvType = if (url.contains("/tvshows/") || url.contains("/seasons/")) TvType.TvSeries else TvType.Movie
+        val tvType = if (url.contains("/tvshows/") || url.contains("/watch/tvshows/")
+            || url.contains("/seasons/")) TvType.TvSeries else TvType.Movie
 
         if (tvType == TvType.Movie) {
             return newMovieLoadResponse(title, url, tvType, url) {
@@ -126,22 +129,16 @@ class ThreeSk : MainAPI() {
 
         val episodes = ArrayList<Episode>()
 
-        document.select("div.season-eps, .season-eps").forEach { seasonDiv ->
-            val seasonNum = seasonDiv.attr("id").removePrefix("season-num-").toIntOrNull() ?: 1
+        document.select("div[class*='season-eps'], [class*='season-eps']").forEach { seasonDiv ->
+            // The site uses single-quoted attributes: id='season-num-2'
+            val seasonNum = seasonDiv.attr("id")
+                .removePrefix("season-num-").removePrefix("'").removePrefix("\"")
+                .toIntOrNull() ?: 1
 
-            seasonDiv.select("a.ep-num").forEach { epA ->
-                val rawUrl = epA.attr("data-clse").ifBlank { epA.attr("href") }
-                if (rawUrl.isBlank()) return@forEach
-
-                val epUrl = if (rawUrl.startsWith("http")) {
-                    rawUrl
-                } else {
-                    try {
-                        decodeBase64Compat(rawUrl) ?: epA.attr("href")
-                    } catch (e: Exception) {
-                        epA.attr("href")
-                    }
-                }
+            seasonDiv.select("a[class*='ep-num']").forEach { epA ->
+                // Episodes are now served as absolute /watch/episodes/... URLs.
+                val epUrl = epA.attr("href").ifBlank { epA.attr("data-clse") }
+                if (epUrl.isBlank()) return@forEach
 
                 val epNum = epA.attr("data-ep-num").toIntOrNull()
                 val epName = epA.attr("title").ifBlank { "الحلقة $epNum" }
@@ -277,6 +274,15 @@ class ThreeSk : MainAPI() {
             } catch (_: Exception) { return null }
         }
 
+        fun orgsoup_parseFirst(text: String, key: String): String? {
+            // Tiny JSON string extractor: returns the value of the first "key" field.
+            // The CDN returns {"node_uuid":"...","url":"...\/master.m3u8?token=...","expires":...}
+            try {
+                val m = Regex(""""$key"\s*:\s*"([^"]*)"""").find(text) ?: return null
+                return m.groupValues[1].replace("\\/", "/")
+            } catch (_: Exception) { return null }
+        }
+
         fun analyzeAndUnpackScripts(htmlText: String): List<String> {
             try {
                 val doc = org.jsoup.Jsoup.parse(htmlText)
@@ -318,18 +324,45 @@ class ThreeSk : MainAPI() {
                     .findAll(text1).forEach { result.add(it.groupValues[1]) }
                 analyzeAndUnpackScripts(text1).forEach { result.add(it) }
 
+                // The embed page forwards to a CDN (ukrcdn.club) that serves a
+                // video.js player. The actual m3u8 is NOT in the HTML: the player
+                // fetches https://<cdn>/api/videos/<uuid>/playback?g=<token> and
+                // gets back JSON { "url": "...master.m3u8?token=..." }. The g-token
+                // is generated per-request by the page, so it must be re-fetched
+                // here, never cached from a previous load.
                 val docIf1 = rIf1.document
                 val iframe1Srcs = docIf1.select("iframe").mapNotNull { it.attr("src").ifBlank { null } }
                 if (iframe1Srcs.isNotEmpty()) {
+                    val iframe2Src = iframe1Srcs[0]
                     val hdrs2 = hdrs.toMutableMap()
                     hdrs2["Referer"] = embedUrl
-                    val rFinal = try { app.get(iframe1Srcs[0], referer = embedUrl, headers = hdrs2) }
+                    val rFinal = try { app.get(iframe2Src, referer = embedUrl, headers = hdrs2) }
                     catch (_: Exception) { null }
                     if (rFinal != null) {
                         val t = rFinal.text
                         Regex("""(https?://[^\s"']+\.(?:m3u8|mp4|webm|mov)[^\s"']*)""", RegexOption.IGNORE_CASE)
                             .findAll(t).forEach { result.add(it.groupValues[1]) }
                         analyzeAndUnpackScripts(t).forEach { result.add(it) }
+
+                        // --- NEW: follow the CDN's JSON playback API ---
+                        val apiMatch = Regex(
+                            """https?://[^"'\s/]+/api/videos/[^"'\s/]+/playback\?g=([^"'\s]+)"""
+                        ).find(t)
+                        if (apiMatch != null) {
+                            val apiUrl = apiMatch.value
+                            val rApi = try {
+                                val ah = hdrs2.toMutableMap()
+                                ah["Referer"] = iframe2Src
+                                ah["Accept"] = "application/json"
+                                app.get(apiUrl, referer = iframe2Src, headers = ah)
+                            } catch (_: Exception) { null }
+                            if (rApi != null) {
+                                try {
+                                    val json = orgsoup_parseFirst(rApi.text, "url")
+                                    if (json != null && json.isNotBlank()) result.add(json)
+                                } catch (_: Exception) {}
+                            }
+                        }
                     }
                 }
             } catch (_: Exception) {}
@@ -342,9 +375,18 @@ class ThreeSk : MainAPI() {
 
             val soup0 = r0.document
             var watchForm: org.jsoup.nodes.Element? = null
+            // The watch form posts to https://aa.3isk.icu/3isk<id>.php — match on the
+            // 3isk host specifically so the search/login forms are not picked up.
             for (f in soup0.select("form")) {
                 val act = f.attr("action")
-                if (act.contains("3isk") || act.contains("watch")) { watchForm = f; break }
+                if (act.contains("3isk.icu") || act.contains("3isk.") || act.contains("aa.3isk")) {
+                    watchForm = f
+                    break
+                }
+            }
+            if (watchForm == null) {
+                // Fallback: any form that has a hidden "news" field is the player form.
+                watchForm = soup0.selectFirst("form input[name=news]")?.parent()
             }
 
             if (watchForm == null) {
@@ -354,7 +396,7 @@ class ThreeSk : MainAPI() {
 
             val firstPostUrl = watchForm.attr("action")
             val firstFormData = watchForm.select("input[type=hidden]")
-                .associateTo(mutableMapOf()) { it.attr("name") to it.attr("value") }
+                .associateTo(mutableMapOf()) { it.attr("name") to it.attr("value") }.toMutableMap()
 
             val watchBtn = soup0.selectFirst("button.single-watch-btn")
             if (watchBtn != null) {
@@ -362,6 +404,7 @@ class ThreeSk : MainAPI() {
                 if (btnName.isNotBlank()) firstFormData[btnName] = watchBtn.attr("value")
             }
 
+            // POST1 -> aa.3isk.icu/3isk<id>.php, returns a page with var myUrl = <next php>
             val r1 = try { app.post(firstPostUrl, data = firstFormData, referer = data, headers = headers) }
             catch (_: Exception) { return false }
 
@@ -375,7 +418,12 @@ class ThreeSk : MainAPI() {
             val nextPost = mMyurl.groupValues[1]
             val newsVal = mNews.groupValues[1]
 
-            val r2 = try { app.post(nextPost, data = mapOf("news" to newsVal, "u" to "", "submit" to "submit"), referer = r1.url, headers = headers) }
+            // POST2 -> the myUrl endpoint; Referer must be the POST1 URL (aa.3isk.icu),
+            // otherwise the server returns a page with no iframe.
+            val r2 = try {
+                app.post(nextPost, data = mapOf("news" to newsVal, "u" to "", "submit" to "submit"),
+                    referer = r1.url, headers = headers)
+            }
             catch (_: Exception) { return false }
 
             val soup2 = r2.document
@@ -388,6 +436,7 @@ class ThreeSk : MainAPI() {
             Log.d(TAG, "Base iframe src: $baseIframeSrc")
 
             val foundAllMediaLinks = mutableMapOf<String, MutableSet<String>>()
+            // Embed URLs are now https://3iskk.xyz/embed/<server>/<id>/<season>/
             val embedMatch = Regex("""(https?://[^/]+/embed/)(\d+)/(.*)""").find(baseIframeSrc)
             if (embedMatch != null) {
                 val baseUrlPrefix = embedMatch.groupValues[1]
