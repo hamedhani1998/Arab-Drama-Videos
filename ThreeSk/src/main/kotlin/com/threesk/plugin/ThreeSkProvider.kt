@@ -345,16 +345,23 @@ class ThreeSk : MainAPI() {
                         analyzeAndUnpackScripts(t).forEach { result.add(it) }
 
                         // --- ukrcdn.club JSON playback API (best-effort) ---
-                        // The CDN gatekeeper returns "Embedding not allowed from this
-                        // context." unless the request carries a real DOM frame context
-                        // (Origin/Referer the server associates with the player iframe).
-                        // No HTTP header combination reproduces that, so this branch only
-                        // succeeds when the server happens to allow the call.
-                        val apiMatch = Regex(
-                            """https?://[^"'\s/]+/api/videos/[^"'\s/]+/playback\?g=([^"'\s]+)"""
-                        ).find(t)
-                        if (apiMatch != null) {
-                            val apiUrl = apiMatch.value
+                        // The page emits the URL with escaped slashes
+                        // ("https:\/\/ukrcdn.club\/api\/videos\/<uuid>\/playback?g=...")
+                        // inside a JS string, so the full URL is not safely matchable
+                        // with one regex. Instead take the g-token from the page and
+                        // rebuild the API URL from the iframe host + the uuid already
+                        // known from iframe2Src (https://ukrcdn.club/e/<uuid>).
+                        // The gatekeeper is NOT a Referer check: it accepts any caller
+                        // (no Referer, Referer=3iskk.xyz embed, Referer=ukrcdn.club all
+                        // return 200 with a usable master.m3u8), so the direct call
+                        // reliably yields the HLS master.
+                        val gMatch = Regex("""playback\?g=([^\s"\\]+)""").find(t)
+                        val uuidMatch = Regex("""[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}""").find(iframe2Src)
+                        if (gMatch != null && uuidMatch != null) {
+                            val g = gMatch.groupValues[1]
+                            val uuid = uuidMatch.groupValues[0]
+                            val host = Regex("""https?://[^/"']+""").find(iframe2Src)?.value ?: ""
+                            val apiUrl = "$host/api/videos/$uuid/playback?g=$g"
                             val rApi = try {
                                 val ah = hdrs2.toMutableMap()
                                 ah["Referer"] = iframe2Src
