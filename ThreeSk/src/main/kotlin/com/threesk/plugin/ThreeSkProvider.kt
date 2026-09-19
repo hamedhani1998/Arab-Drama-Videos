@@ -344,7 +344,12 @@ class ThreeSk : MainAPI() {
                             .findAll(t).forEach { result.add(it.groupValues[1]) }
                         analyzeAndUnpackScripts(t).forEach { result.add(it) }
 
-                        // --- NEW: follow the CDN's JSON playback API ---
+                        // --- ukrcdn.club JSON playback API (best-effort) ---
+                        // The CDN gatekeeper returns "Embedding not allowed from this
+                        // context." unless the request carries a real DOM frame context
+                        // (Origin/Referer the server associates with the player iframe).
+                        // No HTTP header combination reproduces that, so this branch only
+                        // succeeds when the server happens to allow the call.
                         val apiMatch = Regex(
                             """https?://[^"'\s/]+/api/videos/[^"'\s/]+/playback\?g=([^"'\s]+)"""
                         ).find(t)
@@ -363,6 +368,13 @@ class ThreeSk : MainAPI() {
                                 } catch (_: Exception) {}
                             }
                         }
+
+                        // --- fallback: emit the embed URL itself ---
+                        // ukrcdn's video.js player runs INSIDE the iframe and fetches the
+                        // m3u8 with a per-render g-token, so the direct URL is not
+                        // extractable. CloudStream can still play the page: emit the
+                        // embed URL as an M3U8 and its WebView executes the JS player.
+                        if (result.isEmpty()) result.add(iframe2Src)
                     }
                 }
             } catch (_: Exception) {}
@@ -375,13 +387,20 @@ class ThreeSk : MainAPI() {
 
             val soup0 = r0.document
             var watchForm: org.jsoup.nodes.Element? = null
-            // The watch form posts to https://aa.3isk.icu/3isk<id>.php — match on the
-            // 3isk host specifically so the search/login forms are not picked up.
-            for (f in soup0.select("form")) {
-                val act = f.attr("action")
-                if (act.contains("3isk.icu") || act.contains("3isk.") || act.contains("aa.3isk")) {
-                    watchForm = f
-                    break
+            // The watch form posts to https://aa.3isk.icu/3isk<id>.php and carries the
+            // hidden "news" field (~744 chars). Match STRICTLY on aa.3isk.icu: the
+            // substring "3isk." also matches "3iskk.xyz", which is the SEARCH form —
+            // taking it makes news null and loadLinks returns false with no links.
+            // Prefer the single-watch button's parent (reference implementation), then
+            // the form whose action is the 3isk gateway, then any form with a news field.
+            watchForm = soup0.selectFirst("button.single-watch-btn")?.parent()
+            if (watchForm == null) {
+                for (f in soup0.select("form")) {
+                    val act = f.attr("action")
+                    if (act.contains("aa.3isk.icu") || act.contains("3isk.icu")) {
+                        watchForm = f
+                        break
+                    }
                 }
             }
             if (watchForm == null) {

@@ -1,22 +1,23 @@
 [
-    {
-        "iconUrl": "https://3iskk.xyz/wp-content/uploads/2026/04/3isk-favicon1.png",
-        "apiVersion": 1,
-        "repositoryUrl": "https://github.com/hamedhani1998/arab-videos",
-        "fileSize": 31743,
-        "status": 1,
-        "language": "ar",
-        "authors": [
-            "hamedhani1998"
-        ],
-        "tvTypes": [
-            "TvSeries",
-            "Movie"
-        ],
-        "version": 13,
-        "internalName": "ThreeSk",
-        "description": "قصة عشق - مسلسلات تركية مترجمة ومدبلجة",
-        "url": "https://github.com/hamedhani1998/arab-videos/raw/refs/heads/main/build/ThreeSk.cs3",
-        "name": "قصة عشق"
-    }
+  {
+    "iconUrl": "https://3iskk.xyz/wp-content/uploads/2026/04/3isk-favicon1.png",
+    "apiVersion": 1,
+    "repositoryUrl": "https://github.com/hamedhani1998/arab-videos",
+    "fileSize": 30255,
+    "status": 1,
+    "language": "ar",
+    "authors": [
+      "hamedhani1998"
+    ],
+    "tvTypes": [
+      "TvSeries",
+      "Movie"
+    ],
+    "version": 13,
+    "internalName": "ThreeSk",
+    "description": "قصة عشق - مسلسلات تركية مترجمة ومدبلجة",
+    "url": "https://github.com/hamedhani1998/arab-videos/raw/refs/heads/main/build/ThreeSk.cs3",
+    "name": "قصة عشق",
+    "fileHash": "sha256-38d1d92279dc756735e38f12029bd377c0be74501ebe006d943e28e17821c929"
+  }
 ]
