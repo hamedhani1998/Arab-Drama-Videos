@@ -1,6 +1,8 @@
 {
-  "name": "arab-videos عربي",
+  "name": "arab-videos",
   "description": "مشاهدة الافلام والمسلسلات العربية والتركية",
   "manifestVersion": 1,
-  "pluginLists": ["https://raw.githubusercontent.com/hamedhani1998/arab-videos/refs/heads/builds/plugins.json"]
+  "pluginLists": [
+    "https://raw.githubusercontent.com/hamedhani1998/arab-videos/refs/heads/builds/plugins.json"
+  ]
 }
