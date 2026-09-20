@@ -302,19 +302,27 @@ class ThreeSk : MainAPI() {
                     val content = s.data().ifBlank { s.html() }
                     if (content.contains("eval(")) {
                         val m = Regex("""eval\s*\(\s*function\s*\(\s*p\s*,\s*a\s*,\s*c\s*,\s*k\s*,\s*e\s*,\s*d\s*\)\s*\{""").find(content)
-                        if (m != null) {
-                            val start = m.range.first
-                            val sample = if (content.length > start + 10000) content.substring(start, start + 10000) else content.substring(start)
-                            val unpacked = unpackPackerFromEval(sample)
-                            if (unpacked != null) {
-                                Regex("""(https?://[^\s"']+\.(?:m3u8|mp4|webm|mov)[^\s"']*)""", RegexOption.IGNORE_CASE)
-                                    .findAll(unpacked).forEach { found.add(it.groupValues[1]) }
-                            }
+                        if (m == null) { Log.d(TAG, "[unpack] eval detected but header regex MISSED (len=${content.length})"); continue }
+                        val start = m.range.first
+                        val sample = if (content.length > start + 10000) content.substring(start, start + 10000) else content.substring(start)
+                        Log.d(TAG, "[unpack] eval header matched at $start, sample len=${sample.length}")
+                        val unpacked = unpackPackerFromEval(sample)
+                        if (unpacked == null) {
+                            Log.e(TAG, "[unpack] unpackPackerFromEval returned NULL (likely arg-parse failed)")
+                            continue
                         }
+                        Log.d(TAG, "[unpack] unpacked len=${unpacked.length}, media hits now scanning")
+                        val hits = Regex("""(https?://[^\s"']+\.(?:m3u8|mp4|webm|mov)[^\s"']*)""", RegexOption.IGNORE_CASE)
+                            .findAll(unpacked).map { it.groupValues[1] }.toList()
+                        if (hits.isEmpty()) Log.e(TAG, "[unpack] unpacked OK but NO m3u8/mp4 URL inside")
+                        hits.forEach { Log.d(TAG, "[unpack] URL FOUND: $it"); found.add(it) }
                     }
                 }
                 return found
-            } catch (_: Exception) { return emptyList() }
+            } catch (e: Exception) {
+                Log.e(TAG, "[analyzeAndUnpackScripts] ex: ${e.message}")
+                return emptyList()
+            }
         }
 
         suspend fun processSingleEmbedServer(
@@ -328,8 +336,10 @@ class ThreeSk : MainAPI() {
                 val hdrs = headersBase.toMutableMap()
                 hdrs["Referer"] = refererFromPrevPage
                 val rIf1 = try { app.get(embedUrl, referer = refererFromPrevPage, headers = hdrs) }
-                catch (_: Exception) { return result }
+                catch (e: Exception) { Log.e(TAG, "[embed:$serverLabel] GET fail: $e"); return result }
                 val text1 = rIf1.text
+                Log.d(TAG, "[embed:$serverLabel] GET ${rIf1.url?.toString() ?: "?"} -> status ${rIf1.code} len=${text1.length}")
+                Log.d(TAG, "[embed:$serverLabel] title=${Regex("""<title>([^<]*)</title>""").find(text1)?.groupValues?.get(1)?.take(40).orEmpty()} hasEval=${text1.contains("eval(function")} hasMwdy=${text1.contains("mwdy")} hasMiravd=${text1.contains("miravd")}")
 
                 Regex("""(https?://[^\s"']+\.(?:m3u8|mp4|webm|mov)[^\s"']*)""", RegexOption.IGNORE_CASE)
                     .findAll(text1).forEach { result.add(it.groupValues[1]) }
@@ -345,12 +355,15 @@ class ThreeSk : MainAPI() {
                 val iframe1Srcs = docIf1.select("iframe").mapNotNull { it.attr("src").ifBlank { null } }
                 if (iframe1Srcs.isNotEmpty()) {
                     val iframe2Src = iframe1Srcs[0]
+                    Log.d(TAG, "[embed:$serverLabel] iframe1 -> $iframe2Src")
                     val hdrs2 = hdrs.toMutableMap()
                     hdrs2["Referer"] = embedUrl
                     val rFinal = try { app.get(iframe2Src, referer = embedUrl, headers = hdrs2) }
-                    catch (_: Exception) { null }
+                    catch (e: Exception) { Log.e(TAG, "[embed:$serverLabel] iframe2 GET fail: $e"); null }
                     if (rFinal != null) {
                         val t = rFinal.text
+                        Log.d(TAG, "[embed:$serverLabel] iframe2 ${rFinal.url?.toString() ?: "?"} -> status ${rFinal.code} len=${t.length}")
+                        Log.d(TAG, "[embed:$serverLabel] iframe2 title=${Regex("""<title>([^<]*)</title>""").find(t)?.groupValues?.get(1)?.take(40).orEmpty()} hasEval=${t.contains("eval(function")}")
                         Regex("""(https?://[^\s"']+\.(?:m3u8|mp4|webm|mov)[^\s"']*)""", RegexOption.IGNORE_CASE)
                             .findAll(t).forEach { result.add(it.groupValues[1]) }
                         analyzeAndUnpackScripts(t).forEach { result.add(it) }
