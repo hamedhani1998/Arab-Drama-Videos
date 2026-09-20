@@ -3,17 +3,152 @@ package com.threesk.plugin
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
 import org.jsoup.nodes.Element
+import org.jsoup.Jsoup
+import java.net.InetAddress
+import javax.net.ssl.SSLContext
+import javax.net.ssl.X509TrustManager
+import java.security.SecureRandom
+import java.security.cert.X509Certificate
 import android.util.Log
+import okhttp3.OkHttpClient
+import okhttp3.Request
+import okhttp3.Dns
+import okhttp3.FormBody
+import java.util.concurrent.TimeUnit
 
 class ThreeSk : MainAPI() {
     companion object {
         private const val TAG = "ThreeSk"
+        private const val UA =
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
     }
     override var mainUrl = "https://3iskk.xyz"
     override var name = "قصة عشق"
     override val supportedTypes = setOf(TvType.TvSeries, TvType.Movie)
     override var lang = "ar"
     override val hasMainPage = true
+
+    // ── DNS for .xyz hosts the device resolver can't reach ────────────────────
+    // The site (3iskk.xyz) and the HLS CDN (sN.ukrcdn.xyz) live on the .xyz TLD,
+    // which some home/ISP DNS servers fail to resolve (getaddrinfo fails) — the
+    // real reason "episodes don't play" even when the extractor finds a
+    // master.m3u8. We resolve .xyz hosts ourselves via DNS-over-HTTPS and hand
+    // OkHttp the IPs through its Dns hook. Crucially the ORIGINAL hostname is
+    // kept in the URL, so SNI and Host headers stay correct (CDN 403s
+    // IP-substituted URLs); only name→address lookup is overridden.
+    private val ipCache = HashMap<String, List<InetAddress>>()
+
+    private fun resolveViaDoh(host: String): List<String> {
+        return try {
+            val req = Request.Builder()
+                .url("https://cloudflare-dns.com/dns-query?name=$host&type=A")
+                .header("accept", "application/dns-json")
+                .header("user-agent", UA)
+                .build()
+            plainClient.newCall(req).execute().use { resp ->
+                val text = resp.body?.string() ?: return emptyList()
+                Regex("\"data\":\"(\\d{1,3}(\\.\\d{1,3}){3})\"").findAll(text)
+                    .map { it.groupValues[1] }.distinct().toList()
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "DoH failed for $host: ${e.message}")
+            emptyList()
+        }
+    }
+
+    private val unsafeTrustManager = object : X509TrustManager {
+        override fun checkClientTrusted(chain: Array<X509Certificate>, authType: String) {}
+        override fun checkServerTrusted(chain: Array<X509Certificate>, authType: String) {}
+        override fun getAcceptedIssuers(): Array<X509Certificate> = arrayOf()
+    }
+
+    private val unsafeSSL: SSLContext by lazy {
+        try {
+            val sc = SSLContext.getInstance("TLS")
+            sc.init(null, arrayOf(unsafeTrustManager), SecureRandom())
+            sc
+        } catch (e: Exception) {
+            Log.e(TAG, "SSL init failed", e); SSLContext.getDefault()
+        }
+    }
+
+    /** Plain client (system DNS) used to bootstrap the DoH resolver. */
+    private val plainClient: OkHttpClient by lazy {
+        OkHttpClient.Builder()
+            .connectTimeout(20, TimeUnit.SECONDS)
+            .readTimeout(20, TimeUnit.SECONDS)
+            .sslSocketFactory(unsafeSSL.socketFactory, unsafeTrustManager)
+            .hostnameVerifier { _, _ -> true }
+            .build()
+    }
+
+    /** Resolve .xyz hosts via DoH; everything else falls through to system DNS. */
+    private val pinnedDns = Dns { host ->
+        if (host.endsWith(".xyz", ignoreCase = true)) {
+            ipCache[host]?.let { return@Dns it }
+            val ips = resolveViaDoh(host)
+                .ifEmpty {
+                    try { InetAddress.getAllByName(host).map { it.hostAddress!! } }
+                    catch (_: Exception) { emptyList() }
+                }
+            val addrs = ips.mapNotNull { ip ->
+                try { InetAddress.getByName(ip) } catch (_: Exception) { null }
+            }
+            if (addrs.isEmpty()) {
+                Dns.SYSTEM.lookup(host)
+            } else {
+                ipCache[host] = addrs
+                Log.d(TAG, "pinned $host -> ${addrs.joinToString { it.hostAddress }}")
+                addrs
+            }
+        } else {
+            Dns.SYSTEM.lookup(host)
+        }
+    }
+
+    /** Main HTTP client: sends proper SNI, DoH-resolves any .xyz host. */
+    private val client: OkHttpClient by lazy {
+        OkHttpClient.Builder()
+            .dns(pinnedDns)
+            .connectTimeout(25, TimeUnit.SECONDS)
+            .readTimeout(25, TimeUnit.SECONDS)
+            .followRedirects(true)
+            .followSslRedirects(true)
+            .sslSocketFactory(unsafeSSL.socketFactory, unsafeTrustManager)
+            .hostnameVerifier { _, _ -> true }
+            .build()
+    }
+
+    private fun reqBuilder(url: String, referer: String?, headers: Map<String, String>): Request.Builder {
+        return Request.Builder().url(url)
+            .header("User-Agent", UA)
+            .header("Accept-Language", "ar,en;q=0.9")
+            .apply {
+                if (referer != null) header("Referer", referer)
+                for ((k, v) in headers) header(k, v)
+            }
+    }
+
+    /** GET with the DoH-resolving client; returns body or null on any failure. */
+    private fun safeGet(url: String, referer: String?, headers: Map<String, String> = emptyMap()): String? = try {
+        client.newCall(reqBuilder(url, referer, headers).get().build()).execute().use { resp ->
+            val body = resp.body?.string()
+            if (resp.isSuccessful) body else { Log.w(TAG, "GET $url HTTP ${resp.code}"); null }
+        }
+    } catch (e: Exception) {
+        Log.e(TAG, "GET $url EXCEPTION: ${e.message}", e); null
+    }
+
+    /** POST form data with the DoH-resolving client; returns body or null. */
+    private fun safePost(url: String, data: Map<String, String>, referer: String?): String? = try {
+        val body = FormBody.Builder().apply { data.forEach { (k, v) -> add(k, v) } }.build()
+        client.newCall(reqBuilder(url, referer, emptyMap()).post(body).build()).execute().use { resp ->
+            val text = resp.body?.string()
+            if (resp.isSuccessful) text else { Log.w(TAG, "POST $url HTTP ${resp.code}"); null }
+        }
+    } catch (e: Exception) {
+        Log.e(TAG, "POST $url EXCEPTION: ${e.message}", e); null
+    }
 
     private fun Element.toSearchResponse(): SearchResponse? {
         val encodedUrl = this.attr("data-clse")
@@ -54,7 +189,8 @@ class ThreeSk : MainAPI() {
     }
 
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
-        val document = app.get(mainUrl).document
+        val html = safeGet(mainUrl, referer = null) ?: return newHomePageResponse(emptyList())
+        val document = Jsoup.parse(html)
         val all = ArrayList<HomePageList>()
 
         document.select("section.home-items-sec").forEach { section ->
@@ -70,7 +206,8 @@ class ThreeSk : MainAPI() {
 
     override suspend fun search(query: String): List<SearchResponse> {
         val url = "$mainUrl/search/$query/"
-        val document = app.get(url).document
+        val html = safeGet(url, referer = null) ?: return emptyList()
+        val document = Jsoup.parse(html)
         return document.select("ul.search-page li.type_item_box a.type_item, li.type_item_wide_box a.type_item_wide").mapNotNull {
             it.toSearchResponse()
         }
@@ -101,13 +238,15 @@ class ThreeSk : MainAPI() {
         // Episodes are served from /watch/episodes/... and carry their own player;
         // series pages live at /watch/tvshows/... . Both are real loadable URLs.
         if (url.contains("/episodes/") || url.contains("/watch/episodes/")) {
-            val episodePage = app.get(url).document
+            val episodeHtml = safeGet(url, referer = null) ?: return null
+            val episodePage = Jsoup.parse(episodeHtml)
             val seriesUrl = episodePage.selectFirst("a.single-serie-btn")?.attr("href")
             if (seriesUrl.isNullOrBlank()) return null
             return load(seriesUrl)
         }
 
-        val document = app.get(url).document
+        val html = safeGet(url, referer = null) ?: return null
+        val document = Jsoup.parse(html)
         val title = document.selectFirst("div.single_info h1.title")?.text()
             ?.replace("مترجم", "")?.replace("مدبلج", "")?.trim()
             ?: document.selectFirst("h1.title")?.text()
@@ -316,9 +455,7 @@ class ThreeSk : MainAPI() {
             try {
                 val hdrs = headersBase.toMutableMap()
                 hdrs["Referer"] = refererFromPrevPage
-                val rIf1 = try { app.get(embedUrl, referer = refererFromPrevPage, headers = hdrs) }
-                catch (_: Exception) { return result }
-                val text1 = rIf1.text
+                val text1 = safeGet(embedUrl, refererFromPrevPage, hdrs) ?: return result
 
                 Regex("""(https?://[^\s"']+\.(?:m3u8|mp4|webm|mov)[^\s"']*)""", RegexOption.IGNORE_CASE)
                     .findAll(text1).forEach { result.add(it.groupValues[1]) }
@@ -330,16 +467,14 @@ class ThreeSk : MainAPI() {
                 // gets back JSON { "url": "...master.m3u8?token=..." }. The g-token
                 // is generated per-request by the page, so it must be re-fetched
                 // here, never cached from a previous load.
-                val docIf1 = rIf1.document
+                val docIf1 = Jsoup.parse(text1)
                 val iframe1Srcs = docIf1.select("iframe").mapNotNull { it.attr("src").ifBlank { null } }
                 if (iframe1Srcs.isNotEmpty()) {
                     val iframe2Src = iframe1Srcs[0]
                     val hdrs2 = hdrs.toMutableMap()
                     hdrs2["Referer"] = embedUrl
-                    val rFinal = try { app.get(iframe2Src, referer = embedUrl, headers = hdrs2) }
-                    catch (_: Exception) { null }
-                    if (rFinal != null) {
-                        val t = rFinal.text
+                    val t = safeGet(iframe2Src, embedUrl, hdrs2)
+                    if (t != null) {
                         Regex("""(https?://[^\s"']+\.(?:m3u8|mp4|webm|mov)[^\s"']*)""", RegexOption.IGNORE_CASE)
                             .findAll(t).forEach { result.add(it.groupValues[1]) }
                         analyzeAndUnpackScripts(t).forEach { result.add(it) }
@@ -362,26 +497,27 @@ class ThreeSk : MainAPI() {
                             val uuid = uuidMatch.groupValues[0]
                             val host = Regex("""https?://[^/"']+""").find(iframe2Src)?.value ?: ""
                             val apiUrl = "$host/api/videos/$uuid/playback?g=$g"
-                            val rApi = try {
-                                val ah = hdrs2.toMutableMap()
-                                ah["Referer"] = iframe2Src
-                                ah["Accept"] = "application/json"
-                                app.get(apiUrl, referer = iframe2Src, headers = ah)
-                            } catch (_: Exception) { null }
-                            if (rApi != null) {
+                            val ah = hdrs2.toMutableMap()
+                            ah["Referer"] = iframe2Src
+                            ah["Accept"] = "application/json"
+                            val apiJson = safeGet(apiUrl, iframe2Src, ah)
+                            if (apiJson != null) {
                                 try {
-                                    val json = orgsoup_parseFirst(rApi.text, "url")
-                                    if (json != null && json.isNotBlank()) result.add(json)
+                                    val json = orgsoup_parseFirst(apiJson, "url")
+                                    if (json != null && json.isNotBlank()) {
+                                        result.add(json)
+                                    }
                                 } catch (_: Exception) {}
                             }
                         }
 
-                        // --- fallback: emit the embed URL itself ---
-                        // ukrcdn's video.js player runs INSIDE the iframe and fetches the
-                        // m3u8 with a per-render g-token, so the direct URL is not
-                        // extractable. CloudStream can still play the page: emit the
-                        // embed URL as an M3U8 and its WebView executes the JS player.
-                        if (result.isEmpty()) result.add(iframe2Src)
+                        // --- fallback: if the playback API yielded nothing, do NOT emit
+                        // the embed page (html as .m3u8 never plays). Emit the embed URL
+                        // only for the ukrcdn host so CloudStream's WebView can run its
+                        // video.js player in a real frame context.
+                        if (result.isEmpty() && iframe2Src.startsWith("https://ukrcdn.club/")) {
+                            result.add(iframe2Src)
+                        }
                     }
                 }
             } catch (_: Exception) {}
@@ -389,10 +525,9 @@ class ThreeSk : MainAPI() {
         }
 
         try {
-            val r0 = try { app.get(data, headers = headers) }
-            catch (_: Exception) { return false }
+            val html0 = safeGet(data, referer = null, headers = headers) ?: return false
 
-            val soup0 = r0.document
+            val soup0 = Jsoup.parse(html0)
             var watchForm: org.jsoup.nodes.Element? = null
             // The watch form posts to https://aa.3isk.icu/3isk<id>.php and carries the
             // hidden "news" field (~744 chars). Match STRICTLY on aa.3isk.icu: the
@@ -431,11 +566,10 @@ class ThreeSk : MainAPI() {
             }
 
             // POST1 -> aa.3isk.icu/3isk<id>.php, returns a page with var myUrl = <next php>
-            val r1 = try { app.post(firstPostUrl, data = firstFormData, referer = data, headers = headers) }
-            catch (_: Exception) { return false }
+            val r1 = safePost(firstPostUrl, firstFormData, data) ?: return false
 
-            val mMyurl = Regex("""var\s+myUrl\s*=\s*["']([^"']+)["']""").find(r1.text)
-            val mNews = Regex("""myInput\.value\s*=\s*["']([^"']+)["']""").find(r1.text)
+            val mMyurl = Regex("""var\s+myUrl\s*=\s*["']([^"']+)["']""").find(r1)
+            val mNews = Regex("""myInput\.value\s*=\s*["']([^"']+)["']""").find(r1)
             if (mMyurl == null || mNews == null) {
                 Log.e(TAG, "Failed to extract myUrl/news from POST1")
                 return false
@@ -446,13 +580,10 @@ class ThreeSk : MainAPI() {
 
             // POST2 -> the myUrl endpoint; Referer must be the POST1 URL (aa.3isk.icu),
             // otherwise the server returns a page with no iframe.
-            val r2 = try {
-                app.post(nextPost, data = mapOf("news" to newsVal, "u" to "", "submit" to "submit"),
-                    referer = r1.url, headers = headers)
-            }
-            catch (_: Exception) { return false }
+            val finalHtml = safePost(nextPost, mapOf("news" to newsVal, "u" to "", "submit" to "submit"),
+                firstPostUrl) ?: return false
 
-            val soup2 = r2.document
+            val soup2 = Jsoup.parse(finalHtml)
             val iframeSrcsOnR2 = soup2.select("iframe").mapNotNull { it.attr("src").ifBlank { null } }
             if (iframeSrcsOnR2.isEmpty()) {
                 Log.e(TAG, "No iframe found after POST2")
@@ -469,7 +600,7 @@ class ThreeSk : MainAPI() {
                 val trailingPart = embedMatch.groupValues[3]
                 for (serverNum in 1..5) {
                     val currentEmbedUrl = "$baseUrlPrefix$serverNum/$trailingPart"
-                    val mediaLinks = processSingleEmbedServer(currentEmbedUrl, r2.url, headers, serverNum.toString())
+                    val mediaLinks = processSingleEmbedServer(currentEmbedUrl, nextPost, headers, serverNum.toString())
                     if (mediaLinks.isNotEmpty()) {
                         mediaLinks.forEach { link ->
                             foundAllMediaLinks.getOrPut(link) { mutableSetOf() }.add(serverNum.toString())
@@ -477,7 +608,7 @@ class ThreeSk : MainAPI() {
                     }
                 }
             } else {
-                val mediaLinks = processSingleEmbedServer(baseIframeSrc, r2.url, headers, "base")
+                val mediaLinks = processSingleEmbedServer(baseIframeSrc, nextPost, headers, "base")
                 if (mediaLinks.isNotEmpty()) {
                     mediaLinks.forEach { foundAllMediaLinks.getOrPut(it) { mutableSetOf() }.add("base") }
                 }
@@ -497,6 +628,16 @@ class ThreeSk : MainAPI() {
                         type = ExtractorLinkType.M3U8
                     ) {
                         this.quality = Qualities.Unknown.value
+                        // The HLS CDN (sN.ukrcdn.xyz) serves sub-playlists/segments to
+                        // any caller; keep a browser-like UA/Referer so nothing odd
+                        // triggers on proxied request paths. The host stays a real
+                        // hostname — the DoH Dns() resolves the .xyz for the player.
+                        this.referer = link.substringBeforeLast('/')
+                        this.headers = mapOf(
+                            "User-Agent" to UA,
+                            "Accept" to "*/*",
+                            "Referer" to link.substringBeforeLast('/')
+                        )
                     }
                 )
             }

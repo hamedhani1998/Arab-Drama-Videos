@@ -43,3 +43,6 @@ MinuteDrama/build/
 ThreeSk/build/
 NartoEdge/build/
 build/reports/
+
+# Scratch / dev probes
+_tmp/
