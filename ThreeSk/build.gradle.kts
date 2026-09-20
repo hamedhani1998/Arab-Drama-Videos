@@ -1,4 +1,4 @@
-version = 15
+version = 16
 
 cloudstream {
     description = "قصة عشق - مسلسلات تركية مترجمة ومدبلجة"

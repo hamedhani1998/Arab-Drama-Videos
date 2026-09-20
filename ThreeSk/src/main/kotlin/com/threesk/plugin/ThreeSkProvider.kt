@@ -2,6 +2,8 @@ package com.threesk.plugin
 
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
+import kotlinx.coroutines.async
+import kotlinx.coroutines.coroutineScope
 import org.jsoup.nodes.Element
 import android.util.Log
 
@@ -17,13 +19,12 @@ class ThreeSk : MainAPI() {
     override var lang = "ar"
     override val hasMainPage = true
 
-    // HTTP transport: use CloudStream's native NiceHttp (app.get/app.post), the
-    // same stack every other plugin uses. It keeps a shared connection pool (fast
-    // main page) and correctly handles Cloudflare redirects + cookies on the site
-    // hosts. We deliberately do NOT use a custom trust-all OkHttp client here: its
-    // TLS fingerprint made Cloudflare block the requests on-device, which showed up
-    // as "no links 203/2004". The emitted HLS link keeps the real hostname
-    // (sN.ukrcdn.xyz) so CloudStream's player handles the actual stream.
+    // HTTP transport: CloudStream's native NiceHttp (app.get/app.post) — the same
+    // stack every other plugin uses. Pooled connections (fast main page + fast
+    // server lookups) and correct Cloudflare redirect/cookie handling. A custom
+    // trust-all OkHttp client gets its TLS fingerprint blocked by Cloudflare
+    // on-device ("no links 203/2004"), so we never use one. The emitted HLS link
+    // keeps the real hostname (sN.ukrcdn.xyz) for the player to fetch directly.
 
     private fun Element.toSearchResponse(): SearchResponse? {
         val encodedUrl = this.attr("data-clse")
@@ -473,19 +474,28 @@ class ThreeSk : MainAPI() {
             val baseIframeSrc = iframeSrcsOnR2[0]
             Log.d(TAG, "Base iframe src: $baseIframeSrc")
 
+            // Server enumeration with PARALLEL fetching. The base iframe URL is
+            // https://3iskk.xyz/embed/<server>/<id>/<season>/ where <server> is a
+            // number (1..5). Fetching them sequentially made the link response slow
+            // (each server = several sequential network requests). Instead start all
+            // server lookups at once and collect whatever succeeds first.
             val foundAllMediaLinks = mutableMapOf<String, MutableSet<String>>()
-            // Embed URLs are now https://3iskk.xyz/embed/<server>/<id>/<season>/
             val embedMatch = Regex("""(https?://[^/]+/embed/)(\d+)/(.*)""").find(baseIframeSrc)
             if (embedMatch != null) {
                 val baseUrlPrefix = embedMatch.groupValues[1]
                 val trailingPart = embedMatch.groupValues[3]
-                for (serverNum in 1..5) {
-                    val currentEmbedUrl = "$baseUrlPrefix$serverNum/$trailingPart"
-                    val mediaLinks = processSingleEmbedServer(currentEmbedUrl, r2.url, headers, serverNum.toString())
-                    if (mediaLinks.isNotEmpty()) {
-                        mediaLinks.forEach { link ->
-                            foundAllMediaLinks.getOrPut(link) { mutableSetOf() }.add(serverNum.toString())
+                val serverNums = (1..5).toList()
+                val results = coroutineScope {
+                    serverNums.map { num ->
+                        async {
+                            val embedUrl = "$baseUrlPrefix$num/$trailingPart"
+                            num to processSingleEmbedServer(embedUrl, r2.url, headers, num.toString())
                         }
+                    }.map { it.await() }
+                }
+                for ((num, mediaLinks) in results) {
+                    mediaLinks.forEach { link ->
+                        foundAllMediaLinks.getOrPut(link) { mutableSetOf() }.add(num.toString())
                     }
                 }
             } else {
@@ -500,11 +510,12 @@ class ThreeSk : MainAPI() {
                 return false
             }
 
-            for ((link, _) in foundAllMediaLinks) {
+            for ((link, serverSet) in foundAllMediaLinks) {
+                val serverLabel = "سيرفر ${serverSet.minOrNull()}"
                 callback.invoke(
                     newExtractorLink(
-                        source = this.name,
-                        name = this.name,
+                        source = serverLabel,
+                        name = serverLabel,
                         url = link,
                         type = ExtractorLinkType.M3U8
                     ) {
