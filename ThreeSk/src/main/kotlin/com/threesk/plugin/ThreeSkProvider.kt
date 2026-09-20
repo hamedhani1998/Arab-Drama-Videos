@@ -511,7 +511,25 @@ class ThreeSk : MainAPI() {
             }
 
             for ((link, serverSet) in foundAllMediaLinks) {
-                val serverLabel = "سيرفر ${serverSet.minOrNull()}"
+                // Name each link by the actual CDN/provider brand so the user can see
+                // which server the stream comes from (e.g. "ukrcdn 1"). Derived from
+                // the real link host (s1.ukrcdn.xyz -> ukrcdn), so any other provider
+                // this site may later use shows its own name instead of a generic
+                // number. Today only embed/1 -> ukrcdn is served.
+                val host = link.substringAfter("://", "").substringBefore('/').substringBefore(':')
+                val parts = host.split('.')
+                val provider = if (parts.size >= 3) {
+                    // s1.ukrcdn.xyz -> ukrcdn ; a1.mycdn.pl -> mycdn
+                    if (parts[parts.size - 2].length > 2) parts[parts.size - 2]
+                    else parts[0].trimEnd { it in '0'..'9' }
+                } else {
+                    parts[0]
+                }
+                val serverLabel = if (serverSet.minOrNull()?.toIntOrNull() != null) {
+                    "$provider ${serverSet.minOrNull()}"
+                } else {
+                    provider.ifBlank { this.name }
+                }
                 callback.invoke(
                     newExtractorLink(
                         source = serverLabel,
