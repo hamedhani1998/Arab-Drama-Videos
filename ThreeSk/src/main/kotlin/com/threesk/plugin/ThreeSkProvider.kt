@@ -330,8 +330,18 @@ class ThreeSk : MainAPI() {
             refererFromPrevPage: String,
             headersBase: Map<String, String>,
             serverLabel: String = "unknown"
-        ): Set<String> {
-            val result = mutableSetOf<String>()
+        ): Set<Pair<String, String>> {
+            // Each returned pair is (mediaUrl, hlsReferer). The HLS host (e.g.
+            // grzcdn for miravd/mwdy slots) enforces a Referer check: it serves
+            // 200 only when Referer is the origin of the embed page that embedded
+            // the stream (https://miravd.com/ or https://mwdy.cc/). Sending the
+            // stream's own comma-path as Referer (the old behavior) returns 403
+            // and ExoPlayer shows "Source error" / 2004. So we must carry the
+            // embed page origin with each link.
+            fun originOf(u: String): String =
+                Regex("""https?://[^/"']+""").find(u)?.value ?: u
+
+            val result = mutableSetOf<Pair<String, String>>()
             try {
                 val hdrs = headersBase.toMutableMap()
                 hdrs["Referer"] = refererFromPrevPage
@@ -340,10 +350,15 @@ class ThreeSk : MainAPI() {
                 val text1 = rIf1.text
                 Log.d(TAG, "[embed:$serverLabel] GET ${rIf1.url?.toString() ?: "?"} -> status ${rIf1.code} len=${text1.length}")
                 Log.d(TAG, "[embed:$serverLabel] title=${Regex("""<title>([^<]*)</title>""").find(text1)?.groupValues?.get(1)?.take(40).orEmpty()} hasEval=${text1.contains("eval(function")} hasMwdy=${text1.contains("mwdy")} hasMiravd=${text1.contains("miravd")}")
+                val embedOrigin = originOf(embedUrl)
 
-                Regex("""(https?://[^\s"']+\.(?:m3u8|mp4|webm|mov)[^\s"']*)""", RegexOption.IGNORE_CASE)
-                    .findAll(text1).forEach { result.add(it.groupValues[1]) }
-                analyzeAndUnpackScripts(text1).forEach { result.add(it) }
+                fun addAll(pages: List<String>, ref: String) {
+                    pages.forEach { result.add(it to ref) }
+                }
+                val mediaOnEmbed = Regex("""(https?://[^\s"']+\.(?:m3u8|mp4|webm|mov)[^\s"']*)""", RegexOption.IGNORE_CASE)
+                    .findAll(text1).map { it.groupValues[1] }.toList()
+                addAll(mediaOnEmbed, embedOrigin)
+                addAll(analyzeAndUnpackScripts(text1), embedOrigin)
 
                 // The embed page forwards to a CDN (ukrcdn.club) that serves a
                 // video.js player. The actual m3u8 is NOT in the HTML: the player
@@ -364,9 +379,13 @@ class ThreeSk : MainAPI() {
                         val t = rFinal.text
                         Log.d(TAG, "[embed:$serverLabel] iframe2 ${rFinal.url?.toString() ?: "?"} -> status ${rFinal.code} len=${t.length}")
                         Log.d(TAG, "[embed:$serverLabel] iframe2 title=${Regex("""<title>([^<]*)</title>""").find(t)?.groupValues?.get(1)?.take(40).orEmpty()} hasEval=${t.contains("eval(function")}")
-                        Regex("""(https?://[^\s"']+\.(?:m3u8|mp4|webm|mov)[^\s"']*)""", RegexOption.IGNORE_CASE)
-                            .findAll(t).forEach { result.add(it.groupValues[1]) }
-                        analyzeAndUnpackScripts(t).forEach { result.add(it) }
+                        // The iframe page is the real embed (miravd.com/mwdy.cc). Its
+                        // origin is the Referer the HLS CDN expects.
+                        val iframe2Origin = originOf(iframe2Src)
+                        val mediaOnIframe2 = Regex("""(https?://[^\s"']+\.(?:m3u8|mp4|webm|mov)[^\s"']*)""", RegexOption.IGNORE_CASE)
+                            .findAll(t).map { it.groupValues[1] }.toList()
+                        addAll(mediaOnIframe2, iframe2Origin)
+                        addAll(analyzeAndUnpackScripts(t), iframe2Origin)
 
                         // --- ukrcdn.club JSON playback API (best-effort) ---
                         // The page emits the URL with escaped slashes
@@ -395,7 +414,7 @@ class ThreeSk : MainAPI() {
                                 try {
                                     val json = orgsoup_parseFirst(rApi.text, "url")
                                     if (json != null && json.isNotBlank()) {
-                                        result.add(json)
+                                        result.add(json to iframe2Origin)
                                     }
                                 } catch (_: Exception) {}
                             }
@@ -406,7 +425,7 @@ class ThreeSk : MainAPI() {
                         // only for the ukrcdn host so CloudStream's WebView can run its
                         // video.js player in a real frame context.
                         if (result.isEmpty() && iframe2Src.startsWith("https://ukrcdn.club/")) {
-                            result.add(iframe2Src)
+                            result.add(iframe2Src to iframe2Origin)
                         }
                     }
                 }
@@ -493,6 +512,8 @@ class ThreeSk : MainAPI() {
             // (each server = several sequential network requests). Instead start all
             // server lookups at once and collect whatever succeeds first.
             val foundAllMediaLinks = mutableMapOf<String, MutableSet<String>>()
+            // url -> referer for the HLS fetch (the embed origin the CDN checks)
+            val linkReferer = mutableMapOf<String, String>()
             val embedMatch = Regex("""(https?://[^/]+/embed/)(\d+)/(.*)""").find(baseIframeSrc)
             if (embedMatch != null) {
                 val baseUrlPrefix = embedMatch.groupValues[1]
@@ -507,14 +528,18 @@ class ThreeSk : MainAPI() {
                     }.map { it.await() }
                 }
                 for ((num, mediaLinks) in results) {
-                    mediaLinks.forEach { link ->
+                    mediaLinks.forEach { (link, ref) ->
                         foundAllMediaLinks.getOrPut(link) { mutableSetOf() }.add(num.toString())
+                        linkReferer[link] = ref
                     }
                 }
             } else {
                 val mediaLinks = processSingleEmbedServer(baseIframeSrc, r2.url, headers, "base")
                 if (mediaLinks.isNotEmpty()) {
-                    mediaLinks.forEach { foundAllMediaLinks.getOrPut(it) { mutableSetOf() }.add("base") }
+                    mediaLinks.forEach { (link, ref) ->
+                        foundAllMediaLinks.getOrPut(link) { mutableSetOf() }.add("base")
+                        linkReferer[link] = ref
+                    }
                 }
             }
 
@@ -543,6 +568,7 @@ class ThreeSk : MainAPI() {
                 } else {
                     provider.ifBlank { this.name }
                 }
+                val hlsReferer = linkReferer[link] ?: link.substringBeforeLast('/')
                 callback.invoke(
                     newExtractorLink(
                         source = serverLabel,
@@ -551,16 +577,19 @@ class ThreeSk : MainAPI() {
                         type = ExtractorLinkType.M3U8
                     ) {
                         this.quality = Qualities.Unknown.value
-                        // The HLS CDN (sN.ukrcdn.xyz) serves playlists/segments to any
-                        // caller and the real hostname is kept intact (no IP-rewrite,
-                        // which would break SNI). CloudStream's player resolves and
-                        // fetches this URL directly with its own HTTP stack.
-                        this.referer = link.substringBeforeLast('/')
+                        // The HLS CDN enforces a Referer check keyed to the embed
+                        // origin (grzcdn -> https://miravd.com/ or https://mwdy.cc/
+                        // depending on which embed page served the stream). Sending
+                        // the stream's own comma-path as Referer returns 403 and
+                        // ExoPlayer throws "Source error" / 2004. The referer here
+                        // is the origin of the embed page that embedded this link.
+                        this.referer = hlsReferer
                         this.headers = mapOf(
                             "User-Agent" to UA,
                             "Accept" to "*/*",
-                            "Referer" to link.substringBeforeLast('/')
+                            "Referer" to hlsReferer
                         )
+                        Log.d(TAG, "[emit] link=$link referer=$hlsReferer")
                     }
                 )
             }
