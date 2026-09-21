@@ -86,10 +86,21 @@ class LodyProvider : MainAPI() {
     /** مفتاح التجميع: الرابط بدون لاحقة الحلقة. */
     private fun seriesKeyOf(url: String): String = epSuffixRe.replace(url.trimEnd('/'), "")
 
-    private fun abs(u: String): String = when {
-        u.startsWith("//") -> "https:$u"
-        u.startsWith("/") -> mainUrl + u
-        else -> u
+    /**
+     * يُكمل الروابط النسبية. مهم جداً: بحث القالب (RequestSearch.php) يعيد
+     * روابط نسبية بلا شرطة أولى مثل "category/xxx"، وكانت تمر كما هي فيفشل
+     * فحص "/category/" ويسقط المسلسل إلى فرع الفيلم — وهذا سبب ظهور المسلسلات
+     * كأفلام وبلا حلقات.
+     */
+    private fun abs(u0: String): String {
+        val u = u0.replace("\\/", "/").trim()
+        return when {
+            u.isBlank() -> ""
+            u.startsWith("http") -> u
+            u.startsWith("//") -> "https:$u"
+            u.startsWith("/") -> mainUrl + u
+            else -> "$mainUrl/$u"
+        }
     }
 
     private fun originOf(u: String): String =
@@ -414,22 +425,34 @@ class LodyProvider : MainAPI() {
     /** معرّف القسم في ووردبريس — موجود في ترويسة أي صفحة (حلقة أو قسم). */
     private val catIdRe = Regex("""wp-json/wp/v2/categories/(\d+)""")
 
+    /**
+     * هل هذه صفحة مسلسل أم صفحة مشاهدة واحدة (فيلم/حلقة)؟
+     *
+     * المعيار القاطع: صفحات المسلسلات (الأقسام) تعرض ترويسة ووردبريس
+     * `wp-json/wp/v2/categories/<id>`، وصفحات المواضيع المفردة (الأفلام
+     * والحلقات) لا تعرضها إطلاقاً — بل تعرض `ServersWatch` بدلاً منها.
+     * قِيس ذلك مباشرة على الموقع: صفحة قسم = 1 مرجع، صفحة موضوع = 0.
+     */
+    private fun isSeriesPage(html: String): Boolean =
+        catIdRe.containsMatchIn(html) && !html.contains("ServersWatch")
+
     override suspend fun load(url: String): LoadResponse? {
         val doc = try {
             app.get(url, headers = mapOf("User-Agent" to UA)).document
         } catch (_: Exception) { null } ?: return null
 
         val html = doc.html()
-        val catId = catIdRe.find(html)?.groupValues?.get(1)
 
         // ---- مسلسل ----
         // صفحة القسم (…/category/<slug>) هي صفحة المسلسل: لا تحمل h1،
         // وحلقاتها روابط عادية بلاحقة «الحلقة-N» — لا class="ItemEpisode".
         // لذلك نقرأها من واجهة ووردبريس التي تُعيد الحلقات كلها دفعة واحدة.
-        val looksLikeSeries = url.contains("/category/") || epSuffixRe.containsMatchIn(url.trimEnd('/'))
-        if (looksLikeSeries && catId != null) {
-            val res = loadSeries(url, catId, doc)
-            if (res != null) return res
+        if (isSeriesPage(html)) {
+            val catId = catIdRe.find(html)?.groupValues?.get(1)
+            if (catId != null) {
+                val res = loadSeries(url, catId, doc)
+                if (res != null) return res
+            }
         }
 
         // ---- فيلم / حلقة مفردة ----
@@ -482,7 +505,10 @@ class LodyProvider : MainAPI() {
                     o.optJSONObject("title")?.optString("rendered", "").orEmpty()
                         .replace(Regex("""<[^>]+>"""), "")
                 )
-                eps.add(Ep(episodeNumberOf(t, link), t, link))
+                // إن كان عنوان الموضوع هو اسم المسلسل نفسه بلا رقم حلقة،
+                // فالرقم في نهاية الرابط (…-الحلقة-45) هو المصدر الموثوق.
+                val num = episodeNumberOf(t, link)
+                eps.add(Ep(num, if (num != null && t == name) "" else t, link))
             }
         } catch (e: Exception) {
             Log.w(TAG, "wp posts failed for cat $catId: ${e.message}")
@@ -507,12 +533,22 @@ class LodyProvider : MainAPI() {
         // مضمّنة فيها كـ ItemNewly باسم مطابق (‎…/uploads/…/هوس-220x220.webp).
         var poster: String? = doc.selectFirst("meta[property='og:image']")
             ?.attr("content")?.ifBlank { null }
+        val want = name.replace(Regex("""\s+"""), " ").trim()
         if (poster == null) {
-            val want = name.replace(Regex("""\s+"""), " ").trim()
             poster = rawCards(doc).firstOrNull {
                 seriesNameOf(it.title).replace(Regex("""\s+"""), " ").trim() == want &&
                     !it.cover.isNullOrBlank()
             }?.cover
+        }
+        // احتياطي أخير: أي صورة في مجلد الرفع تحمل اسم المسلسل.
+        if (poster == null && want.length > 4) {
+            poster = Regex("""(https?://lodynet\.top/wp-content/uploads/[^"'\s)]+)""")
+                .findAll(doc.html())
+                .map { it.groupValues[1] }
+                .firstOrNull { u ->
+                    val base = java.net.URLDecoder.decode(u.substringAfterLast('/'), "UTF-8")
+                    base.contains(want.replace("مسلسل ", "").trim().take(6))
+                }
         }
 
         val episodes = ordered.map { e ->
@@ -561,8 +597,12 @@ class LodyProvider : MainAPI() {
             }.getOrDefault(emptyList())
             Log.d(TAG, "servers: ${servers.size} -> ${servers.joinToString { "${it.name}#${it.id}" }}")
 
-            // --- PageData tokens (VidLO needs ?st=…&e=…)
+            // --- PageData: الرموز التي يُلحقها الموقع بروابط سيرفرات معيّنة
+            //     (Lody Plus ← TokenPlus1، ViD LO ← TokenVidlo). بدونها لا
+            //     يعمل السيرفر إطلاقاً، وهذا سبب عدم ظهور أي تشغيل في الحلقات
+            //     الجديدة التي لا تحتوي إلا على «Lody Plus 1».
             var tokenVidlo = ""
+            var tokenPlus1 = ""
             runCatching {
                 val i = html.indexOf("PageData")
                 if (i >= 0) {
@@ -572,10 +612,14 @@ class LodyProvider : MainAPI() {
                         if (e > b) {
                             val o = org.json.JSONObject(html.substring(b, e + 1))
                             tokenVidlo = o.optString("TokenVidlo", "")
+                            tokenPlus1 = o.optString("TokenPlus1", "")
                         }
                     }
                 }
             }
+
+            // هل يُخفي الموقع محتوى المشغّل للزوار؟
+            val encryptedMode = html.contains("const EncryptionStatus = true")
 
             if (servers.isEmpty()) {
                 Log.w(TAG, "no servers on page")
@@ -586,13 +630,38 @@ class LodyProvider : MainAPI() {
             // (رابط صفحتها ليس وسائط: يجعل المشغّل يعطي خطأ 2004 وينقطع).
             val targets = mutableListOf<Pair<Srv, String>>()
             val done = mutableSetOf<String>()
+
+            // القاعدة كما في سكربت الموقع himself (SwitchServer):
+            //   embed = base64(field)؛ ثم يُلحق الرمز الخاص بالسيرفر.
+            fun embedOf(s: Srv): String? {
+                val base = base64Decode(s.embed)?.trim()
+                if (base.isNullOrBlank()) return null
+                return when (s.id) {
+                    LODY_PLUS_ID -> base + tokenPlus1
+                    VIDLO_ID -> base + tokenVidlo
+                    else -> base
+                }
+            }
+
+            // Lody Plus: الحقل فارغ لكن القاعدة تُلحق TokenPlus1 — وهو رابط
+            // مباشر كامل (‎…/…-الحلقة-45/?st=…&e=…) وليس iframe لموقع خارجي،
+            // لذلك هو ما يُشغّل الحلقات الجديدة فعلاً.
+            val plus1 = servers.firstOrNull { it.id == LODY_PLUS_ID }
+            if (plus1 != null && !tokenPlus1.isNullOrBlank()) {
+                val pageUrl = data.substringBefore('?').trimEnd('/')
+                val direct = pageUrl + "/" + tokenPlus1
+                if (done.add(direct)) {
+                    Log.d(TAG, "Lody Plus -> direct media: $direct")
+                    targets.add(plus1 to direct)
+                }
+            }
+
             for (s in servers) {
-                if (s.id == LODY_PLUS_ID) { Log.d(TAG, "skip Lody Plus"); continue }
+                if (s.id == LODY_PLUS_ID) continue          // عُولج أعلاه
                 if (s.id == VIP_ID) { Log.d(TAG, "skip VIP (empty embed)"); continue }
                 if (s.embed.isBlank()) { Log.d(TAG, "skip ${s.name} (empty embed)"); continue }
-                val decoded = base64Decode(s.embed)?.trim()
-                if (decoded.isNullOrBlank()) { Log.w(TAG, "${s.name}: base64 decode failed"); continue }
-                val embedUrl = if (s.id == VIDLO_ID) decoded + tokenVidlo else decoded
+                val embedUrl = embedOf(s)
+                if (embedUrl.isNullOrBlank()) { Log.w(TAG, "${s.name}: base64 decode failed"); continue }
                 if (!done.add(embedUrl)) continue
                 targets.add(s to embedUrl)
             }
@@ -601,6 +670,7 @@ class LodyProvider : MainAPI() {
                 Log.w(TAG, "no usable servers (all embeds empty)")
                 return false
             }
+            Log.d(TAG, "encryptedMode=$encryptedMode targets=${targets.size}")
 
             // مهم للأداء: كل السيرفرات بالتوازي. سابقاً كان كل سيرفر يُنتظر
             // على حدة (~3–5 ثوانٍ لكل واحد لـ megamax) فيصل المجموع ~25 ثانية
@@ -649,6 +719,14 @@ class LodyProvider : MainAPI() {
         callback: (ExtractorLink) -> Unit
     ): Int {
         val referer = originOf(embedUrl)
+
+        // 0) Lody Plus: الرابط هو صفحة الموقع نفسها + الرمز، والمشغّل داخلها
+        //    يبني رابط الوسائط من PageData. نجلبها ونستخرج m3u8/mp4 مباشرة.
+        if (referer.contains("lodynet.top")) {
+            if (tryManualExtract(embedUrl, referer, serverName, callback)) return 1
+            Log.w(TAG, "$serverName: Lody Plus page had no direct media")
+            return 0
+        }
 
         // 1) megamax — صفحته تحمل قائمة مرايا كاملة (720p/480p…)
         if (originOf(embedUrl).contains("megamax")) {
@@ -826,7 +904,12 @@ class LodyProvider : MainAPI() {
                 return false
             }
             media.forEach { u ->
-                emit(callback, label, u, if (u.contains(".m3u8")) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO, originOf(embedUrl))
+                // hls.js في الموقع يشغّل m3u8؛ وبعض الروابط تأتي بلا امتداد
+                // (ملفات البث المقسّمة) — نعتبرها HLS حين لا تحمل امتداداً معروفاً.
+                val isHls = u.contains(".m3u8", true) ||
+                    (!u.contains(".mp4", true) && !u.contains(".webm", true) && !u.contains(".mov", true))
+                val type = if (isHls) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
+                emit(callback, if (label.isBlank()) "Lody Plus" else label, u, type, originOf(embedUrl))
             }
             true
         } catch (e: Exception) {
