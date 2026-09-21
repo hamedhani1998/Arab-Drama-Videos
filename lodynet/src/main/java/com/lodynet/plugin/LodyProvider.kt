@@ -76,6 +76,24 @@ class LodyProvider : MainAPI() {
     private fun originOf(u: String): String =
         Regex("""https?://[^/"']+""").find(u)?.value ?: u
 
+    /**
+     * يحوّل تسمية الجودة ("1080p", "1280x720") إلى قيمة Qualities.
+     * بدونها يبقى المشغّل على Unknown فيختار أول رابط — وغالباً أكبر ملف.
+     */
+    private fun qualityOf(vararg labels: String): Int {
+        val s = labels.joinToString(" ").lowercase()
+        return when {
+            s.contains("2160") || s.contains("4k") -> Qualities.P2160.value
+            s.contains("1440") -> Qualities.P1440.value
+            s.contains("1080") -> Qualities.P1080.value
+            s.contains("720") -> Qualities.P720.value
+            s.contains("480") -> Qualities.P480.value
+            s.contains("360") -> Qualities.P360.value
+            s.contains("240") -> Qualities.P240.value
+            else -> Qualities.Unknown.value
+        }
+    }
+
     // ---- Pure-Kotlin base64 decoder (no android.util.Base64) ----
     private fun base64Decode(input: String): String? =
         try {
@@ -219,14 +237,17 @@ class LodyProvider : MainAPI() {
 
     private fun rawCards(doc: Document): List<RawCard> {
         val res = mutableListOf<RawCard>()
-        for (a in doc.select(".ItemNewly > a[href], .SuggestionsItems[href], .NewlyItems > a[href]")) {
+        // .ItemNewly وحدها هي بطاقات المحتوى الحقيقية (رئيسية/أقسام/بحث).
+        // لا نستخدم .SuggestionsItems: فهي شريط "مقترحات" ثابت يظهر أعلى كل
+        // صفحة بغض النظر عن نتائج البحث، وكانت تُقحم 12 بطاقة غير متعلقة.
+        for (a in doc.select(".ItemNewly > a[href], .NewlyItems > a[href]")) {
             val href = abs(a.attr("href").trim())
             if (href.isBlank() || !href.contains("lodynet.top")) continue
             val title = a.attr("title").ifBlank {
-                a.selectFirst("strong, .NewlyTitle, .SuggestionsTitle, .title")?.text().orEmpty()
+                a.selectFirst("strong, .NewlyTitle, .title")?.text().orEmpty()
             }.ifBlank { a.text() }.trim()
             if (title.isBlank()) continue
-            val coverEl = a.selectFirst("[data-src], img, .NewlyCover, .SuggestionsCover")
+            val coverEl = a.selectFirst("[data-src], img, .NewlyCover")
             val cover = coverEl?.let {
                 it.attr("data-src").ifBlank { it.attr("src") }.ifBlank { null }
             }
@@ -297,21 +318,26 @@ class LodyProvider : MainAPI() {
     // ===================== search =====================
 
     override suspend fun search(query: String): List<SearchResponse> {
-        val doc = try {
-            app.get("$mainUrl/?s=${java.net.URLEncoder.encode(query.trim(), "UTF-8")}").document
-        } catch (_: Exception) { return emptyList() }
-        val grouped = groupCards(rawCards(doc))
-        if (grouped.isNotEmpty()) return grouped
+        val q = query.trim()
+        if (q.isBlank()) return emptyList()
+        val enc = java.net.URLEncoder.encode(q, "UTF-8")
 
-        // fallback: أي رابط مقال داخل الموقع
-        val loose = doc.select("a[href*='/lodynet.top/']").mapNotNull { a ->
-            val href = abs(a.attr("href").trim())
-            val title = a.attr("title").ifBlank { a.text() }.trim()
-            if (href.isBlank() || title.isBlank() || href.contains("/category/") ||
-                href.contains("/tag/") || href.contains("/page/")) null
-            else RawCard(title, href, null)
+        // ووردبريس يخدم البحث على /search/<المصطلح>/ وسنة نتائجه في .ItemNewly.
+        // راوابط النتائج تصل بصيغة نظيفة بلا شرطة أخيرة ("a-love-other-than-yours-s01-ep4")
+        // بينما المُجمِّع يتوقع الشكل المُطبَّع — لذا نجرّب أكثر من صيغة.
+        val candidates = listOf(
+            "$mainUrl/search/$enc/",
+            "$mainUrl/?s=$enc",
+            "$mainUrl/search/$enc"
+        )
+        for (u in candidates) {
+            val doc = try { app.get(u).document } catch (_: Exception) { null } ?: continue
+            // فقط النتائج الحقيقية: بطاقات .ItemNewly (لا اقتراحات الشريط الجانبي)
+            val hits = rawCards(doc)
+            val grouped = groupCards(hits)
+            if (grouped.isNotEmpty()) return grouped
         }
-        return groupCards(loose)
+        return emptyList()
     }
 
     // ===================== load =====================
@@ -475,10 +501,18 @@ class LodyProvider : MainAPI() {
         // 3) محاولة يدوية: جلب الصفحة واستخراج m3u8/mp4
         if (tryManualExtract(embedUrl, referer, serverName, callback)) return 1
 
-        // 4) دائماً أظهِر السيرفر — رابط الـ embed نفسه
-        Log.d(TAG, "$serverName: fallback -> embed page")
-        emit(callback, serverName, embedUrl, ExtractorLinkType.VIDEO, referer)
-        return 1
+        // 4) لا نُظهِر رابط الصفحة: المشغّل سيجرّب تحميل HTML فيعطي خطأ 2004
+        //    (ERROR_CODE_IO_BAD_HTTP_STATUS) أو ينقطع عند التقديم/التأخير.
+        //    لكن نتحقق أولاً أن السيرفر يستجيب فعلاً، حتى لا يختفي بلا سبب.
+        val alive = try {
+            app.get(embedUrl, referer = referer, headers = mapOf("User-Agent" to UA)).code
+        } catch (_: Exception) { 0 }
+        if (alive in 200..399) {
+            Log.w(TAG, "$serverName: alive (HTTP $alive) but no direct media — skipped to avoid player error")
+        } else {
+            Log.w(TAG, "$serverName: dead (HTTP $alive) — skipped")
+        }
+        return 0
     }
 
     /**
@@ -532,9 +566,14 @@ class LodyProvider : MainAPI() {
             var emitted = 0
             val tried = mutableSetOf<String>()
 
-            for (qi in 0 until qualities.length()) {
-                val q = qualities.optJSONObject(qi) ?: continue
+            // نرتّب الجودات من الأعلى إلى الأدنى حتى يبدأ المشغّل بأفضل جودة
+            val order = (0 until qualities.length()).mapNotNull { qualities.optJSONObject(it) }
+                .sortedByDescending { qualityOf(it.optString("label", ""), it.optString("resolution", "")) }
+
+            for (q in order) {
                 val qLabel = q.optString("label", "HD").trim()
+                val resolution = q.optString("resolution", "").trim()
+                val qNum = qualityOf(qLabel, resolution)
                 val mirrors = q.optJSONArray("mirrors") ?: continue
 
                 var qEmitted = 0
@@ -542,15 +581,18 @@ class LodyProvider : MainAPI() {
                     if (qEmitted >= 4) break            // لا نُغرق القائمة
                     val m = mirrors.optJSONObject(mi) ?: continue
                     val driver = m.optString("driver", "").trim()
-                    var link = m.optString("link", "").trim()
-                    if (link.isBlank()) continue
+                    val rawLink = m.optString("link", "").trim()
+                    // بعض المرايا تصل فارغة أو بحرفية "0 Bytes" — نتجاهلها
+                    if (rawLink.isBlank() || rawLink.contains("Byt", true)) continue
+                    var link = rawLink
                     if (link.startsWith("//")) link = "https:$link"
                     if (!link.startsWith("http")) continue
+                    if (isDeadUrl(link)) continue
                     if (!tried.add(link)) continue
 
                     val linkRef = originOf(link)
                     // callback الـ loadExtractor ليس suspend، لذا نجمع أولاً
-                    // ثم نُعيد الإرسال بعد خروجه (myExtractorLink مُعلَّمة suspend).
+                    // ثم نُعيد الإرسال بعد خروجه (newExtractorLink مُعلَّمة suspend).
                     val collected = mutableListOf<ExtractorLink>()
                     try {
                         loadExtractor(link, linkRef, { }) { l -> collected.add(l) }
@@ -558,7 +600,16 @@ class LodyProvider : MainAPI() {
                         Log.d(TAG, "megamax [$qLabel/$driver] miss: ${e.message}")
                     }
                     for (l in collected) {
-                        // نُعيد التسمية لتظهر الجودة واسم السيرفر بوضوح
+                        // لا نُمرّر إلا روابط وسائط حقيقية — أي رابط صفحة HTML
+                        // يجعل المشغّل يعطي خطأ 2004 أو ينقطع عند التقديم.
+                        val fake = isDeadUrl(l.url)
+                        if (fake) {
+                            Log.w(TAG, "megamax [$qLabel/$driver] HTML page, not media — skipped")
+                            continue
+                        }
+                        // نضمن كتابة رقم الجودة حتى لو أعاد المُستخرِج Unknown،
+                        // فيختار المشغّل الجودة الصحيحة ولا ينقطع أثناء التقديم.
+                        val qv = if (l.quality == Qualities.Unknown.value) qNum else l.quality
                         callback.invoke(
                             newExtractorLink(
                                 source = "لودي نت",
@@ -566,15 +617,13 @@ class LodyProvider : MainAPI() {
                                 url = l.url,
                                 type = l.type
                             ) {
-                                this.quality = l.quality
+                                this.quality = qv
                                 this.referer = l.referer
                                 this.headers = l.headers
                             }
                         )
-                    }
-                    if (collected.isNotEmpty()) {
-                        qEmitted += collected.size
-                        emitted += collected.size
+                        qEmitted++
+                        emitted++
                     }
                 }
             }
@@ -583,6 +632,17 @@ class LodyProvider : MainAPI() {
             Log.w(TAG, "megamax failed: ${e.message}")
             0
         }
+    }
+
+    /**
+     * رابط صفحة HTML ليس وسائط: المشغّل لا يستطيع تحميله ولا التقديم فيه،
+     * فيعطي ExoPlayer الخطأ 2004 (ERROR_CODE_IO_BAD_HTTP_STATUS).
+     */
+    private fun isDeadUrl(u: String): Boolean {
+        if (u.isBlank() || !u.startsWith("http")) return true
+        val path = u.substringBefore('?').substringBefore('#').lowercase()
+        return path.endsWith(".html") || path.endsWith(".htm") ||
+            path.endsWith(".php") || path.endsWith("/")
     }
 
     private suspend fun tryManualExtract(
@@ -595,7 +655,7 @@ class LodyProvider : MainAPI() {
             val r = app.get(embedUrl, referer = referer, headers = mapOf("User-Agent" to UA, "Referer" to referer))
             val text = r.text
             Log.d(TAG, "[$label] GET ${r.url} ${r.code} len=${text.length}")
-            val media = extractMediaUrls(text)
+            val media = extractMediaUrls(text).filterNot { isDeadUrl(it) }
             if (media.isEmpty()) {
                 Log.d(TAG, "[$label] no direct media in page")
                 return false

@@ -1,4 +1,4 @@
-version = 2
+version = 3
 
 cloudstream {
     description = "لودي نت - افلام ومسلسلات مترجمة ومدبلجة (lodynet.top)"
