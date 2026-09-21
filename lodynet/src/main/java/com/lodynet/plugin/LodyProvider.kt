@@ -33,6 +33,12 @@ class LodyProvider : MainAPI() {
         /** واجهة ووردبريس: تُعيد كل حلقات أي قسم مُرقّم دفعة واحدة (حتى 100). */
         private const val WP_POSTS = "https://lodynet.top/wp-json/wp/v2/posts"
 
+        /** واجهة أقسام ووردبريس — لتحديد قسم المسلسل من رقمه. */
+        private const val WP_CATS = "https://lodynet.top/wp-json/wp/v2/categories"
+
+        /** سقف صفحات الحلقات (100 لكل صفحة) — يغطي أطول مسلسل على الموقع. */
+        private const val MAX_EP_PAGES = 12
+
         // مسارات الأقسام على الرئيسية (مُتحقَّق منها: كل مسار يعيد صفّاً كاملاً)
         private val HOME_CATEGORIES = listOf(
             "مسلسلات تركية" to "مسلسلات-تركي",
@@ -85,6 +91,17 @@ class LodyProvider : MainAPI() {
 
     /** مفتاح التجميع: الرابط بدون لاحقة الحلقة. */
     private fun seriesKeyOf(url: String): String = epSuffixRe.replace(url.trimEnd('/'), "")
+
+    /**
+     * روابط الحلقات التي يمكن استنتاج قسم مسلسلها منها — أي لاحقة حلقة
+     * **رقمية** يدعمها الموقع. لاحقة «الحلقة-N» العربية وحدها مستبعدة:
+     * تلك روابط قسم (`…/category/<slug>/الحلقة-45`) وليست مواضيع، فلا
+     * معرّف لها في واجهة ووردبريس.
+     */
+    private val RESOLVABLE_EP_RE = Regex(
+        """-(?:ep\d+(?:-end)?|e\d+)(?:/|$)""",
+        RegexOption.IGNORE_CASE
+    )
 
     /**
      * يُكمل الروابط النسبية. مهم جداً: بحث القالب (RequestSearch.php) يعيد
@@ -317,16 +334,22 @@ class LodyProvider : MainAPI() {
             newTvSeriesSearchResponse(name, url) { this.posterUrl = cover }
         }
 
-    /** يجمع حلقات نفس المسلسل في بطاقة واحدة باسم المسلسل. */
+    /**
+     * يجمع حلقات نفس المسلسل في بطاقة واحدة باسم المسلسل.
+     *
+     * المفتاح هو الرابط مجرّداً من لاحقة الحلقة (للتجميع فقط)، أما **الرابط
+     * المستهدف فيبقى كما هو**: فبطاقات الصفحة الرئيسية تشير إلى حلقات لا
+     * إلى أقسام، و`load()` صار يستنتج قسم المسلسل من رابط الحلقة. لو
+     * استهدفنا الرابط المجرّد (`…-s01`) لوقعنا على صفحة الحلقة 1 نفسها
+     * ولظهر المسلسل كفيلم بلا حلقات — وهذا أصل العلّة.
+     */
     private fun groupCards(raw: List<RawCard>): List<SearchResponse> {
         val out = LinkedHashMap<String, SearchResponse>()
         for (c in raw) {
             val key = seriesKeyOf(c.href)
             if (out.containsKey(key)) continue
             val name = seriesNameOf(c.title)
-            val movie = isMovieTitle(name)
-            val target = if (movie) c.href else key
-            out[key] = cardOf(name, target, c.cover)
+            out[key] = cardOf(name, c.href, c.cover)
         }
         return out.values.toList()
     }
@@ -455,6 +478,25 @@ class LodyProvider : MainAPI() {
             }
         }
 
+        // ---- مسلسل وصلنا من رابطه حلقة ----
+        // وهذا حال بطاقات «مضاف حديثاً»: رابط حلقة، لا رابط قسم. لا نستطيع
+        // قراءة صفحة القسم من هذا الرابط (تجريده يقع على صفحة الحلقة 1)،
+        // فيُستنتج قسم المسلسل من أقسام الموضوع عبر واجهة ووردبريس.
+        if (RESOLVABLE_EP_RE.containsMatchIn(url)) {
+            val catId = seriesCatFromEpisode(url)
+            if (catId != null) {
+                val catUrl = CAT + java.net.URLEncoder.encode(catId, "UTF-8") + "/"
+                Log.d(TAG, "'$url' -> series category $catId")
+                // صفحة القسم تُقرأ لواجهة ووردبريس (loadSeries) وتُستخدم
+                // أيضاً لاستخراج الاسم والغلاف بعيداً عن عنوان الحلقة.
+                val catDoc = try {
+                    app.get(catUrl, headers = mapOf("User-Agent" to UA)).document
+                } catch (_: Exception) { null }
+                val res = loadSeries(catUrl, catId, catDoc ?: doc)
+                if (res != null) return res
+            }
+        }
+
         // ---- فيلم / حلقة مفردة ----
         val title = clean(
             doc.selectFirst("h1")?.text().orEmpty()
@@ -477,9 +519,72 @@ class LodyProvider : MainAPI() {
     }
 
     /**
-     * حلقات المسلسل من واجهة ووردبريس: طلب واحد يعيد كل الحلقات (حتى 100)
-     * مع روابطها وعناوينها — أسرع وأكمل من قراءة الصفحة (التي تعرض 30 فقط
-     * كما أنها لا تحمل class مناسباً).
+     * يستنتج قسم المسلسل من **رابط حلقة واحدة**.
+     *
+     * هذا هو إصلاح «المضاف حديثاً»: بطاقات هذا القسم روابط حلقات
+     * (`…/a-love-other-than-yours-s01-ep4`)، وتجريد لاحقة الحلقة يعطي
+     * `…/a-love-other-than-yours-s01` وهو رابط **غير موجود** — الموقع
+     * يحوّله (301) إلى صفحة الحلقة 1 نفسها. وتلك صفحة موضوع لا صفحة قسم،
+     * فلا تُطابق `isSeriesPage()` ويسقط المسلسل إلى فرع الفيلم: يُعرض
+     * كفيلم بلا حلقات. (وبطاقات الأقسام تعمل لأنها روابط أقسام فعلاً.)
+     *
+     * الحل: كل موضوع يحمل في ووردبريس مصفوفة أقسامه. قسم المسلسل هو الوحيد
+     * ذو **قسم أب** (الأب هو قسم التصنيف العام كـ«مسلسلات كورية»)، أما
+     * الأفلام فكل أقسامها رئيسية بلا أب. مُتحقَّق منه على 20 رابطاً.
+     *
+     * نتحقق من الأب أيضاً — لا نثق بالمعرّف وحده — حتى لا يُبنى مسلسل وهمي
+     * من أي رابط في حال تغيّر الموقع.
+     */
+    private suspend fun seriesCatFromEpisode(url: String): String? {
+        val slug = java.net.URLDecoder.decode(
+            url.trimEnd('/').substringAfterLast('/'), "UTF-8"
+        ).ifBlank { return null }
+
+        val post = try {
+            app.get(
+                "$WP_POSTS?slug=${java.net.URLEncoder.encode(slug, "UTF-8")}" +
+                    "&_fields=categories",
+                headers = mapOf("User-Agent" to UA)
+            ).text
+        } catch (e: Exception) {
+            Log.w(TAG, "slug lookup failed for '$slug': ${e.message}")
+            return null
+        }
+
+        val catIds = try {
+            val arr = org.json.JSONArray(post)
+            val o = if (arr.length() > 0) arr.optJSONObject(0) else null
+            val cs = o?.optJSONArray("categories") ?: return null
+            (0 until cs.length()).mapNotNull { cs.optInt(it).takeIf { c -> c != 0 } }
+        } catch (e: Exception) {
+            Log.w(TAG, "slug lookup parse failed for '$slug': ${e.message}")
+            return null
+        }
+        if (catIds.isEmpty()) return null
+
+        for (cid in catIds) {
+            val parent = try {
+                val c = app.get(
+                    "$WP_CATS/$cid?_fields=parent",
+                    headers = mapOf("User-Agent" to UA)
+                ).text
+                org.json.JSONObject(c).optInt("parent", 0)
+            } catch (_: Exception) {
+                0
+            }
+            if (parent != 0) return cid.toString()
+        }
+        return null
+    }
+
+    /**
+     * حلقات المسلسل من واجهة ووردبريس: كل الحلقات مع روابطها وعناوينها —
+     * أسرع وأكمل من قراءة الصفحة (التي تعرض 30 فقط كما أنها لا تحمل class
+     * مناسباً).
+     *
+     * الصفحات: ووردبريس لا يعطي أكثر من 100 عنصر للطلب، وبعض المسلسلات
+     * طويلة حقاً (سر الحنين 150، أمْنِية وإن تحققت 899)، فبطلب واحد كانت
+     * الحلقات 1–50 تسقط من مسلسل من 150 حلقة. نتابع الصفحات حتى النقص.
      */
     private suspend fun loadSeries(url: String, catId: String, doc: Document): LoadResponse? {
         val baseTitle = clean(
@@ -491,12 +596,24 @@ class LodyProvider : MainAPI() {
         data class Ep(val num: Int?, val title: String, val url: String)
 
         val eps = mutableListOf<Ep>()
-        try {
-            val json = app.get(
-                "$WP_POSTS?categories=$catId&per_page=100&orderby=date&order=desc&_fields=id,link,title",
-                headers = mapOf("User-Agent" to UA)
-            ).text
-            val arr = org.json.JSONArray(json)
+        var page = 1
+        while (page <= MAX_EP_PAGES) {
+            val arr = try {
+                org.json.JSONArray(
+                    app.get(
+                        "$WP_POSTS?categories=$catId&per_page=100&page=$page" +
+                            "&orderby=date&order=desc&_fields=id,link,title",
+                        headers = mapOf("User-Agent" to UA)
+                    ).text
+                )
+            } catch (e: Exception) {
+                // الصفحة 400 بعد الأخيرة — نكتفي بما جمعناه
+                if (page > 1) break
+                Log.w(TAG, "wp posts failed for cat $catId: ${e.message}")
+                break
+            }
+            if (arr.length() == 0) break
+
             for (i in 0 until arr.length()) {
                 val o = arr.optJSONObject(i) ?: continue
                 val link = abs(o.optString("link", "").trim())
@@ -510,8 +627,8 @@ class LodyProvider : MainAPI() {
                 val num = episodeNumberOf(t, link)
                 eps.add(Ep(num, if (num != null && t == name) "" else t, link))
             }
-        } catch (e: Exception) {
-            Log.w(TAG, "wp posts failed for cat $catId: ${e.message}")
+            if (arr.length() < 100) break
+            page++
         }
 
         // احتياطي: استخراج الحلقات من الصفحة نفسها بلاحقة «الحلقة-N»
@@ -533,7 +650,20 @@ class LodyProvider : MainAPI() {
         // مضمّنة فيها كـ ItemNewly باسم مطابق (‎…/uploads/…/هوس-220x220.webp).
         var poster: String? = doc.selectFirst("meta[property='og:image']")
             ?.attr("content")?.ifBlank { null }
+        // حين لا تكون `doc` صفحةَ القسم (بطاقةُ «مضاف حديثاً» رابطُ حلقة،
+        // و`loadSeries` قد تُمرَّر صفحة الحلقة) يكون og:image صورةَ الحلقة،
+        // ولا تصلح غلافاً للمسلسل. نستبعدها بمطابقة الاسم.
         val want = name.replace(Regex("""\s+"""), " ").trim()
+        val posterLooksRight = { u: String? ->
+            if (u.isNullOrBlank()) false
+            else {
+                val base = java.net.URLDecoder.decode(u.substringAfterLast('/'), "UTF-8")
+                val stem = want.replace("مسلسل ", "").trim()
+                stem.length < 4 || base.contains(stem.take(8)) ||
+                    base.contains(stem.takeLast(8))
+            }
+        }
+        if (!posterLooksRight(poster)) poster = null
         if (poster == null) {
             poster = rawCards(doc).firstOrNull {
                 seriesNameOf(it.title).replace(Regex("""\s+"""), " ").trim() == want &&

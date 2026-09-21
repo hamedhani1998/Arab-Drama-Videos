@@ -266,10 +266,10 @@
     },
     {
         "iconUrl": "https://lodynet.top/wp-content/uploads/2019/07/cropped-lodynet-logo-1-192x192.png",
-        "fileHash": "sha256-a7c0d37593751e11db663839d53a23a263704cb13dbf8ec7635124865778bccf",
+        "fileHash": "sha256-de5067dd1390716114c6e91dc187806f269aa9cd448e19836425aac9c0a204fb",
         "apiVersion": 1,
         "repositoryUrl": "https://github.com/hamedhani1998/Arab-Drama-Videos",
-        "fileSize": 49558,
+        "fileSize": 53114,
         "status": 1,
         "language": "ar",
         "authors": [
@@ -279,10 +279,30 @@
             "TvSeries",
             "Movie"
         ],
-        "version": 5,
+        "version": 6,
         "internalName": "lodynet",
         "description": "لودي نت - افلام ومسلسلات مترجمة ومدبلجة (lodynet.top)",
         "url": "https://raw.githubusercontent.com/hamedhani1998/Arab-Drama-Videos/builds/lodynet.cs3",
         "name": "لودي نت LODYNET"
+    },
+    {
+        "name": "ARY العربية",
+        "internalName": "aryarabia",
+        "version": 1,
+        "fileSize": 24920,
+        "fileHash": "sha256-3ac8ac5d00400ed2cfda3705294e6dad14d97afacf91d0096de3394ec9afc2bb",
+        "url": "https://raw.githubusercontent.com/hamedhani1998/Arab-Drama-Videos/builds/aryarabia.cs3",
+        "repositoryUrl": "https://github.com/hamedhani1998/Arab-Drama-Videos",
+        "apiVersion": 1,
+        "status": 1,
+        "language": "ar",
+        "authors": [
+            "hamedhani1998"
+        ],
+        "tvTypes": [
+            "TvSeries"
+        ],
+        "iconUrl": "https://yt3.googleusercontent.com/SCqr1wMv6zOj1x5p9GlnsIBgYO6IfWIJ4iuEzB-OMtMmoFpIPlFdU1x7d0SMS_smYa6GeIuqA=s200-c-k-c0x00ffffff-no-rj",
+        "description": "قناة ARY العربية على يوتيوب: كل مسلسلاتها وحلقاتها كاملة (ARY Arabia)"
     }
 ]
