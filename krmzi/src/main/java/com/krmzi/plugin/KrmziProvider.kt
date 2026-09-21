@@ -157,49 +157,52 @@ class KrmziProvider : MainAPI() {
         val href = this.attr("href")
         val title = this.attr("title").ifBlank { this.selectFirst(".title")?.text().orEmpty() }
 
-        // Extract poster: try multiple sources
-        // 1. .posterThumb .imgBg style background-image
-        // 2. img data-src (lazy load)
-        // 3. img src
-        val posterImg = this.selectFirst(".posterThumb .imgBg, .posterThumb, img")
-        val poster = when {
-            // Try style background-image first
-            posterImg?.attr("style")?.let { style ->
-                Regex("""url\(['"]?([^'")]+)['"]?\)""").find(style)?.groupValues?.get(1)
-            } != null -> posterImg?.attr("style")?.let {
-                Regex("""url\(['"]?([^'")]+)['"]?\)""").find(it)?.groupValues?.get(1)
-            } ?: ""
-            // Try data-src
-            posterImg?.attr("data-src")?.isNotEmpty() == true -> posterImg?.attr("data-src") ?: ""
-            // Try src
-            posterImg?.attr("src")?.isNotEmpty() == true -> posterImg?.attr("src") ?: ""
-            else -> ""
-        }
+        // Poster: krmzi series-list cards put it in .poster .imgSer background-image;
+        // home episode cards use .posterThumb .imgBg; some cards use <img> with
+        // data-src (lazy) or src.
+        val styleHolder = this.selectFirst(".imgSer, .poster .imgSer, .posterThumb .imgBg, [style*='background-image']")
+        val img = this.selectFirst("img")
+        val poster = styleHolder?.attr("style")?.let {
+            Regex("""url\(['"]?([^'")]+)['"]?\)""").find(it)?.groupValues?.get(1)
+        }?.ifBlank { null }
+            ?: img?.attr("data-src")?.ifBlank { null }
+            ?: img?.attr("src")
 
         if (href.isBlank() || title.isBlank()) return null
-        return if (href.contains("/episode/") || href.contains("/series/"))
+        return if (href.contains("/series/") || href.contains("/episode/"))
             newTvSeriesSearchResponse(title, href) {
-                this.posterUrl = poster.ifBlank { null }
+                this.posterUrl = poster
             }
         else null
     }
 
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
-        val navUrl = if (page <= 1) mainUrl else "$mainUrl/page/$page/"
-        val doc = app.get(navUrl).document
-        // Only show series, not individual episodes
+        // krmzi.org's homepage shows only latest-episode cards (which the user
+        // does not want). Its /series-list/ page lists every series once with
+        // a real poster, so that is the home content.
+        val url = if (page <= 1) "$mainUrl/series-list/" else "$mainUrl/series-list/page/$page/"
+        val doc = try {
+            app.get(url).document
+        } catch (_: Exception) {
+            return newHomePageResponse(emptyList())
+        }
         val items = doc.select("a[href*=/series/]")
             .mapNotNull { it.searchCard() }
-        return newHomePageResponse(listOf(HomePageList("المسلسلات", items)))
+        // Deduplicate series by URL
+        val seen = mutableSetOf<String>()
+        val unique = items.filter { seen.add(it.url) }
+        return newHomePageResponse(listOf(HomePageList("المسلسلات", unique)))
     }
 
     override suspend fun search(query: String): List<SearchResponse> {
         val url = "$mainUrl/?s=${query.trim()}"
         val doc = app.get(url).document
-        // Filter by series only, not individual episodes
-        return doc.select("a[href*=/series/]")
+        // Search returns episode cards; keep series links so each series appears
+        // once (load() resolves episode URLs to their series).
+        return doc.select("a[href*=/series/], a[href*=/episode/]")
             .filter { it.attr("href").length > 8 }
             .mapNotNull { it.searchCard() }
+            .distinctBy { it.url }
     }
 
     override suspend fun load(url: String): LoadResponse? {

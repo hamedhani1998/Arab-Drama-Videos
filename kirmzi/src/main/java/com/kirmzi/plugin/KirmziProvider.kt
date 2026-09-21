@@ -155,43 +155,60 @@ class KirmziProvider : MainAPI() {
     private fun Element.toSearchResponse(): SearchResponse? {
         val href = this.attr("href")
         if (href.isBlank()) return null
+        // Skip "coming soon" (قريباً) cards that have no episodes yet.
+        if (this.selectFirst(".ribbon")?.text()?.contains("قريب") == true) return null
         val title = this.attr("title").ifBlank {
-            this.selectFirst("img")?.attr("alt").orEmpty()
-        }
-        // Extract poster: try data-src (lazy load), then src, then style background-image
+            this.selectFirst(".title")?.text().orEmpty()
+                .ifBlank { this.selectFirst("img")?.attr("alt").orEmpty() }
+        }.orEmpty()
+        // Poster lives inside the card: img.imgSer lazy has data-src or src;
+        // footnote styles use a style background-image (krmzi).
         val img = this.selectFirst("img")
         val poster = img?.attr("data-src").orEmpty()
             .ifBlank { img?.attr("src").orEmpty() }
             .ifBlank {
-                this.attr("style").let {
+                this.selectFirst("[style*='background-image']")?.attr("style")?.let {
                     Regex("""url\(['"]?([^'")]+)['"]?\)""").find(it)?.groupValues?.get(1).orEmpty()
-                }
+                }.orEmpty()
+            }.orEmpty()
+        if (title.isBlank()) return null
+        return if (href.contains("/series/") || href.contains("/episode/"))
+            newTvSeriesSearchResponse(title, href) {
+                this.posterUrl = poster.ifBlank { null }
             }
-        val type = if (href.contains("/episode/")) TvType.TvSeries else TvType.TvSeries
-        return when {
-            href.contains("/series/") || href.contains("/episode/") ->
-                newTvSeriesSearchResponse(title.ifBlank { "قرمزي" }, href) {
-                    this.posterUrl = poster.ifBlank { null }
-                }
-            else -> null
-        }
+        else null
     }
 
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
-        val doc = app.get(mainUrl).document
-        // Only show series, not individual episodes
-        val items = doc.select("a.posterThumb[href*=/series/]")
+        // The homepage only shows episode cards, which the user does not want
+        // scattered across the home. Use the site's full series listing page,
+        // which lists each series once with its real poster.
+        // kirmzi.tv lists its series at /turkish-series/ (pagination not needed).
+        val url = if (page <= 1) "$mainUrl/turkish-series/" else "$mainUrl/turkish-series/?page=$page"
+        val doc = try {
+            app.get(url).document
+        } catch (_: Exception) {
+            return newHomePageResponse(emptyList())
+        }
+        val items = doc.select(".block-post a[href*=/series/], a.posterThumb[href*=/series/]")
             .mapNotNull { it.toSearchResponse() }
-        val homeList = HomePageList("المسلسلات", items)
-        return newHomePageResponse(listOf(homeList))
+        // Deduplicate series by URL (the listing may repeat a series across sections)
+        val seen = mutableSetOf<String>()
+        val unique = items.filter { seen.add(it.url) }
+        return newHomePageResponse(listOf(HomePageList("المسلسلات", unique)))
     }
 
     override suspend fun search(query: String): List<SearchResponse> {
         val url = "$mainUrl/?s=${query.trim()}"
         val doc = app.get(url).document
-        // Filter by series only, not individual episodes
-        return doc.select("a.posterThumb[href*=/series/]").filter { it.attr("href").isNotBlank() }
+        // Search returns series cards (a.block-post > a[href*=/series/]) with
+        // real posters. Fall back to any series/episode card if the layout differs.
+        val cards = doc.select(".block-post a[href], article.post a[href]")
+        val items = cards
+            .filter { it.attr("href").isNotBlank() }
             .mapNotNull { it.toSearchResponse() }
+            .distinctBy { it.url }
+        return items
     }
 
     override suspend fun load(url: String): LoadResponse? {
