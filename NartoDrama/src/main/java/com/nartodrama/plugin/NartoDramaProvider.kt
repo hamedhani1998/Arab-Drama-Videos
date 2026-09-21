@@ -12,11 +12,12 @@ private val mapper = ObjectMapper().registerKotlinModule()
 
 private const val UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
 
-// Standalone "Narto Drama" extension — pinned to https://narto-drama.com ONLY.
-// Build from scratch (v1) as one concrete class; 100% independent from the separate
-// "Edge Narto Drama" extension (own module, own cache, own refresh channel, own cooldown
-// handling). No shared base class with the other source.
-private const val NARTO_HOST = "https://narto-drama.com"
+// Standalone "Narto Drama" extension. v45: apex narto-drama.com is now fronted by a
+// Cloudflare "Checking your browser..." JS challenge (raw HTTP clients AND the app's OkHttp
+// both get the challenge page, never content) — so this provider now targets the verified-live
+// edge host, same as the Edge extension. Still 100% independent: own module, own cache, own
+// refresh channel, own cooldown handling. No shared base class with the other source.
+private const val NARTO_HOST = "https://edge.narto-drama.com"
 private const val STREAM_HOST = "https://stream.narto-drama.com"
 
 // Backend hosts that are dead (DNS NODATA / non-existent domain) and must NOT be emitted as

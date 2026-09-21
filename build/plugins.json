@@ -61,10 +61,10 @@
         "name": "MinuteDrama"
     },
     {
-        "fileHash": "sha256-e660b289320c8ac51f10702df883c8b8d966bbe5ae19d2a8d273c36a97b12f0d",
+        "fileHash": "sha256-349dd7ee3f8083edc591a84f227cb9a89cf94adb59abfb9f6810ee8f380aad87",
         "apiVersion": 1,
         "repositoryUrl": "https://github.com/hamedhani1998/Arab-Drama-Videos",
-        "fileSize": 37245,
+        "fileSize": 37262,
         "status": 1,
         "language": "ar",
         "authors": [
@@ -74,7 +74,7 @@
             "TvSeries",
             "Movie"
         ],
-        "version": 44,
+        "version": 45,
         "internalName": "NartoDrama",
         "description": "Narto Drama - مسلسلات دراما مترجمة",
         "url": "https://raw.githubusercontent.com/hamedhani1998/Arab-Drama-Videos/builds/NartoDrama.cs3",
