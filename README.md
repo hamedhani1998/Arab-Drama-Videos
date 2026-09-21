@@ -9,7 +9,7 @@ Collection of sources.
 3. Add Repository
 4. Enter this URL:
 ```
-https://raw.githubusercontent.com/hamedhani1998/arab-videos/main/repo
+https://raw.githubusercontent.com/hamedhani1998/Arab-Drama-Videos/main/repo
 ```
 5. Press OK
 6. Install the available plugins
