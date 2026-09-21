@@ -1,7 +1,7 @@
-version = 4
+version = 5
 
 cloudstream {
-    description = "قرمزي - مسلسلات تركية مترجمة ومدبلجة"
+    description = "قرمزي ORG - مسلسلات تركية مترجمة ومدبلجة (krmzi.org)"
     authors = listOf("hamedhani1998")
     language = "ar"
 

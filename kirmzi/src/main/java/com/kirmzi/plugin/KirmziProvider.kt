@@ -15,7 +15,7 @@ class KirmziProvider : MainAPI() {
     }
 
     override var mainUrl = "https://kirmzi.tv"
-    override var name = "قرمزي"
+    override var name = "قرمزي TV"
     override val supportedTypes = setOf(TvType.TvSeries, TvType.Movie)
     override var lang = "ar"
     override val hasMainPage = true
@@ -390,7 +390,7 @@ class KirmziProvider : MainAPI() {
                 Log.d(TAG, "[$label] no HLS/MP4 found — emit embed page as VIDEO fallback")
                 callback.invoke(
                     newExtractorLink(
-                        source = "قرمزي",
+                        source = "قرمزي TV",
                         name = label,
                         url = embedUrl,
                         type = ExtractorLinkType.VIDEO
@@ -407,7 +407,7 @@ class KirmziProvider : MainAPI() {
                 Log.d(TAG, "[$label] emit ${if (m3u8) "HLS" else "MP4"}: $mediaUrl")
                 callback.invoke(
                     newExtractorLink(
-                        source = "قرمزي",
+                        source = "قرمزي TV",
                         name = label,
                         url = mediaUrl,
                         type = if (m3u8) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO

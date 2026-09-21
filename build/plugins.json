@@ -224,10 +224,10 @@
   },
   {
     "iconUrl": "https://kirmzi.tv/wp-content/themes/kirmzi/assets/images/favicon.png",
-    "fileHash": "sha256-6298740deb7883dcdef97cb39a542c1c5300efa4d17c506e7166ba13e8386b2b",
+    "fileHash": "sha256-b33994899f258a2c807b54abbc365cda898df0ffe7cdf3e4be329017a4b7e038",
     "apiVersion": 1,
     "repositoryUrl": "https://github.com/hamedhani1998/arab-videos",
-    "fileSize": 32063,
+    "fileSize": 32064,
     "status": 1,
     "language": "ar",
     "authors": [
@@ -237,18 +237,18 @@
       "TvSeries",
       "Movie"
     ],
-    "version": 4,
+    "version": 5,
     "internalName": "kirmzi",
-    "description": "قرمزي - مسلسلات تركية مترجمة ومدبلجة",
+    "description": "قرمزي TV - مسلسلات تركية مترجمة ومدبلجة (kirmzi.tv)",
     "url": "https://raw.githubusercontent.com/hamedhani1998/arab-videos/builds/kirmzi.cs3",
-    "name": "kirmzi"
+    "name": "قرمزي TV"
   },
   {
     "iconUrl": "https://krmzi.org/wp-content/uploads/2026/02/cropped-faviconkrmzi-192x192.png",
-    "fileHash": "sha256-d25335fb912382d567377088a488f9eb07bf64165053d9293ee9714b0a5553c2",
+    "fileHash": "sha256-e93a10e8df5f368bf2f73295d17bda65b2d0f2a6fb24bb1a124e46a8ed6ebfda",
     "apiVersion": 1,
     "repositoryUrl": "https://github.com/hamedhani1998/arab-videos",
-    "fileSize": 27232,
+    "fileSize": 27237,
     "status": 1,
     "language": "ar",
     "authors": [
@@ -258,10 +258,10 @@
       "TvSeries",
       "Movie"
     ],
-    "version": 4,
+    "version": 5,
     "internalName": "krmzi",
-    "description": "قرمزي - مسلسلات تركية مترجمة ومدبلجة",
+    "description": "قرمزي ORG - مسلسلات تركية مترجمة ومدبلجة (krmzi.org)",
     "url": "https://raw.githubusercontent.com/hamedhani1998/arab-videos/builds/krmzi.cs3",
-    "name": "krmzi"
+    "name": "قرمزي ORG"
   }
 ]

@@ -15,7 +15,7 @@ class KrmziProvider : MainAPI() {
     }
 
     override var mainUrl = "https://krmzi.org"
-    override var name = "قرمزي"
+    override var name = "قرمزي ORG"
     override val supportedTypes = setOf(TvType.TvSeries, TvType.Movie)
     override var lang = "ar"
     override val hasMainPage = true
@@ -366,7 +366,7 @@ class KrmziProvider : MainAPI() {
     ) {
         callback.invoke(
             newExtractorLink(
-                source = "قرمزي",
+                source = "قرمزي ORG",
                 name = label,
                 url = url,
                 type = type
