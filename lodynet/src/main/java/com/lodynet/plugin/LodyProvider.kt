@@ -791,6 +791,14 @@ class LodyProvider : MainAPI() {
             for (s in servers) {
                 if (s.id == LODY_PLUS_ID) continue          // عُولج أعلاه
                 if (s.id == VIP_ID) { Log.d(TAG, "skip VIP (empty embed)"); continue }
+                if (s.id == VIDLO_ID) {
+                    // ViD LO (رقم 116413): مضيفه www.vidlo.us أصبح 404 لروابط
+                    // embed-{id}.html وليس له مُستخرِج مدمج في التطبيق — لا يُنتج
+                    // تشغيلاً أبداً، فيُحذف لكيلا يملأ قائمة السيرفرات باسم "vid lo"
+                    // بلا روابط قابلة للتشغيل.
+                    Log.d(TAG, "skip ViD LO (dead host, no built-in extractor)")
+                    continue
+                }
                 if (s.embed.isBlank()) { Log.d(TAG, "skip ${s.name} (empty embed)"); continue }
                 val embedUrl = embedOf(s)
                 if (embedUrl.isNullOrBlank()) { Log.w(TAG, "${s.name}: base64 decode failed"); continue }
