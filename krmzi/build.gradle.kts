@@ -1,4 +1,4 @@
-version = 1
+version = 4
 
 cloudstream {
     description = "قرمزي - مسلسلات تركية مترجمة ومدبلجة"

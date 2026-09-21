@@ -178,20 +178,28 @@ class KrmziProvider : MainAPI() {
 
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
         // krmzi.org's homepage shows only latest-episode cards (which the user
-        // does not want). Its /series-list/ page lists every series once with
-        // a real poster, so that is the home content.
-        val url = if (page <= 1) "$mainUrl/series-list/" else "$mainUrl/series-list/page/$page/"
-        val doc = try {
-            app.get(url).document
+        // does not want). /series-list/ lists every series once with a real
+        // poster. Page 1 holds the newest 40, page 2 the next 40 — present
+        // both as separate home rows so the home screen has more than one section.
+        val docs = try {
+            val p1 = app.get("$mainUrl/series-list/").document
+            val p2 = app.get("$mainUrl/series-list/page/2/").document
+            listOf(p1, p2)
         } catch (_: Exception) {
             return newHomePageResponse(emptyList())
         }
-        val items = doc.select("a[href*=/series/]")
-            .mapNotNull { it.searchCard() }
-        // Deduplicate series by URL
-        val seen = mutableSetOf<String>()
-        val unique = items.filter { seen.add(it.url) }
-        return newHomePageResponse(listOf(HomePageList("المسلسلات", unique)))
+        fun section(doc: org.jsoup.nodes.Document): List<SearchResponse> {
+            val seen = mutableSetOf<String>()
+            return doc.select("a[href*=/series/]")
+                .mapNotNull { it.searchCard() }
+                .filter { seen.add(it.url) }
+        }
+        return newHomePageResponse(
+            listOf(
+                HomePageList("المسلسلات", section(docs[0])),
+                HomePageList("المزيد من المسلسلات", section(docs[1]))
+            )
+        )
     }
 
     override suspend fun search(query: String): List<SearchResponse> {
@@ -258,12 +266,16 @@ class KrmziProvider : MainAPI() {
         Log.d(TAG, "loadLinks START for: $data")
         try {
             // ---- Pass 1: cheap static fetch (in case Turnstile is thin/off) ----
-            val embedBase = mutableListOf<Pair<String, String>>() // (embedUrl, refererEmbed)
+            // Keep each server's human name (Arab HD, estream, box, now, Red HD,
+            // Pro HD, ok) so every server link is distinct in CloudStream.
+            val embedBase = mutableListOf<Triple<String, String, String>>() // (embedUrl, referer, serverName)
             val staticDoc = try { app.get(data, headers = mapOf("User-Agent" to UA)).document } catch (_: Exception) { null }
             if (staticDoc != null) {
                 staticDoc.select("li[data-server]").forEach { li ->
                     val id = li.attr("data-server")
-                    val nm = li.attr("data-name")
+                    val nm = li.attr("data-name").ifBlank {
+                        li.selectFirst(".title")?.text()?.trim().orEmpty()
+                    }
                     if (id.isNotBlank()) {
                         val url = when (nm) {
                             "Arab HD" -> "https://arabhd.onl/embed-$id.html"
@@ -275,7 +287,7 @@ class KrmziProvider : MainAPI() {
                             "ok" -> "https://ok.ru/videoembed/$id"
                             else -> ""
                         }
-                        if (url.isNotBlank()) embedBase += (url to mainUrl)
+                        if (url.isNotBlank()) embedBase += Triple(url, mainUrl, nm.ifBlank { hostLabel(url) })
                     }
                 }
             }
@@ -302,7 +314,9 @@ class KrmziProvider : MainAPI() {
                     .filter { embedRe.containsMatchIn(it) }
                     .distinct()
                 Log.d(TAG, "WebView captured embed URLs: $captured")
-                captured.forEach { embedBase += (it to mainUrl) }
+                captured.forEach {
+                    embedBase += Triple(it, mainUrl, hostLabel(it))
+                }
             }
 
             if (embedBase.isEmpty()) {
@@ -310,10 +324,10 @@ class KrmziProvider : MainAPI() {
                 return false
             }
 
-            // ---- Unpack each embed -> HLS, emit ----
+            // ---- Unpack each embed -> HLS, emit (each keeps a distinct name) ----
             val seen = mutableSetOf<String>()
-            embedBase.distinctBy { it.first }.forEach { (embedUrl, ref) ->
-                val label = hostLabel(embedUrl)
+            embedBase.distinctBy { it.first }.forEach { (embedUrl, ref, serverName) ->
+                val label = serverName.ifBlank { hostLabel(embedUrl) }
                 try {
                     val hdrs = mapOf("User-Agent" to UA, "Referer" to ref)
                     val r = app.get(embedUrl, referer = ref, headers = hdrs)

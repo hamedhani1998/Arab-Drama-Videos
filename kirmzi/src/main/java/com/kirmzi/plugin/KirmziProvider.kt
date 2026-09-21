@@ -172,30 +172,40 @@ class KirmziProvider : MainAPI() {
                 }.orEmpty()
             }.orEmpty()
         if (title.isBlank()) return null
-        return if (href.contains("/series/") || href.contains("/episode/"))
-            newTvSeriesSearchResponse(title, href) {
+        return when {
+            href.contains("/series/") -> newTvSeriesSearchResponse(title, href) {
                 this.posterUrl = poster.ifBlank { null }
             }
-        else null
+            href.contains("/movies/") || href.contains("/film/") -> newMovieSearchResponse(title, href, TvType.Movie) {
+                this.posterUrl = poster.ifBlank { null }
+            }
+            else -> null
+        }
     }
 
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
         // The homepage only shows episode cards, which the user does not want
-        // scattered across the home. Use the site's full series listing page,
-        // which lists each series once with its real poster.
-        // kirmzi.tv lists its series at /turkish-series/ (pagination not needed).
-        val url = if (page <= 1) "$mainUrl/turkish-series/" else "$mainUrl/turkish-series/?page=$page"
-        val doc = try {
-            app.get(url).document
-        } catch (_: Exception) {
-            return newHomePageResponse(emptyList())
-        }
-        val items = doc.select(".block-post a[href*=/series/], a.posterThumb[href*=/series/]")
-            .mapNotNull { it.toSearchResponse() }
-        // Deduplicate series by URL (the listing may repeat a series across sections)
+        // scattered across the home. Use the site's real listings: the full
+        // series page and (if present) the movies page, so the home has more
+        // than one section.
+        val items = ArrayList<SearchResponse>()
         val seen = mutableSetOf<String>()
-        val unique = items.filter { seen.add(it.url) }
-        return newHomePageResponse(listOf(HomePageList("المسلسلات", unique)))
+        fun addAll(doc: org.jsoup.nodes.Document?) {
+            if (doc == null) return
+            doc.select(".block-post a[href*=/series/], a.posterThumb[href*=/series/], a[href*=/movies/]")
+                .mapNotNull { it.toSearchResponse() }
+                .forEach { if (seen.add(it.url)) items += it }
+        }
+        addAll(try { app.get("$mainUrl/turkish-series/").document } catch (_: Exception) { null })
+        addAll(try { app.get("$mainUrl/movies/").document } catch (_: Exception) { null })
+        if (items.isEmpty()) return newHomePageResponse(emptyList())
+        // Section 1 = series; Section 2 = films (kept only if it has entries).
+        val series = items.filter { it.url.contains("/series/") }
+        val films = items.filter { it.url.contains("/movies/") }
+        val sections = mutableListOf<HomePageList>()
+        if (series.isNotEmpty()) sections += HomePageList("المسلسلات", series)
+        if (films.isNotEmpty()) sections += HomePageList("الأفلام", films)
+        return newHomePageResponse(sections)
     }
 
     override suspend fun search(query: String): List<SearchResponse> {
@@ -230,6 +240,14 @@ class KirmziProvider : MainAPI() {
             ?: doc.selectFirst("img")?.attr("src")
 
         val description = doc.selectFirst("[class*=description], [class*=sinops], [class*=story]")?.text()
+
+        // Movie page (kirmzi.tv /movies/...) → no episodes.
+        if (url.contains("/movies/") || url.contains("/film/")) {
+            return newMovieLoadResponse(title, url, TvType.Movie, url) {
+                this.posterUrl = poster
+                this.plot = description
+            }
+        }
 
         // Episodes from the series page
         val episodes = ArrayList<Episode>()
@@ -267,7 +285,7 @@ class KirmziProvider : MainAPI() {
             "User-Agent" to UA
         )
         try {
-            // 1. Episode page -> anaplayer iframe
+            // 1. Episode page -> anaplayer iframe (the albaplayer wrapper).
             val epDoc = app.get(data).document
             val anaIframe = epDoc.select("iframe").mapNotNull { it.attr("src").ifBlank { null } }
                 .firstOrNull { it.contains("anaplayer") } ?: run {
@@ -275,49 +293,70 @@ class KirmziProvider : MainAPI() {
                 return false
             }
             val anaUrl = if (anaIframe.startsWith("//")) "https:$anaIframe" else anaIframe
+            val anaOrigin = originOf(anaUrl)
             Log.d(TAG, "anaplayer base: $anaUrl")
 
-            // 2. Fetch the albaplayer page; its <a> tabs give the serv=N pages.
+            // 2. Fetch the albaplayer page; its <a> tabs are the named servers
+            //    (CDNPlus, MP4Plus, AnaFast, Vidoba, VidSpeed, OK) -> ?serv=N.
+            //    Keep the tab's text label so each emitted link gets its real name.
             val anaDoc = app.get(anaUrl, referer = mainUrl, headers = headers).document
-            val tabHrefs = anaDoc.select("a[href*='serv=']").map { it.attr("href") }
-                .map { if (it.startsWith("//")) "https:$it" else if (it.startsWith("/")) "https://w.anaplayer.online$it" else it }
-                .filter { it.contains("serv=") }.distinct()
-            Log.d(TAG, "server tabs: ${tabHrefs.size} : ${tabHrefs.joinToString(", ") { it.substringAfter("serv=") }}")
+            val tabs = anaDoc.select("a[href*='serv=']").mapNotNull { a ->
+                val href = a.attr("href")
+                val label = a.text().trim().ifBlank {
+                    a.selectFirst(".title")?.text()?.trim().orEmpty()
+                }
+                val abs = when {
+                    href.startsWith("//") -> "https:$href"
+                    href.startsWith("/") ->
+                        Regex("""https?://[^/]+""").find(anaUrl)?.value + href
+                    else -> href
+                }
+                // The visible label (e.g. "CDNPlus") — fall back to serv=N when
+                // a tab hand-picked a human name.
+                val name = label.ifBlank { "سيرفر " + href.substringAfter("serv=").substringBefore("&") }
+                if (abs.contains("serv=")) abs to name else null
+            }.distinctBy { it.first }
+            Log.d(TAG, "server tabs: ${tabs.size} : ${tabs.joinToString(", ") { it.first.substringAfter("serv=") + "=" + it.second }}")
 
-            // If no tabs (sometimes anaplayer renders iframe directly), fall back to any
-            // iframe that points to a real embed host.
-            if (tabHrefs.isEmpty()) {
+            // If no tabs (sometimes anaplayer renders the embed iframe directly),
+            // fall back to any iframe that points to a real embed host.
+            if (tabs.isEmpty()) {
                 val directEmbeds = anaDoc.select("iframe").mapNotNull { it.attr("src").ifBlank { null } }
                     .filter { !it.contains("w.anaplayer") }
                 if (directEmbeds.isNotEmpty()) {
-                    directEmbeds.forEach { emitEmbed(it, originOf(anaUrl), headers, callback) }
+                    directEmbeds.forEach {
+                        emitEmbed(it, originOf(anaUrl), headers, callback, label = hostLabel(it))
+                    }
                 }
-                return tabHrefs.isEmpty()
+                return tabs.isEmpty()
             }
 
             // 3. For each tab, fetch ?serv=N and read its embed iframe (or direct player).
             val results = coroutineScope {
-                tabHrefs.map { tabHref ->
+                tabs.map { (tabHref, label) ->
                     async {
                         val embed = try {
                             val page = app.get(tabHref, referer = anaUrl, headers = headers)
                             val iframeSrc = page.document.select("iframe").mapNotNull { it.attr("src").ifBlank { null } }
                                 .firstOrNull { !it.contains("w.anaplayer") }
-                            iframeSrc?.let { Triple(tabHref, it, "") }
+                            iframeSrc?.let { Triple(tabHref, it, label) }
                         } catch (_: Exception) { null }
                         embed
                     }
                 }.mapNotNull { it.await() }
             }
 
-            // 4. Emit each embed (dedupe by URL).
+            // 4. Emit each embed with its real server name (dedupe by URL).
             val seen = mutableSetOf<String>()
-            results.forEach { (tabUrl, embedSrc, _) ->
-                val embedUrl = if (embedSrc.startsWith("//")) "https:$embedSrc"
-                else if (embedSrc.startsWith("/")) "https://w.anaplayer.online$embedSrc"
-                else embedSrc
+            results.forEach { (_, embedSrc, tabLabel) ->
+                val embedUrl = when {
+                    embedSrc.startsWith("//") -> "https:$embedSrc"
+                    embedSrc.startsWith("/") -> anaOrigin + embedSrc
+                    else -> embedSrc
+                }
+                val label = tabLabel.ifBlank { hostLabel(embedUrl) }
                 if (seen.add(embedUrl)) {
-                    emitEmbed(embedUrl, originOf(anaUrl), headers, callback)
+                    emitEmbed(embedUrl, anaOrigin, headers, callback, label = label)
                 }
             }
             return true
@@ -331,10 +370,10 @@ class KirmziProvider : MainAPI() {
         embedUrl: String,
         refererFromPrev: String,
         headersBase: Map<String, String>,
-        callback: (ExtractorLink) -> Unit
+        callback: (ExtractorLink) -> Unit,
+        label: String = hostLabel(embedUrl)
     ) {
         val embedOrigin = originOf(embedUrl)
-        val label = hostLabel(embedUrl)
         try {
             val hdrs = headersBase.toMutableMap()
             hdrs["Referer"] = refererFromPrev
