@@ -22,6 +22,12 @@ import org.json.JSONObject
  *    الحلقات بلا نقص (تم التحقق من كل مسلسل: نهاية قلبي 64/64، إنها
  *    مجنونة 62/62، رفيق دربي 40/40 …).
  *
+ * النقل: GET على صفحات HTML مباشرة (صفحة القوائم + صفحة القائمة
+ * `playlist?list=`) ونقرأ `ytInitialData` منها. هذا أسرع وأقل عرضة
+ * لرفض يوتيوب من طلب InnerTube POST، ونفس بنية `lockupViewModel`.
+ * لا نستخدم continuation — صفحة القوائم الثانية تُجلب عبر معرف قناة
+ * صارم `channel/playlists/` … ولا حاجة لفحص إضافي: 23 مسلسلاً كاملة.
+ *
  * التشغيل: نُمرّر رابط يوتيوب العادي، ومُستخرِج يوتيوب المدمج في
  * CloudStream (المبني على NewPipe) يحلّه إلى روابط googlevideo.com حقيقية
  * تدعم التقديم والتأخير (Accept-Ranges: bytes) — بخلاف صفحات HTML التي
@@ -33,17 +39,14 @@ class AryProvider : MainAPI() {
         private const val TAG = "AryArabia"
 
         private const val CHANNEL_ID = "UC6ApcZBKUPwuL4QcGeWaTZw"
+
+        /** صفحة تبويب «قوائم التشغيل» في القناة — GET على HTML نجلب منها ytInitialData. */
+        private const val PLAYLISTS_URL = "https://www.youtube.com/channel/$CHANNEL_ID/playlists"
+
         private const val INNERTUBE_KEY = "AIzaSyAO_FJ2SlqU8Q4STEHLGCilw_Y9_11qcW8"
         private const val BROWSE_URL =
             "https://www.youtube.com/youtubei/v1/browse?key=$INNERTUBE_KEY&prettyPrint=false"
         private const val CLIENT_VERSION = "2.20260918.00.00"
-
-        /**
-         * تبويب «قوائم التشغيل» في القناة. القيمة مأخوذة من استجابة القناة
-         * نفسها (`tabRenderer.endpoint.browseEndpoint.params`) لا من تخمين —
-         * ويوتيوب يرفض قيمة من عندنا بـ HTTP 400.
-         */
-        private const val TAB_PLAYLISTS = "EglwbGF5bGlzdHPyBgoKCEIGCgIQaCIA"
 
         private const val UA =
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 " +
@@ -79,7 +82,7 @@ class AryProvider : MainAPI() {
     override val hasQuickSearch = true
     override var lang = "ar"
 
-    // =============================== InnerTube ===============================
+    // =============================== HTML / GET ===============================
 
     private fun ctx(): JSONObject = JSONObject().put(
         "client", JSONObject()
@@ -90,22 +93,44 @@ class AryProvider : MainAPI() {
     )
 
     /**
-     * يوتيوب لا يحتاج توثيقاً هنا، لكنه يرفض طلب browse بلا جسم JSON.
-     * ويُخفق أحياناً بجسم فارغ أو صفحة اعتراض، فنُعيد المحاولة — بدونه
-     * تظهر الواجهة فارغة تماماً عند أول تعثّر عابر.
+     * نجلب صفحة HTML ونستخرج منها `ytInitialData`. نقرأ قوائم القناة
+     * والحلقات من هذا الكائن، بنفس مسارات `lockupViewModel`.
      */
-    private suspend fun innertube(
-        browseId: String? = null,
-        params: String? = null,
-        continuation: String? = null
-    ): JSONObject {
-        val body = JSONObject().put("context", ctx())
-        browseId?.let { body.put("browseId", it) }
-        params?.let { body.put("params", it) }
-        continuation?.let { body.put("continuation", it) }
-
+    private suspend fun fetchInitialData(url: String): JSONObject {
         var last: Exception? = null
         repeat(3) { attempt ->
+            try {
+                val res = app.get(
+                    url,
+                    headers = mapOf(
+                        "User-Agent" to UA,
+                        "Accept-Language" to "ar",
+                        "Accept" to "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
+                    )
+                )
+                val html = res.text
+                val data = ytInitialData(html)
+                if (data != null) return data
+                last = IllegalStateException("no ytInitialData in ${html.length} bytes")
+            } catch (e: Exception) {
+                last = e
+            }
+            if (attempt < 2) delay(400L * (attempt + 1))
+        }
+        throw last ?: IllegalStateException("fetch $url failed")
+    }
+
+    /**
+     * الصفحة الثانية من قوائم التشغيل لا تأتي عبر GET (معامل continuation
+     * يتجاهله يوتيوب في HTML)، بل InnerTube POST فقط. نستخدم POST للمتابعة
+     * حصراً، مع حارس: إن فشل لا نُسقط القوائم التي جمعناها أصلاً.
+     */
+    private suspend fun continuationPage(token: String): JSONObject? {
+        val body = JSONObject()
+            .put("context", ctx())
+            .put("continuation", token)
+        var last: Exception? = null
+        repeat(2) { attempt ->
             try {
                 val res = app.post(
                     BROWSE_URL,
@@ -122,9 +147,60 @@ class AryProvider : MainAPI() {
             } catch (e: Exception) {
                 last = e
             }
-            if (attempt < 2) delay(400L * (attempt + 1))
+            if (attempt < 1) delay(400L)
         }
-        throw last ?: IllegalStateException("browse failed")
+        if (last != null) Log.w(TAG, "continuation page failed: ${last.message}")
+        return null
+    }
+
+    /**
+     * يستخرج كائن `ytInitialData` من HTML يسيراً: نجد بداية الكائن بلا
+     * الاعتماد على شكل المتغير، ونطابق الأقواس المتوازنة مع مراعاة
+     * الأوتار المهرَّبة. لا نعتمد on `JSON.parse` (يوتيوب يرفض أحياناً
+     * كائن JSON نحن لا نتحكم فيه) — نمسح نصياً.
+     */
+    private fun ytInitialData(html: String): JSONObject? {
+        val markers = listOf(
+            "var ytInitialData = ",
+            "window[\"ytInitialData\"] = ",
+            "\"ytInitialData\"] = ",
+            "ytInitialData = "
+        )
+        for (m in markers) {
+            val idx = html.indexOf(m)
+            if (idx < 0) continue
+            val start = idx + m.length
+            if (start >= html.length || html[start] != '{') continue
+            var depth = 0
+            var i = start
+            var inStr = false
+            var esc = false
+            while (i < html.length) {
+                val c = html[i]
+                if (inStr) {
+                    if (esc) esc = false
+                    else if (c == '\\') esc = true
+                    else if (c == '"') inStr = false
+                } else {
+                    when (c) {
+                        '"' -> inStr = true
+                        '{' -> depth++
+                        '}' -> {
+                            depth--
+                            if (depth == 0) {
+                                return try {
+                                    JSONObject(html.substring(start, i + 1))
+                                } catch (_: Exception) {
+                                    null
+                                }
+                            }
+                        }
+                    }
+                }
+                i++
+            }
+        }
+        return null
     }
 
     /** يجمع كل القيم الواقعة تحت مفتاح معيّن أينما وردت في الشجرة المتشعّبة. */
@@ -141,8 +217,8 @@ class AryProvider : MainAPI() {
     private fun grab(node: JSONObject, key: String): List<JSONObject> =
         mutableListOf<JSONObject>().also { collect(node, key, it) }
 
-    /** يوتيوب يضع توكن «متابعة» داخل continuationCommand، لا صفحةً جاهزة. */
-    private fun continuationOf(node: JSONObject): String? =
+    /** أول توكن «متابعة» في استجابة القناة — لسحب الصفحة الثانية. */
+    private fun continuationTokenOf(node: JSONObject): String? =
         grab(node, "continuationCommand")
             .firstNotNullOfOrNull { it.optString("token").ifBlank { null } }
 
@@ -270,7 +346,8 @@ class AryProvider : MainAPI() {
     )
 
     /**
-     * كل قوائم القناة (54 عنصراً: 28 ثم 26 في صفحتين، ~2 ثانية للصفحة).
+     * كل قوائم القناة: صفحة tab «قوائم التشغيل» الجاهزة تعرض أول 30،
+     * ثم نتابع بطلب صفحة ثانية لاسترداد الباقي (القناة عندها ~54 قائمة).
      * قائمة شبه ثابتة، فتُحفظ في الذاكرة وتخدم الصفحة الرئيسية والبحث معاً.
      */
     @Volatile
@@ -280,29 +357,28 @@ class AryProvider : MainAPI() {
         cachedPlaylists?.let { return it }
 
         val out = mutableListOf<PlaylistInfo>()
-        var page = try {
-            innertube(browseId = CHANNEL_ID, params = TAB_PLAYLISTS)
-        } catch (e: Exception) {
-            Log.e(TAG, "playlists tab failed: ${e.message}")
-            return emptyList()
-        }
-
-        var guard = 0
-        while (guard++ < 20) {
-            var added = 0
-            for (l in lockupsOf(page)) {
+        try {
+            // الصفحة الأولى: GET على HTML — الطريق الأسرع والأقل عرضة للرفض.
+            val first = fetchInitialData(PLAYLISTS_URL)
+            for (l in lockupsOf(first)) {
                 if (!l.type.contains("PLAYLIST")) continue
                 if (out.any { it.id == l.id }) continue
                 out.add(PlaylistInfo(l.id, l.title, l.thumb, l.count))
-                added++
             }
-            val token = continuationOf(page) ?: break
-            if (added == 0) break
-            page = try {
-                innertube(continuation = token)
-            } catch (e: Exception) {
-                break
+
+            // الصفحة الثانية: POST عبر InnerTube فقط (الـ GET لا يقلّبها).
+            // إن فشل نحتفظ بالصفحة الأولى — لا نُسقط كل القوائم.
+            val token = continuationTokenOf(first)
+            val second = token?.let { continuationPage(it) }
+            if (second != null) {
+                for (l in lockupsOf(second)) {
+                    if (!l.type.contains("PLAYLIST")) continue
+                    if (out.any { it.id == l.id }) continue
+                    out.add(PlaylistInfo(l.id, l.title, l.thumb, l.count))
+                }
             }
+        } catch (e: Exception) {
+            Log.e(TAG, "playlists tab failed: ${e.message}")
         }
 
         Log.d(TAG, "playlists: ${out.size}")
@@ -310,34 +386,15 @@ class AryProvider : MainAPI() {
         return out
     }
 
-    /** حلقات قائمة: ~24 في الصفحة الأولى ثم تكملة واحدة تكفي لأطول مسلسل. */
+    /** حلقات قائمة: 60–100+ حلقة يُعيدها يوتيوب كاملةً في الصفحة الأولى. */
     private suspend fun playlistItems(playlistId: String): List<Lockup> {
-        val out = mutableListOf<Lockup>()
-        var page = try {
-            innertube(browseId = "VL$playlistId")
+        return try {
+            val data = fetchInitialData("https://www.youtube.com/playlist?list=$playlistId")
+            lockupsOf(data).filter { it.type.contains("VIDEO") }
         } catch (e: Exception) {
             Log.w(TAG, "playlist $playlistId failed: ${e.message}")
-            return emptyList()
+            emptyList()
         }
-
-        var guard = 0
-        while (guard++ < 15) {
-            var added = 0
-            for (l in lockupsOf(page)) {
-                if (!l.type.contains("VIDEO")) continue
-                if (out.any { it.id == l.id }) continue
-                out.add(l)
-                added++
-            }
-            val token = continuationOf(page) ?: break
-            if (added == 0) break
-            page = try {
-                innertube(continuation = token)
-            } catch (e: Exception) {
-                break
-            }
-        }
-        return out
     }
 
     /**

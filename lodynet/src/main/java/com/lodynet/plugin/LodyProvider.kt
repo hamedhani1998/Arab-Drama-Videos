@@ -773,15 +773,17 @@ class LodyProvider : MainAPI() {
                 }
             }
 
-            // Lody Plus: الحقل فارغ لكن القاعدة تُلحق TokenPlus1 — وهو رابط
-            // مباشر كامل (‎…/…-الحلقة-45/?st=…&e=…) وليس iframe لموقع خارجي،
-            // لذلك هو ما يُشغّل الحلقات الجديدة فعلاً.
+            // Lody Plus: الحقل فارغ لكن القاعدة تُلحق TokenPlus1 — وهو
+            // صفحة تشغيل على الموقع نفسه وليست iframe لموقع خارجي، لذلك هي
+            // ما يُشغّل الحلقات الجديدة فعلاً. نُمرّرها عبر tryManualExtract
+            // وليس كرابط مباشر: بعض الحلقات تُحمِّل الوسائط ديناميكياً
+            // (وهنا kebab page) فلا يُحسم mp4/m3u8 إحصاءً مسبقاً.
             val plus1 = servers.firstOrNull { it.id == LODY_PLUS_ID }
             if (plus1 != null && !tokenPlus1.isNullOrBlank()) {
                 val pageUrl = data.substringBefore('?').trimEnd('/')
                 val direct = pageUrl + "/" + tokenPlus1
                 if (done.add(direct)) {
-                    Log.d(TAG, "Lody Plus -> direct media: $direct")
+                    Log.d(TAG, "Lody Plus -> direct page: $direct")
                     targets.add(plus1 to direct)
                 }
             }
@@ -850,10 +852,13 @@ class LodyProvider : MainAPI() {
     ): Int {
         val referer = originOf(embedUrl)
 
-        // 0) Lody Plus: الرابط هو صفحة الموقع نفسها + الرمز، والمشغّل داخلها
-        //    يبني رابط الوسائط من PageData. نجلبها ونستخرج m3u8/mp4 مباشرة.
+        // 0) Lody Plus: الرابط صفحة تشغيل على الموقع، والمشغّل داخلها يبني
+        //    رابط الوسائط من PageData. نجلبها ونستخرج m3u8/mp4 مباشرة.
         if (referer.contains("lodynet.top")) {
-            if (tryManualExtract(embedUrl, referer, serverName, callback)) return 1
+            try {
+                if (tryManualExtract(embedUrl, referer, serverName, callback)) return 1
+            } catch (_: Exception) {
+            }
             Log.w(TAG, "$serverName: Lody Plus page had no direct media")
             return 0
         }
@@ -1034,12 +1039,15 @@ class LodyProvider : MainAPI() {
                 return false
             }
             media.forEach { u ->
-                // hls.js في الموقع يشغّل m3u8؛ وبعض الروابط تأتي بلا امتداد
-                // (ملفات البث المقسّمة) — نعتبرها HLS حين لا تحمل امتداداً معروفاً.
-                val isHls = u.contains(".m3u8", true) ||
-                    (!u.contains(".mp4", true) && !u.contains(".webm", true) && !u.contains(".mov", true))
+                // m3u8 (أو امتداد HLS) ← M3U8. بقية الروابط بلا امتداد معروف
+                // (وثمة ملفات .m4s/مقاطع DASH) تُعامَد كفيديو مباشر، لا HLS:
+                // المشغّل يرفض DASH مقسّماً دون مانيfest فيدى ويعطي 2004.
+                val isHls = u.contains(".m3u8", true) || u.contains(".m3u", true)
+                val hasVideoExt = u.contains(".mp4", true) || u.contains(".webm", true) ||
+                    u.contains(".mov", true) || u.contains(".m4s", true) || u.contains(".ts", true)
                 val type = if (isHls) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
-                emit(callback, if (label.isBlank()) "Lody Plus" else label, u, type, originOf(embedUrl))
+                val finalUrl = if (u.startsWith("//")) "https:$u" else u
+                emit(callback, if (label.isBlank()) "Lody Plus" else label, finalUrl, type, originOf(embedUrl))
             }
             true
         } catch (e: Exception) {
