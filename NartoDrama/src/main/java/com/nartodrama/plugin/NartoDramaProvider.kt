@@ -6,18 +6,23 @@ import com.fasterxml.jackson.databind.ObjectMapper
 import com.fasterxml.jackson.module.kotlin.registerKotlinModule
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
 
 private val mapper = ObjectMapper().registerKotlinModule()
     .configure(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES, false)
 
 private const val UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
 
-// Standalone "Narto Drama" extension. v45: apex narto-drama.com is now fronted by a
-// Cloudflare "Checking your browser..." JS challenge (raw HTTP clients AND the app's OkHttp
-// both get the challenge page, never content) — so this provider now targets the verified-live
-// edge host, same as the Edge extension. Still 100% independent: own module, own cache, own
-// refresh channel, own cooldown handling. No shared base class with the other source.
-private const val NARTO_HOST = "https://edge.narto-drama.com"
+// Standalone "Narto Drama" extension. v46: this provider carries its OWN domain — all
+// links/cards/detail/refresh URLs use the apex host https://narto-drama.com (per user:
+// "اجعل كل مصدر يحمل الرابط الخاص به"). Browsing HTML (home "/" and "/search") is fetched
+// from the live edge host (BRW_HOST) because apex front-ends those routes with a Cloudflare
+// JS challenge; only refresh/playback/detail go to apex (verified live: detail 200/82eps,
+// refresh {"ok":true,"play_url":"stream-e1..."}). Still 100% independent of the Edge source.
+private const val NARTO_HOST = "https://narto-drama.com"
+private const val BRW_HOST = "https://edge.narto-drama.com"
 private const val STREAM_HOST = "https://stream.narto-drama.com"
 
 // Backend hosts that are dead (DNS NODATA / non-existent domain) and must NOT be emitted as
@@ -72,14 +77,17 @@ class NartoDramaProvider : MainAPI() {
     override val supportedTypes = setOf(TvType.TvSeries, TvType.Movie)
 
     // Main screen = one section per tab, each a distinct Arabic query (verified live: different
-    // queries return DIFFERENT feeds, 0 overlap). Each tab fetches ONE query when opened.
-    // Capped to 12 so first paint is light.
+    // queries return DIFFERENT feeds, 0 overlap). fetchSearch caches per query, and getMainPage
+    // runs ALL tabs in parallel so hopping tabs never re-fetches. First paint uses the requested
+    // tab's own feed.
     override val mainPage = mainPageOf(
         "دراما" to "🎬 دراما",
         "مدبلج" to "🎙️ مدبلج",
         "رومانسي" to "💕 رومانسي",
         "أكشن" to "⚔️ أكشن",
     )
+
+    private val homeSections = listOf("دراما", "مدبلج", "رومانسي", "أكشن")
 
     // Referer for all requests/links. This is just an HTTP Referer header the narto stream/
     // subtitle servers expect; it does NOT merge this source with the Edge extension.
@@ -88,6 +96,12 @@ class NartoDramaProvider : MainAPI() {
     // Per-tab in-memory cache so re-entering / tab-hopping serves the list instantly instead of
     // re-fetching the heavy /search page.
     private val searchCache = HashMap<String, String>()
+
+    // Cached edge home "/" feed — the guaranteed never-blank fallback (verified live: it always
+    // returns the content row, unlike a single /search which can fail or 520). Poster images are
+    // absolute (img.nartodrama-api.online) and cards carry apex detail URLs, so the fallback
+    // renders identically under any tab name.
+    private var homeFeedCache: String? = null
 
     // Detect whether a stream URL is HLS or a direct video file. URL-based, no network probe.
     private fun inferStreamType(url: String): ExtractorLinkType {
@@ -124,11 +138,15 @@ class NartoDramaProvider : MainAPI() {
         }
     }
 
+    // Fetch a /search feed. Browsing HTML comes from the live edge host (BRW_HOST) — apex is
+    // Cloudflare-challenged for /search — but the cards' URLs embedded in the HTML already point
+    // at narto-drama.com, so everything the user taps carries THIS provider's own domain. Also
+    // rewrite any stray edge card URLs to apex so every handled link is consistently apex.
     private suspend fun fetchSearch(q: String): String? {
         searchCache[q]?.let { return it }
         val urlEncQ = java.net.URLEncoder.encode(q, "UTF-8")
         try {
-            val html = app.get("$mainUrl/search?lang=ar-SA&q=$urlEncQ&page=1&perPage=12", referer = nartoOrigin, headers = mapOf("User-Agent" to UA)).text
+            val html = app.get("$BRW_HOST/search?lang=ar-SA&q=$urlEncQ&page=1&perPage=12", referer = nartoOrigin, headers = mapOf("User-Agent" to UA)).text
             if (html.contains("\"@type\":\"ListItem\"")) {
                 searchCache[q] = html
                 return html
@@ -139,18 +157,57 @@ class NartoDramaProvider : MainAPI() {
         return null
     }
 
+    // The edge home "/" feed (Block-1 CollectionPage ListItems), cached. Apex "/" is
+    // Cloudflare-challenged so we read the feed from edge, which is always up.
+    private suspend fun fetchHomeFeed(): String? {
+        homeFeedCache?.let { return it }
+        try {
+            val html = app.get("$BRW_HOST/", referer = nartoOrigin, headers = mapOf("User-Agent" to UA)).text
+            if (html.contains("\"@type\":\"ListItem\"")) {
+                homeFeedCache = html
+                return html
+            }
+        } catch (e: Exception) {
+            android.util.Log.e("NartoDrama", "home feed fetch error", e)
+        }
+        return null
+    }
+
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse? {
         val t0 = System.currentTimeMillis()
         return try {
             val q = request.data.trim()
-            val html = fetchSearch(q)
-            if (html == null) {
-                android.util.Log.e("NartoDrama", "getMainPage fetch failed q=$q")
+            // One shared warm-up: fire the 3 OTHER category feeds + the home feed in parallel while
+            // the requested tab's own feed loads, so tab-hopping (which calls getMainPage again)
+            // hits the cache instead of re-fetching a 4-6s /search page. The requested tab's fetch
+            // runs inline (we need its answer for first paint anyway).
+            val warm = coroutineScope {
+                val targets = homeSections.filter { it != q } + "/*home*/"
+                targets.map { warmQ ->
+                    async { if (warmQ == "/*home*/") fetchHomeFeed() else fetchSearch(warmQ) }
+                }.awaitAll()
+            }
+            android.util.Log.e("NartoDrama", "getMainPage q=$q warm=${warm.count { it != null }}")
+
+            var html = fetchSearch(q)
+            var fromFallback = false
+            if (html == null || parseSearchItems(html).isEmpty()) {
+                // Tab's own feed failed/empty — never blank the screen: serve it from the shared
+                // home feed instead (always present, and cards carry apex URLs so nothing changes).
+                android.util.Log.e("NartoDrama", "getMainPage q=$q empty/failed -> fallback home feed")
+                html = fetchHomeFeed()
+                fromFallback = true
+                if (html == null) {
+                    android.util.Log.e("NartoDrama", "getMainPage fetch failed q=$q")
+                    return null
+                }
+            }
+            android.util.Log.e("NartoDrama", "getMainPage q=$q fetchMs=${System.currentTimeMillis() - t0} len=${html.length} fallback=$fromFallback")
+            val items = parseSearchItems(html)
+            if (items.isEmpty()) {
+                android.util.Log.e("NartoDrama", "getMainPage q=$q no items")
                 return null
             }
-            android.util.Log.e("NartoDrama", "getMainPage q=$q fetchMs=${System.currentTimeMillis() - t0} len=${html.length}")
-            val items = parseSearchItems(html)
-            if (items.isEmpty()) return null
             val list = items.take(12).mapNotNull { it.toSearchResponse() }
             if (list.isEmpty()) null else newHomePageResponse(request.name, list)
         } catch (e: Exception) {

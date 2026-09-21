@@ -6,6 +6,9 @@ import com.fasterxml.jackson.databind.ObjectMapper
 import com.fasterxml.jackson.module.kotlin.registerKotlinModule
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
 
 private val mapper = ObjectMapper().registerKotlinModule()
     .configure(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES, false)
@@ -71,14 +74,17 @@ class EdgeNartoProvider : MainAPI() {
     override val supportedTypes = setOf(TvType.TvSeries, TvType.Movie)
 
     // Main screen = one section per tab, each a distinct Arabic query (verified live: different
-    // queries return DIFFERENT feeds, 0 overlap). Each tab fetches ONE query when opened.
-    // Capped to 12 so first paint is light.
+    // queries return DIFFERENT feeds, 0 overlap). fetchSearch caches per query, and getMainPage
+    // runs ALL tabs in parallel so hopping tabs never re-fetches. First paint uses the requested
+    // tab's own feed.
     override val mainPage = mainPageOf(
         "دراما" to "🎬 دراما",
         "مدبلج" to "🎙️ مدبلج",
         "رومانسي" to "💕 رومانسي",
         "أكشن" to "⚔️ أكشن",
     )
+
+    private val homeSections = listOf("دراما", "مدبلج", "رومانسي", "أكشن")
 
     // Referer for all requests/links — the main domain. This is the ONLY "shared" value and it's
     // just an HTTP Referer header the narto stream/subtitle servers expect; it does NOT merge the
@@ -88,6 +94,12 @@ class EdgeNartoProvider : MainAPI() {
     // Per-tab in-memory cache so re-entering / tab-hopping serves the list instantly instead of
     // re-fetching the heavy /search page.
     private val searchCache = HashMap<String, String>()
+
+    // Cached edge home "/" feed — the guaranteed never-blank fallback (verified live: it always
+    // returns the content row, unlike a single /search which can fail or 520). Posters are
+    // absolute (img.nartodrama-api.online) and cards carry edge detail URLs, so the fallback
+    // renders identically under any tab name.
+    private var homeFeedCache: String? = null
 
     // Detect whether a stream URL is HLS or a direct video file. URL-based, no network probe.
     private fun inferStreamType(url: String): ExtractorLinkType {
@@ -139,18 +151,55 @@ class EdgeNartoProvider : MainAPI() {
         return null
     }
 
+    // The edge home "/" feed (Block-1 CollectionPage ListItems), cached.
+    private suspend fun fetchHomeFeed(): String? {
+        homeFeedCache?.let { return it }
+        try {
+            val html = app.get("$mainUrl/", referer = nartoOrigin, headers = mapOf("User-Agent" to UA)).text
+            if (html.contains("\"@type\":\"ListItem\"")) {
+                homeFeedCache = html
+                return html
+            }
+        } catch (e: Exception) {
+            android.util.Log.e("EdgeNarto", "home feed fetch error", e)
+        }
+        return null
+    }
+
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse? {
         val t0 = System.currentTimeMillis()
         return try {
             val q = request.data.trim()
-            val html = fetchSearch(q)
-            if (html == null) {
-                android.util.Log.e("EdgeNarto", "getMainPage fetch failed q=$q")
+            // Fire the 3 OTHER category feeds + the home feed in parallel while the requested
+            // tab's own feed loads, so tab-hopping hits the cache instead of re-fetching a
+            // 4-6s /search page.
+            val warm = coroutineScope {
+                val targets = homeSections.filter { it != q } + "/*home*/"
+                targets.map { warmQ ->
+                    async { if (warmQ == "/*home*/") fetchHomeFeed() else fetchSearch(warmQ) }
+                }.awaitAll()
+            }
+            android.util.Log.e("EdgeNarto", "getMainPage q=$q warm=${warm.count { it != null }}")
+
+            var html = fetchSearch(q)
+            var fromFallback = false
+            if (html == null || parseSearchItems(html).isEmpty()) {
+                // Tab's own feed failed/empty — never blank the screen: serve the shared home
+                // feed instead (always present).
+                android.util.Log.e("EdgeNarto", "getMainPage q=$q empty/failed -> fallback home feed")
+                html = fetchHomeFeed()
+                fromFallback = true
+                if (html == null) {
+                    android.util.Log.e("EdgeNarto", "getMainPage fetch failed q=$q")
+                    return null
+                }
+            }
+            android.util.Log.e("EdgeNarto", "getMainPage q=$q fetchMs=${System.currentTimeMillis() - t0} len=${html.length} fallback=$fromFallback")
+            val items = parseSearchItems(html)
+            if (items.isEmpty()) {
+                android.util.Log.e("EdgeNarto", "getMainPage q=$q no items")
                 return null
             }
-            android.util.Log.e("EdgeNarto", "getMainPage q=$q fetchMs=${System.currentTimeMillis() - t0} len=${html.length}")
-            val items = parseSearchItems(html)
-            if (items.isEmpty()) return null
             val list = items.take(12).mapNotNull { it.toSearchResponse() }
             if (list.isEmpty()) null else newHomePageResponse(request.name, list)
         } catch (e: Exception) {

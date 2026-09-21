@@ -5,6 +5,9 @@ import com.fasterxml.jackson.databind.ObjectMapper
 import com.fasterxml.jackson.module.kotlin.registerKotlinModule
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.GlobalScope
+import kotlinx.coroutines.launch
 import org.jsoup.nodes.Document
 
 private val mapper = ObjectMapper().registerKotlinModule()
@@ -91,19 +94,97 @@ class ReelreeProvider : MainAPI() {
         }
     }
 
-    override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse? {
-        return try {
-            val base = request.data
-            val url = when {
-                base.contains("?") -> {
-                    val (path, q) = base.split("?", limit = 2)
-                    if (page > 1) "$mainUrl/$path/page/$page/?$q" else "$mainUrl/$path/?$q"
-                }
-                else -> if (page > 1) "$mainUrl/${base}page/$page/" else "$mainUrl/$base"
+    // ---- Main-page speed (v3): Reelree is Akamai-fronted and SLOW, and the main page is 16
+    // separate row fetches. Every re-open / tab-hop used to re-fetch the whole row and pay full
+    // server latency, and a single failing row returned null → blank section. Now:
+    //   • every row's parsed cards are cached per data() key,
+    //   • re-opening an already-cached row serves the cached cards instantly (never re-fetches),
+    //   • on first open we warm ALL remaining rows in the background so the user hopping tabs
+    //     gets instant cards,
+    //   • a row that fails/empties falls back to the most-recently fetched feed instead of blanking.
+    // The row keys are exactly the mainPage data() values (listed here so the background warm can
+    // iterate the whole main screen without depending on the cloudstream MainPage API surface).
+    private val allRows: List<String> = buildList {
+        add("explore/"); add("explore/?sort=trending"); add("tag/metarjam-arabi/"); add("tag/mudabalaj-arabi/"); add("tag/lang-en/")
+        addAll(platformRows.map { it.first })
+    }
+
+    private val rowCache = HashMap<String, List<SearchResponse>>()
+    private var warmStarted = false
+    private var lastGoodFeed: List<SearchResponse>? = null
+    private val rowLock = Any()
+
+    private suspend fun buildRowUrl(base: String, page: Int): String {
+        return when {
+            base.contains("?") -> {
+                val (path, q) = base.split("?", limit = 2)
+                if (page > 1) "$mainUrl/$path/page/$page/?$q" else "$mainUrl/$path/?$q"
             }
+            else -> if (page > 1) "$mainUrl/${base}page/$page/" else "$mainUrl/$base"
+        }
+    }
+
+    private suspend fun fetchRowCards(base: String, page: Int): List<SearchResponse>? {
+        val url = buildRowUrl(base, page)
+        return try {
             val doc = app.get(url, referer = mainUrl).document
-            newHomePageResponse(request.name, parseCards(doc))
-        } catch (e: Exception) { null }
+            parseCards(doc)
+        } catch (e: Exception) {
+            null
+        }
+    }
+
+    override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse? {
+        val base = request.data
+        return try {
+            // Already-cached row or a paginated row (page>1 rendered once): serve instantly.
+            if (page > 1 || synchronized(rowLock) { rowCache.containsKey(base) }) {
+                synchronized(rowLock) { rowCache[base] }
+                    ?.takeIf { it.isNotEmpty() }
+                    ?.let { return newHomePageResponse(request.name, it) }
+            }
+            val fetched = fetchRowCards(base, page)
+            if (fetched != null && fetched.isNotEmpty()) {
+                synchronized(rowLock) {
+                    rowCache[base] = fetched
+                    lastGoodFeed = fetched
+                }
+            } else {
+                // Row fetch failed/empty — never blank the section: reuse this row's cached
+                // cards if we have them, else the most-recent fetched feed.
+                android.util.Log.e("Reelree", "row '$base' fetch failed/empty -> fallback")
+                synchronized(rowLock) { rowCache[base] }
+                    ?.takeIf { it.isNotEmpty() }
+                    ?.let { return newHomePageResponse(request.name, it) }
+                synchronized(rowLock) { lastGoodFeed }
+                    ?.takeIf { it.isNotEmpty() }
+                    ?.let { android.util.Log.e("Reelree", "row '$base' -> last good feed (${it.size})"); return newHomePageResponse(request.name, it) }
+                return null
+            }
+
+            // Background warm of all remaining rows on first open: fills caches so tab hops paint
+            // instantly. Runs detached — never blocks first paint.
+            if (!warmStarted) {
+                synchronized(rowLock) { if (warmStarted) false else { warmStarted = true; true } }.let { go ->
+                    if (go) {
+                        android.util.Log.e("Reelree", "starting background warm of all rows")
+                        GlobalScope.launch(Dispatchers.IO) {
+                            for (b in allRows) {
+                                if (b == base) continue
+                                val cards = fetchRowCards(b, 1)
+                                if (cards != null && cards.isNotEmpty()) {
+                                    synchronized(rowLock) { rowCache[b] = cards }
+                                }
+                            }
+                            android.util.Log.e("Reelree", "background warm complete (cached=${synchronized(rowLock) { rowCache.size }})")
+                        }
+                    }
+                }
+            }
+            newHomePageResponse(request.name, fetched)
+        } catch (e: Exception) {
+            null
+        }
     }
 
     override suspend fun search(query: String): List<SearchResponse>? {

@@ -1,4 +1,4 @@
-﻿version = 2
+﻿version = 3
 
 cloudstream {
     description = "إضافة Reelree - مسلسلات قصيرة مترجمة ومدبلجة"

@@ -61,10 +61,10 @@
         "name": "MinuteDrama"
     },
     {
-        "fileHash": "sha256-349dd7ee3f8083edc591a84f227cb9a89cf94adb59abfb9f6810ee8f380aad87",
+        "fileHash": "sha256-a05d0fc57fc7f8bbfb7eba4689d4d38a30da0b9378b5804043f90d8da602f1c3",
         "apiVersion": 1,
         "repositoryUrl": "https://github.com/hamedhani1998/Arab-Drama-Videos",
-        "fileSize": 37262,
+        "fileSize": 40263,
         "status": 1,
         "language": "ar",
         "authors": [
@@ -74,17 +74,17 @@
             "TvSeries",
             "Movie"
         ],
-        "version": 45,
+        "version": 46,
         "internalName": "NartoDrama",
         "description": "Narto Drama - مسلسلات دراما مترجمة",
         "url": "https://raw.githubusercontent.com/hamedhani1998/Arab-Drama-Videos/builds/NartoDrama.cs3",
         "name": "NartoDrama"
     },
     {
-        "fileHash": "sha256-6484c6045f4d3cbb844b8f367494b91711b91f20a490610b00acc3f7c6bfe5cb",
+        "fileHash": "sha256-475f664f3aa2bad1d9d715dea5ee9a5572055cf14cd14c57d376b27d70dec56b",
         "apiVersion": 1,
         "repositoryUrl": "https://github.com/hamedhani1998/Arab-Drama-Videos",
-        "fileSize": 37277,
+        "fileSize": 40194,
         "status": 1,
         "language": "ar",
         "authors": [
@@ -94,7 +94,7 @@
             "TvSeries",
             "Movie"
         ],
-        "version": 15,
+        "version": 16,
         "internalName": "NartoEdge",
         "description": "Edge Narto Drama - مسلسلات دراما مترجمة",
         "url": "https://raw.githubusercontent.com/hamedhani1998/Arab-Drama-Videos/builds/NartoEdge.cs3",
@@ -121,10 +121,10 @@
         "name": "NetShort"
     },
     {
-        "fileHash": "sha256-a314b7e185d33414af17ea04cc80712dc604b3412cdd6bfdd1a6a0955d140ff7",
+        "fileHash": "sha256-55301984ac45ae0015dfebd3565967bc906066b72bff180c626737390cc695c6",
         "apiVersion": 1,
         "repositoryUrl": "https://github.com/hamedhani1998/Arab-Drama-Videos",
-        "fileSize": 39504,
+        "fileSize": 39585,
         "status": 1,
         "language": "ar",
         "authors": [
@@ -134,7 +134,7 @@
             "TvSeries",
             "Movie"
         ],
-        "version": 21,
+        "version": 22,
         "internalName": "OnShort",
         "description": "OnShort - مسلسلات دراما قصيرة (عربي/إنجليزي)",
         "url": "https://raw.githubusercontent.com/hamedhani1998/Arab-Drama-Videos/builds/OnShort.cs3",
@@ -142,10 +142,10 @@
     },
     {
         "iconUrl": "",
-        "fileHash": "sha256-2aae2a247694ab2226fd9274f4e4f8fc609ab9e17ea7b9dc9830c4a9e25d46cf",
+        "fileHash": "sha256-0dd50d94bc6fee834f49ca260f3fd34c59eccc5a37ca70686c17daef7134f56f",
         "apiVersion": 1,
         "repositoryUrl": "https://github.com/hamedhani1998/Arab-Drama-Videos",
-        "fileSize": 23284,
+        "fileSize": 26449,
         "status": 1,
         "language": "ar",
         "authors": [
@@ -155,7 +155,7 @@
             "TvSeries",
             "Movie"
         ],
-        "version": 2,
+        "version": 3,
         "internalName": "Reelree",
         "description": "إضافة Reelree - مسلسلات قصيرة مترجمة ومدبلجة",
         "url": "https://raw.githubusercontent.com/hamedhani1998/Arab-Drama-Videos/builds/Reelree.cs3",

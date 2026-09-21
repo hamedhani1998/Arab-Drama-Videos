@@ -726,10 +726,14 @@ class OnShortProvider : MainAPI() {
             //  - "Media refresh failed: HTTP 5xx (401/500/504…)" = مصدر المنصة ينكسر/لا يجيب —
             //    رفض نهائي حقيقي، أوقف المحاولة فورًا بدل إعادة المحاولة البطيئة عدة مرات.
             //    (FreeReels مثلًا يرد 500 Internal Server Error — لا جدوى من تكرار 4 مرات.)
+            //  - "Media refresh failed: FlexTV ALL-EPISODES failed" (فاختبار حي 2026-09: HTTP 424)
+            //    = مصدر FlexTV الأصلي ينكسر لكن simulator يجدب "ALL-EPISODES" ويصدم 424 — لا بدّ
+            //    جودات ولا روابط وسيطة. معاملةٌ نهائية: أوقف فورًا بدل 4 محاولات + fallback بطيء.
             val notHandled = msg.contains("REST bridge") || msg.contains("not handled")
-            val refreshFail = msg.contains("refresh failed") && Regex("""HTTP\s+[45]\d\d""").containsMatchIn(msg)
+            val flextvDead = msg.contains("flextv") && msg.contains("ALL-EPISODES") && msg.contains("failed")
+            val refreshFail = msg.contains("refresh failed") && (Regex("""HTTP\s+[45]\d\d""").containsMatchIn(msg) || flextvDead)
             // رفضٌ نهائي حقيقي = المزود مرفوض من الوسيط (REST bridge/not handled) أو مصدره
-            // معطّل نهائيًا (Media refresh failed + HTTP 5xx). هذه لا جدوى من إعادتها.
+            // معطّل نهائيًا (Media refresh failed + HTTP 5xx/424/FlexTV). هذه لا جدوى من إعادتها.
             val permanentReject = notHandled || refreshFail
             // "MoboRels media refresh is already running" = الوسيط يقوم حاليًا بتحديث وسائط
             // MoBoRels؛ هذه حالة مؤقتة — إعادة المحاولة بعد لحظة قد تنجح (المزود يعمل على
@@ -782,6 +786,8 @@ class OnShortProvider : MainAPI() {
             msg.contains("REST bridge") || msg.contains("not handled") ->
                 "هذه المنصة مرفوضة من خادم OnShort نفسه. متاحة عبر مزودها المستقل من التطبيق (NetShort / ShortTV / ReelShort)."
             msg.contains("session expired") -> "انتهت جلسة التذكرة — حاول مرة أخرى"
+            msg.contains("flextv") && msg.contains("ALL-EPISODES") && msg.contains("failed") ->
+                "مصدر FlexTV معطّل من جهة OnShort حاليًا (فشل جلب الحلقات كاملة) — جرّب منصة أخرى."
             msg.contains("refresh failed") && Regex("""HTTP\s+5\d\d""").containsMatchIn(msg) ->
                 "مصدر هذه المنصة معطّل من جهة OnShort حاليًا (خطأ في السيرفر 5xx) — جرّب منصة أخرى أو لاحقًا."
             msg.contains("refresh failed") -> "مصدر المنصة لا يستجيب حاليًا (خطأ على المصدر الأصلي)"
