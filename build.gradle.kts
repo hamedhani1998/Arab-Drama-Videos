@@ -52,7 +52,7 @@ subprojects {
     cloudstream {
         setRepo(
             System.getenv("GITHUB_REPOSITORY")
-                ?: "https://github.com/hamedhani1998/arab-videos/"
+                ?: "https://github.com/hamedhani1998/Arab-Drama-Videos/"
         )
         authors = listOf("hamedhani1998")
     }
