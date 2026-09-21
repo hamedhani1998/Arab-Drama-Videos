@@ -266,10 +266,10 @@
     },
     {
         "iconUrl": "https://lodynet.top/wp-content/uploads/2019/07/cropped-lodynet-logo-1-192x192.png",
-        "fileHash": "sha256-77f813c8843ad6a9de1badc49a8794d06e3e86243599435ed31424f882d4eb25",
+        "fileHash": "sha256-8621b33809859fb564c0a96cabe204efc7f4ec0b04978c127559d4846884c7ea",
         "apiVersion": 1,
         "repositoryUrl": "https://github.com/hamedhani1998/Arab-Drama-Videos",
-        "fileSize": 42671,
+        "fileSize": 47310,
         "status": 1,
         "language": "ar",
         "authors": [
@@ -279,7 +279,7 @@
             "TvSeries",
             "Movie"
         ],
-        "version": 3,
+        "version": 4,
         "internalName": "lodynet",
         "description": "لودي نت - افلام ومسلسلات مترجمة ومدبلجة (lodynet.top)",
         "url": "https://raw.githubusercontent.com/hamedhani1998/Arab-Drama-Videos/builds/lodynet.cs3",

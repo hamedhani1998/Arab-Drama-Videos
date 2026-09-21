@@ -3,6 +3,7 @@ package com.lodynet.plugin
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
 import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
 import org.jsoup.nodes.Document
 import android.util.Log
@@ -13,14 +14,26 @@ class LodyProvider : MainAPI() {
         private const val UA =
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
 
-        // "Lody Plus 1" is filled server-side at watch-time only (Encrypted, empty
-        // Embed in the HTML) — it cannot be reproduced here, so it is skipped.
+        // "Lody Plus 1" و "VIP" يصلان دائماً بـ Embed فارغ (Encrypted=true) —
+        // يُملأان من الخادم وقت المشاهدة فقط، لذا لا يمكن إعادة إنتاجهما هنا.
         private const val LODY_PLUS_ID = 73
+        private const val VIP_ID = 1
         private const val VIDLO_ID = 116413
 
         private const val CAT = "https://lodynet.top/category/"
 
-        // Verified live: هر مسار يعيد صفّاً من البطاقات.
+        /**
+         * بحث القالب نفسه (Lodynet2020). هذا هو نفس الـ endpoint الذي يستدعيه
+         * الموقع عند الكتابة في مربع البحث، ويعيد JSON جاهزاً في ~1 ثانية،
+         * بدل صفحة /search/ التي تستغرق 3–20 ثانية وأحياناً لا تعيد نتائج.
+         */
+        private const val WP_SEARCH =
+            "https://lodynet.top/wp-content/themes/Lodynet2020/Api/RequestSearch.php?value="
+
+        /** واجهة ووردبريس: تُعيد كل حلقات أي قسم مُرقّم دفعة واحدة (حتى 100). */
+        private const val WP_POSTS = "https://lodynet.top/wp-json/wp/v2/posts"
+
+        // مسارات الأقسام على الرئيسية (مُتحقَّق منها: كل مسار يعيد صفّاً كاملاً)
         private val HOME_CATEGORIES = listOf(
             "مسلسلات تركية" to "مسلسلات-تركي",
             "مسلسلات هندية" to "مسلسلات-هنديه",
@@ -37,34 +50,40 @@ class LodyProvider : MainAPI() {
     override val supportedTypes = setOf(TvType.TvSeries, TvType.Movie)
     override var lang = "ar"
     override val hasMainPage = true
+    override val hasQuickSearch = true
 
     // ===================== helpers =====================
 
-    /** "…الحلقة 4" -> "…"  (اسم المسلسل بدون رقم الحلقة) */
+    /** "مسلسل هوس مترجم الحلقة 45" -> "مسلسل هوس مترجم" */
     private val epTitleRe = Regex("""\s*(?:ال)?حلقة\s*\d+.*$""")
-    private val epNumRe = Regex("""(?:ال)?حلقة\s*(\d+)""")
-    private val epNumUrlRe = Regex("""-ep(\d+)""", RegexOption.IGNORE_CASE)
+    private val epNumRe = Regex("""(?:ال)?حلقة\s*[^\d]{0,8}(\d+)""")
+    private val epNumUrlRe = Regex("""(?:-ep|-e)(\d+)""", RegexOption.IGNORE_CASE)
 
     /**
-     * مفتاح التجميع: رابط المسلسل بدون لاحقة الحلقة.
-     * الموقع يستخدم ثلاث صيغ:  -ep14 / -ep14-end   و   -e07
-     * و   -الحلقة-54  (تصل من HTML مُرمَّزة: %d8%a7%d9%84%d8%ad%d9%84%d9%82%d8%a9-54)
+     * لاحقة الحلقة في روابط الموقع. ثلاث صيغ:
+     *   -ep14 / -ep14-end    و    -e07    و    -الحلقة-54
+     * والصيغة الأخيرة تصل من HTML مُرمَّزة: %d8%a7%d9%84%d8%ad%d9%84%d9%82%d8%a9-54
      */
     private val epSuffixRe = Regex(
         """-(?:ep\d+(?:-end)?|e\d+|(?:ال|%d8%a7%d9%84)?(?:حلقة|%d8%ad%d9%84%d9%82%d8%a9)-\d+)/?$""",
         RegexOption.IGNORE_CASE
     )
 
-    /** رقم الحلقة من مُعرّف العنصر: <a id="Ep4" class="ItemEpisode"> */
-    private val epIdRe = Regex("""\d+""")
+    /** رقم الحلقة في نهاية الرابط — آخر ملاذ حين لا يحمل العنصر عنواناً مرقّماً. */
+    private val trailingNumRe = Regex("""-(\d+)/?$""")
 
     private fun seriesNameOf(title: String): String =
         epTitleRe.replace(title, "").trim().ifBlank { title.trim() }
 
-    private fun episodeNumberOf(text: String): Int? =
-        epNumRe.find(text)?.groupValues?.get(1)?.toIntOrNull()
-            ?: epNumUrlRe.find(text)?.groupValues?.get(1)?.toIntOrNull()
+    private fun episodeNumberOf(text: String, url: String = ""): Int? {
+        epNumRe.find(text)?.groupValues?.get(1)?.toIntOrNull()?.let { return it }
+        epNumUrlRe.find(text)?.groupValues?.get(1)?.toIntOrNull()?.let { return it }
+        epNumUrlRe.find(url)?.groupValues?.get(1)?.toIntOrNull()?.let { return it }
+        trailingNumRe.find(url.trimEnd('/'))?.groupValues?.get(1)?.toIntOrNull()?.let { return it }
+        return null
+    }
 
+    /** مفتاح التجميع: الرابط بدون لاحقة الحلقة. */
     private fun seriesKeyOf(url: String): String = epSuffixRe.replace(url.trimEnd('/'), "")
 
     private fun abs(u: String): String = when {
@@ -76,9 +95,13 @@ class LodyProvider : MainAPI() {
     private fun originOf(u: String): String =
         Regex("""https?://[^/"']+""").find(u)?.value ?: u
 
+    /** عناوين الموقع تحمل BOM في أولها أحياناً — ننظّفها */
+    private fun clean(s: String): String = s.replace("﻿", "").trim()
+
     /**
      * يحوّل تسمية الجودة ("1080p", "1280x720") إلى قيمة Qualities.
-     * بدونها يبقى المشغّل على Unknown فيختار أول رابط — وغالباً أكبر ملف.
+     * بدونها يبقى المشغّل على Unknown فيختار أول رابط — وغالباً أكبر ملف
+     * فينقطع عند التقديم/التأخير.
      */
     private fun qualityOf(vararg labels: String): Int {
         val s = labels.joinToString(" ").lowercase()
@@ -92,6 +115,17 @@ class LodyProvider : MainAPI() {
             s.contains("240") -> Qualities.P240.value
             else -> Qualities.Unknown.value
         }
+    }
+
+    /**
+     * رابط صفحة HTML ليس وسائط: المشغّل لا يستطيع تحميله ولا التقديم فيه،
+     * فيعطي ExoPlayer الخطأ 2004 (ERROR_CODE_IO_BAD_HTTP_STATUS) وينقطع.
+     */
+    private fun isDeadUrl(u: String): Boolean {
+        if (u.isBlank() || !u.startsWith("http")) return true
+        val path = u.substringBefore('?').substringBefore('#').lowercase()
+        return path.endsWith(".html") || path.endsWith(".htm") ||
+            path.endsWith(".php") || path.endsWith("/")
     }
 
     // ---- Pure-Kotlin base64 decoder (no android.util.Base64) ----
@@ -209,7 +243,7 @@ class LodyProvider : MainAPI() {
         } catch (_: Exception) { return null }
     }
 
-    /** يبحث في الصفحة (و داخلها سكربتات P.A.C.K.E.R.) عن روابط وسائط مباشرة */
+    /** يبحث في الصفحة (و داخل سكربتاتها المُحزَّمة) عن روابط وسائط مباشرة */
     private fun extractMediaUrls(html: String): List<String> {
         val urls = mutableListOf<String>()
         val direct = Regex("""(https?://[^\s"'<>\\]+\.(?:m3u8|mp4|webm|mov)[^\s"'<>\\]*)""", RegexOption.IGNORE_CASE)
@@ -237,15 +271,17 @@ class LodyProvider : MainAPI() {
 
     private fun rawCards(doc: Document): List<RawCard> {
         val res = mutableListOf<RawCard>()
-        // .ItemNewly وحدها هي بطاقات المحتوى الحقيقية (رئيسية/أقسام/بحث).
+        // .ItemNewly وحدها هي بطاقات المحتوى الحقيقية (رئيسية/أقسام).
         // لا نستخدم .SuggestionsItems: فهي شريط "مقترحات" ثابت يظهر أعلى كل
-        // صفحة بغض النظر عن نتائج البحث، وكانت تُقحم 12 بطاقة غير متعلقة.
+        // صفحة بغض النظر عن نتائج البحث، فتُقحم 12 بطاقة غير متعلقة.
         for (a in doc.select(".ItemNewly > a[href], .NewlyItems > a[href]")) {
             val href = abs(a.attr("href").trim())
             if (href.isBlank() || !href.contains("lodynet.top")) continue
-            val title = a.attr("title").ifBlank {
-                a.selectFirst("strong, .NewlyTitle, .title")?.text().orEmpty()
-            }.ifBlank { a.text() }.trim()
+            val title = clean(
+                a.attr("title").ifBlank {
+                    a.selectFirst("strong, .NewlyTitle, .title")?.text().orEmpty()
+                }.ifBlank { a.text() }
+            )
             if (title.isBlank()) continue
             val coverEl = a.selectFirst("[data-src], img, .NewlyCover")
             val cover = coverEl?.let {
@@ -256,25 +292,30 @@ class LodyProvider : MainAPI() {
         return res
     }
 
-    /**
-     * يجمع حلقات نفس المسلسل في بطاقة واحدة باسم المسلسل.
-     * الرابط المعروض هو صفحة المسلسل الأساسية (بدون لاحقة الحلقة) حتى
-     * يحصل المستخدم على قائمة الحلقات كاملة بدل حلقة واحدة.
-     */
+    /** فيلم أم مسلسل؟ الموقع يسبق الأفلام بكلمة "فيلم". */
+    private fun isMovieTitle(title: String): Boolean {
+        val t = title.trimStart()
+        return t.startsWith("فيلم") || t.startsWith("مشاهدة فيلم") ||
+            t.startsWith("انمي فيلم") || t.contains("فيلم ")
+    }
+
+    private fun cardOf(name: String, url: String, cover: String?): SearchResponse =
+        if (isMovieTitle(name)) {
+            newMovieSearchResponse(name, url, TvType.Movie) { this.posterUrl = cover }
+        } else {
+            newTvSeriesSearchResponse(name, url) { this.posterUrl = cover }
+        }
+
+    /** يجمع حلقات نفس المسلسل في بطاقة واحدة باسم المسلسل. */
     private fun groupCards(raw: List<RawCard>): List<SearchResponse> {
         val out = LinkedHashMap<String, SearchResponse>()
         for (c in raw) {
             val key = seriesKeyOf(c.href)
             if (out.containsKey(key)) continue
             val name = seriesNameOf(c.title)
-            val isMovie = name.startsWith("فيلم") || name.startsWith("مشاهدة فيلم")
-            // فيلم: رابطه الأصلي (لا لاحقة حلقة). مسلسل: الصفحة الأساسية.
-            val target = if (isMovie) c.href else key
-            out[key] = if (isMovie) {
-                newMovieSearchResponse(name, target, TvType.Movie) { this.posterUrl = c.cover }
-            } else {
-                newTvSeriesSearchResponse(name, target) { this.posterUrl = c.cover }
-            }
+            val movie = isMovieTitle(name)
+            val target = if (movie) c.href else key
+            out[key] = cardOf(name, target, c.cover)
         }
         return out.values.toList()
     }
@@ -288,7 +329,7 @@ class LodyProvider : MainAPI() {
 
         // 1) آخر الإضافات — من الصفحة الرئيسية
         try {
-            val home = app.get("$mainUrl/").document
+            val home = app.get("$mainUrl/", headers = mapOf("User-Agent" to UA)).document
             val cards = groupCards(rawCards(home))
             if (cards.isNotEmpty()) rows.add(HomePageList("مضاف حديثاً", cards))
         } catch (e: Exception) {
@@ -301,14 +342,14 @@ class LodyProvider : MainAPI() {
                 async {
                     try {
                         val url = CAT + java.net.URLEncoder.encode(slug, "UTF-8").replace("+", "%20") + "/"
-                        val cards = groupCards(rawCards(app.get(url).document))
+                        val cards = groupCards(rawCards(app.get(url, headers = mapOf("User-Agent" to UA)).document))
                         if (cards.isNotEmpty()) HomePageList(label, cards) else null
                     } catch (e: Exception) {
                         Log.e(TAG, "category '$label' failed: ${e.message}")
                         null
                     }
                 }
-            }.mapNotNull { it.await() }
+            }.awaitAll().filterNotNull()
         }
         rows.addAll(catRows)
 
@@ -317,24 +358,52 @@ class LodyProvider : MainAPI() {
 
     // ===================== search =====================
 
-    override suspend fun search(query: String): List<SearchResponse> {
-        val q = query.trim()
-        if (q.isBlank()) return emptyList()
-        val enc = java.net.URLEncoder.encode(q, "UTF-8")
+    override suspend fun quickSearch(query: String): List<SearchResponse> = search(query)
 
-        // ووردبريس يخدم البحث على /search/<المصطلح>/ وسنة نتائجه في .ItemNewly.
-        // راوابط النتائج تصل بصيغة نظيفة بلا شرطة أخيرة ("a-love-other-than-yours-s01-ep4")
-        // بينما المُجمِّع يتوقع الشكل المُطبَّع — لذا نجرّب أكثر من صيغة.
-        val candidates = listOf(
-            "$mainUrl/search/$enc/",
-            "$mainUrl/?s=$enc",
-            "$mainUrl/search/$enc"
-        )
-        for (u in candidates) {
-            val doc = try { app.get(u).document } catch (_: Exception) { null } ?: continue
-            // فقط النتائج الحقيقية: بطاقات .ItemNewly (لا اقتراحات الشريط الجانبي)
-            val hits = rawCards(doc)
-            val grouped = groupCards(hits)
+    override suspend fun search(query: String): List<SearchResponse> {
+        val q = clean(query)
+        if (q.isBlank()) return emptyList()
+
+        // بحث القالب: JSON جاهز (Title/Url/Cover/Category) في ~1 ثانية.
+        // العنوان "[0]" هو المُصطلح نفسه، و"[1]" هي النتائج.
+        try {
+            val enc = java.net.URLEncoder.encode(q, "UTF-8")
+            val body = app.get(
+                WP_SEARCH + enc,
+                headers = mapOf(
+                    "User-Agent" to UA,
+                    "Referer" to "$mainUrl/",
+                    "X-Requested-With" to "XMLHttpRequest"
+                )
+            ).text
+            val arr = org.json.JSONArray(body)
+            val items = arr.optJSONArray(1) ?: org.json.JSONArray()
+            val out = LinkedHashMap<String, SearchResponse>()
+            for (i in 0 until items.length()) {
+                val o = items.optJSONObject(i) ?: continue
+                val title = clean(o.optString("Title", ""))
+                if (title.isBlank()) continue
+                val url = abs(o.optString("Url", "").replace("\\/", "/").trim())
+                if (url.isBlank()) continue
+                val cover = o.optString("Cover", "").ifBlank { null }
+                val key = seriesKeyOf(url)
+                if (out.containsKey(key)) continue
+                val name = seriesNameOf(title)
+                val movie = isMovieTitle(name)
+                out[key] = cardOf(name, if (movie) url else key, cover)
+            }
+            if (out.isNotEmpty()) return out.values.toList()
+        } catch (e: Exception) {
+            Log.w(TAG, "theme search failed: ${e.message}")
+        }
+
+        // احتياطي: صفحة بحث ووردبريس (أبطأ لكنها تعمل حين يتعطّل الـ API)
+        val enc = java.net.URLEncoder.encode(q, "UTF-8")
+        for (u in listOf("$mainUrl/?s=$enc", "$mainUrl/search/$enc/")) {
+            val doc = try {
+                app.get(u, headers = mapOf("User-Agent" to UA)).document
+            } catch (_: Exception) { null } ?: continue
+            val grouped = groupCards(rawCards(doc))
             if (grouped.isNotEmpty()) return grouped
         }
         return emptyList()
@@ -342,52 +411,128 @@ class LodyProvider : MainAPI() {
 
     // ===================== load =====================
 
+    /** معرّف القسم في ووردبريس — موجود في ترويسة أي صفحة (حلقة أو قسم). */
+    private val catIdRe = Regex("""wp-json/wp/v2/categories/(\d+)""")
+
     override suspend fun load(url: String): LoadResponse? {
-        val doc = try { app.get(url).document } catch (_: Exception) { return null }
+        val doc = try {
+            app.get(url, headers = mapOf("User-Agent" to UA)).document
+        } catch (_: Exception) { null } ?: return null
 
-        val rawTitle = doc.selectFirst("h1")?.text()?.trim()
+        val html = doc.html()
+        val catId = catIdRe.find(html)?.groupValues?.get(1)
+
+        // ---- مسلسل ----
+        // صفحة القسم (…/category/<slug>) هي صفحة المسلسل: لا تحمل h1،
+        // وحلقاتها روابط عادية بلاحقة «الحلقة-N» — لا class="ItemEpisode".
+        // لذلك نقرأها من واجهة ووردبريس التي تُعيد الحلقات كلها دفعة واحدة.
+        val looksLikeSeries = url.contains("/category/") || epSuffixRe.containsMatchIn(url.trimEnd('/'))
+        if (looksLikeSeries && catId != null) {
+            val res = loadSeries(url, catId, doc)
+            if (res != null) return res
+        }
+
+        // ---- فيلم / حلقة مفردة ----
+        val title = clean(
+            doc.selectFirst("h1")?.text().orEmpty()
+                .ifBlank { doc.selectFirst("meta[property='og:title']")?.attr("content").orEmpty() }
+        )
+        if (title.isBlank()) return null
+
+        val poster = doc.selectFirst("meta[property='og:image']")?.attr("content")
             ?.ifBlank { null }
-            ?: doc.selectFirst("meta[property='og:title']")?.attr("content")?.trim()
-            ?: return null
-
-        val poster = doc.selectFirst("meta[property='og:image']")?.attr("content")?.ifBlank { null }
-            ?: doc.selectFirst("img[src*='/wp-content/uploads/']")?.attr("data-src")?.ifBlank { null }
-            ?: doc.selectFirst("img[src*='/wp-content/uploads/']")?.attr("src")?.ifBlank { null }
+            ?: doc.selectFirst("img[src*='/wp-content/uploads/']")?.attr("data-src")
+                ?.ifBlank { null }
 
         val plot = doc.selectFirst("[class*=Story], [class*=story], [class*=description], [class*=Details]")
             ?.text()?.takeIf { it.length > 20 }?.take(700)
 
-        val episodes = doc.select("a.ItemEpisode[href], #ListEpisodes a[href]").mapNotNull { a ->
-            val epUrl = abs(a.attr("href").trim())
-            if (epUrl.isBlank()) return@mapNotNull null
-            val epText = a.attr("title").ifBlank { a.text() }.trim()
-            // الأوثق: id="Ep12" — ثم العنوان — ثم الرابط
-            val epNum = epIdRe.find(a.id())?.value?.toIntOrNull()
-                ?: episodeNumberOf(epText)
-                ?: episodeNumberOf(epUrl)
-            newEpisode(epUrl) {
-                this.name = epText.ifBlank { epNum?.let { "الحلقة $it" } ?: "حلقة" }
-                this.episode = epNum
-                this.posterUrl = poster
-            }
-        }.distinctBy { it.data }
+        return newMovieLoadResponse(seriesNameOf(title), url, TvType.Movie, url) {
+            this.posterUrl = poster
+            this.plot = plot
+        }
+    }
 
-        return if (episodes.isNotEmpty()) {
-            // ترتيب صحيح حتى لو فقدت بعض الحلقات رقمها (episode == null)
-            val ordered = episodes.sortedWith(compareBy({ it.episode ?: Int.MAX_VALUE }, { it.name }))
-            newTvSeriesLoadResponse(seriesNameOf(rawTitle), url, TvType.TvSeries, ordered) {
-                this.posterUrl = poster
-                this.plot = plot
+    /**
+     * حلقات المسلسل من واجهة ووردبريس: طلب واحد يعيد كل الحلقات (حتى 100)
+     * مع روابطها وعناوينها — أسرع وأكمل من قراءة الصفحة (التي تعرض 30 فقط
+     * كما أنها لا تحمل class مناسباً).
+     */
+    private suspend fun loadSeries(url: String, catId: String, doc: Document): LoadResponse? {
+        val baseTitle = clean(
+            doc.selectFirst("meta[property='og:title']")?.attr("content").orEmpty()
+                .ifBlank { doc.selectFirst("title")?.text().orEmpty().substringBefore(" - ") }
+        )
+        val name = seriesNameOf(baseTitle.ifBlank { "مسلسل" })
+
+        data class Ep(val num: Int?, val title: String, val url: String)
+
+        val eps = mutableListOf<Ep>()
+        try {
+            val json = app.get(
+                "$WP_POSTS?categories=$catId&per_page=100&orderby=date&order=desc&_fields=id,link,title",
+                headers = mapOf("User-Agent" to UA)
+            ).text
+            val arr = org.json.JSONArray(json)
+            for (i in 0 until arr.length()) {
+                val o = arr.optJSONObject(i) ?: continue
+                val link = abs(o.optString("link", "").trim())
+                if (link.isBlank()) continue
+                val t = clean(
+                    o.optJSONObject("title")?.optString("rendered", "").orEmpty()
+                        .replace(Regex("""<[^>]+>"""), "")
+                )
+                eps.add(Ep(episodeNumberOf(t, link), t, link))
             }
-        } else {
-            newMovieLoadResponse(rawTitle, url, TvType.Movie, url) {
-                this.posterUrl = poster
-                this.plot = plot
+        } catch (e: Exception) {
+            Log.w(TAG, "wp posts failed for cat $catId: ${e.message}")
+        }
+
+        // احتياطي: استخراج الحلقات من الصفحة نفسها بلاحقة «الحلقة-N»
+        if (eps.isEmpty()) {
+            for (a in doc.select("a[href]")) {
+                val href = abs(a.attr("href").trim())
+                if (href.isBlank() || !epSuffixRe.containsMatchIn(href.trimEnd('/'))) continue
+                val t = clean(a.attr("title").ifBlank { a.text() })
+                eps.add(Ep(episodeNumberOf(t, href), t.ifBlank { "حلقة" }, href))
             }
+        }
+
+        val uniq = eps.distinctBy { it.url }
+        if (uniq.isEmpty()) return null
+
+        val ordered = uniq.sortedWith(compareBy({ it.num ?: Int.MAX_VALUE }, { it.title }))
+
+        // غلاف المسلسل: صفحة القسم بلا og:image، لكن بطاقة المسلسل نفسها
+        // مضمّنة فيها كـ ItemNewly باسم مطابق (‎…/uploads/…/هوس-220x220.webp).
+        var poster: String? = doc.selectFirst("meta[property='og:image']")
+            ?.attr("content")?.ifBlank { null }
+        if (poster == null) {
+            val want = name.replace(Regex("""\s+"""), " ").trim()
+            poster = rawCards(doc).firstOrNull {
+                seriesNameOf(it.title).replace(Regex("""\s+"""), " ").trim() == want &&
+                    !it.cover.isNullOrBlank()
+            }?.cover
+        }
+
+        val episodes = ordered.map { e ->
+            newEpisode(e.url) {
+                this.name = e.title.ifBlank { e.num?.let { n -> "الحلقة $n" } ?: "حلقة" }
+                this.episode = e.num
+                this.posterUrl = poster
+            }
+        }
+
+        Log.d(TAG, "series '$name' cat=$catId -> ${episodes.size} episodes")
+
+        return newTvSeriesLoadResponse(name, url, TvType.TvSeries, episodes) {
+            this.posterUrl = poster
         }
     }
 
     // ===================== loadLinks =====================
+
+    private data class Srv(val name: String, val embed: String, val id: Int, val encrypted: Boolean)
 
     override suspend fun loadLinks(
         data: String,
@@ -405,7 +550,6 @@ class LodyProvider : MainAPI() {
                 .findAll(html).firstOrNull { it.groupValues[1].contains("\"Name\"") }
                 ?.groupValues?.get(1)
 
-            data class Srv(val name: String, val embed: String, val id: Int, val encrypted: Boolean)
             val servers = if (arrText == null) emptyList() else runCatching {
                 val arr = org.json.JSONArray(arrText)
                 (0 until arr.length()).mapNotNull { i ->
@@ -438,22 +582,50 @@ class LodyProvider : MainAPI() {
                 return false
             }
 
-            var any = false
+            // كل سيرفر يُحلّ على حدة ثم نجمع — السيرفرات التي لا تُحلّ تُتجاهل
+            // (رابط صفحتها ليس وسائط: يجعل المشغّل يعطي خطأ 2004 وينقطع).
+            val targets = mutableListOf<Pair<Srv, String>>()
             val done = mutableSetOf<String>()
             for (s in servers) {
                 if (s.id == LODY_PLUS_ID) { Log.d(TAG, "skip Lody Plus"); continue }
+                if (s.id == VIP_ID) { Log.d(TAG, "skip VIP (empty embed)"); continue }
                 if (s.embed.isBlank()) { Log.d(TAG, "skip ${s.name} (empty embed)"); continue }
-
-                val decoded = base64Decode(s.embed)?.trim() ?: run {
-                    Log.w(TAG, "${s.name}: base64 decode failed"); null
-                } ?: continue
-                if (decoded.isBlank()) continue
-
+                val decoded = base64Decode(s.embed)?.trim()
+                if (decoded.isNullOrBlank()) { Log.w(TAG, "${s.name}: base64 decode failed"); continue }
                 val embedUrl = if (s.id == VIDLO_ID) decoded + tokenVidlo else decoded
                 if (!done.add(embedUrl)) continue
-
-                if (resolveServer(embedUrl, s.name, subtitleCallback, callback) > 0) any = true
+                targets.add(s to embedUrl)
             }
+
+            if (targets.isEmpty()) {
+                Log.w(TAG, "no usable servers (all embeds empty)")
+                return false
+            }
+
+            // مهم للأداء: كل السيرفرات بالتوازي. سابقاً كان كل سيرفر يُنتظر
+            // على حدة (~3–5 ثوانٍ لكل واحد لـ megamax) فيصل المجموع ~25 ثانية
+            // ويظن المستخدم أن السيرفرات «لا تستجيب».
+            val results = coroutineScope {
+                targets.map { (s, u) ->
+                    async {
+                        val links = mutableListOf<ExtractorLink>()
+                        val subs = mutableListOf<SubtitleFile>()
+                        try {
+                            resolveServer(u, s.name, { subs.add(it) }, { links.add(it) })
+                        } catch (e: Exception) {
+                            Log.w(TAG, "${s.name}: ${e.message}")
+                        }
+                        Triple(s.name, subs, links)
+                    }
+                }.awaitAll()
+            }
+
+            var any = false
+            for ((_, subs, links) in results) {
+                subs.forEach { subtitleCallback.invoke(it) }
+                links.forEach { callback.invoke(it); any = true }
+            }
+            Log.d(TAG, "loadLinks done: $any (${results.sumOf { it.third.size }} links)")
             return any
         } catch (e: Exception) {
             Log.e(TAG, "loadLinks error", e)
@@ -463,10 +635,12 @@ class LodyProvider : MainAPI() {
 
     /**
      * يحاول إظهار سيرفر واحد بعدة طرق، ويعيد عدد الروابط التي أُرسلت.
-     * 1) مُجمِّع megamax (يعطي عشرات السيرفرات المعروفة دفعة واحدة)
+     * 1) مُجمِّع megamax (يعطي عشرات المرايا المعروفة دفعة واحدة)
      * 2) مُستخرِجات CloudStream المدمجة
      * 3) استخراج يدوي من الصفحة
-     * 4) رابط الـ embed نفسه (حتى لا يختفي أي سيرفر)
+     *
+     * لا نُرسل رابط الـ embed نفسه أبداً: هو صفحة HTML، فيعطي المشغّل خطأ
+     * 2004 (ERROR_CODE_IO_BAD_HTTP_STATUS) ولا يستطيع التقديم/التأخير فيها.
      */
     private suspend fun resolveServer(
         embedUrl: String,
@@ -476,7 +650,7 @@ class LodyProvider : MainAPI() {
     ): Int {
         val referer = originOf(embedUrl)
 
-        // 1) megamax — صفحته تحمل قائمة مرايا كاملة (1080p/720p/480p)
+        // 1) megamax — صفحته تحمل قائمة مرايا كاملة (720p/480p…)
         if (originOf(embedUrl).contains("megamax")) {
             val n = resolveMegamax(embedUrl, serverName, callback)
             Log.d(TAG, "$serverName: megamax -> $n links")
@@ -501,24 +675,14 @@ class LodyProvider : MainAPI() {
         // 3) محاولة يدوية: جلب الصفحة واستخراج m3u8/mp4
         if (tryManualExtract(embedUrl, referer, serverName, callback)) return 1
 
-        // 4) لا نُظهِر رابط الصفحة: المشغّل سيجرّب تحميل HTML فيعطي خطأ 2004
-        //    (ERROR_CODE_IO_BAD_HTTP_STATUS) أو ينقطع عند التقديم/التأخير.
-        //    لكن نتحقق أولاً أن السيرفر يستجيب فعلاً، حتى لا يختفي بلا سبب.
-        val alive = try {
-            app.get(embedUrl, referer = referer, headers = mapOf("User-Agent" to UA)).code
-        } catch (_: Exception) { 0 }
-        if (alive in 200..399) {
-            Log.w(TAG, "$serverName: alive (HTTP $alive) but no direct media — skipped to avoid player error")
-        } else {
-            Log.w(TAG, "$serverName: dead (HTTP $alive) — skipped")
-        }
+        Log.w(TAG, "$serverName: no direct media — skipped (no HTML pages emitted)")
         return 0
     }
 
     /**
      * megamax.me صفحة تشغيل Laravel/Inertia. بيانات الفيديو تُطلب لاحقاً عبر
      * "partial reload" — بطلب نفس الرابط مع ترويسات X-Inertia نحصل على JSON
-     * يحوي كل الجودات وكل المرايا (voe, mixdrop, doodstream, lulustream…),
+     * يحوي كل الجودات وكل المرايا (voe, mixdrop, doodstream, lulustream…)،
      * وكلها لها مُستخرِجات مدمجة في CloudStream.
      */
     private suspend fun resolveMegamax(
@@ -570,16 +734,19 @@ class LodyProvider : MainAPI() {
             val order = (0 until qualities.length()).mapNotNull { qualities.optJSONObject(it) }
                 .sortedByDescending { qualityOf(it.optString("label", ""), it.optString("resolution", "")) }
 
+            // كل المرايا بالتوازي أيضاً — بعضها يستغرق ثوانيَ ويوقف البقية.
+            data class Mirror(val label: String, val qNum: Int, val driver: String, val link: String)
+
+            val mirrors = mutableListOf<Mirror>()
             for (q in order) {
                 val qLabel = q.optString("label", "HD").trim()
                 val resolution = q.optString("resolution", "").trim()
                 val qNum = qualityOf(qLabel, resolution)
-                val mirrors = q.optJSONArray("mirrors") ?: continue
-
+                val ms = q.optJSONArray("mirrors") ?: continue
                 var qEmitted = 0
-                for (mi in 0 until mirrors.length()) {
-                    if (qEmitted >= 4) break            // لا نُغرق القائمة
-                    val m = mirrors.optJSONObject(mi) ?: continue
+                for (mi in 0 until ms.length()) {
+                    if (qEmitted >= 3) break            // لا نُغرق القائمة
+                    val m = ms.optJSONObject(mi) ?: continue
                     val driver = m.optString("driver", "").trim()
                     val rawLink = m.optString("link", "").trim()
                     // بعض المرايا تصل فارغة أو بحرفية "0 Bytes" — نتجاهلها
@@ -589,42 +756,51 @@ class LodyProvider : MainAPI() {
                     if (!link.startsWith("http")) continue
                     if (isDeadUrl(link)) continue
                     if (!tried.add(link)) continue
+                    mirrors.add(Mirror(qLabel, qNum, driver, link))
+                    qEmitted++
+                }
+            }
 
-                    val linkRef = originOf(link)
-                    // callback الـ loadExtractor ليس suspend، لذا نجمع أولاً
-                    // ثم نُعيد الإرسال بعد خروجه (newExtractorLink مُعلَّمة suspend).
-                    val collected = mutableListOf<ExtractorLink>()
-                    try {
-                        loadExtractor(link, linkRef, { }) { l -> collected.add(l) }
-                    } catch (e: Exception) {
-                        Log.d(TAG, "megamax [$qLabel/$driver] miss: ${e.message}")
-                    }
-                    for (l in collected) {
-                        // لا نُمرّر إلا روابط وسائط حقيقية — أي رابط صفحة HTML
-                        // يجعل المشغّل يعطي خطأ 2004 أو ينقطع عند التقديم.
-                        val fake = isDeadUrl(l.url)
-                        if (fake) {
-                            Log.w(TAG, "megamax [$qLabel/$driver] HTML page, not media — skipped")
-                            continue
+            val resolved = coroutineScope {
+                mirrors.map { m ->
+                    async {
+                        // callback الـ loadExtractor ليس suspend، لذا نجمع أولاً
+                        // ثم نُعيد الإرسال بعد خروجه (newExtractorLink مُعلَّمة suspend).
+                        val collected = mutableListOf<ExtractorLink>()
+                        try {
+                            loadExtractor(m.link, originOf(m.link), { }) { l -> collected.add(l) }
+                        } catch (e: Exception) {
+                            Log.d(TAG, "megamax [${m.label}/${m.driver}] miss: ${e.message}")
                         }
-                        // نضمن كتابة رقم الجودة حتى لو أعاد المُستخرِج Unknown،
-                        // فيختار المشغّل الجودة الصحيحة ولا ينقطع أثناء التقديم.
-                        val qv = if (l.quality == Qualities.Unknown.value) qNum else l.quality
-                        callback.invoke(
-                            newExtractorLink(
-                                source = "لودي نت",
-                                name = "$qLabel · ${driver.ifBlank { "server" }}",
-                                url = l.url,
-                                type = l.type
-                            ) {
-                                this.quality = qv
-                                this.referer = l.referer
-                                this.headers = l.headers
-                            }
-                        )
-                        qEmitted++
-                        emitted++
+                        m to collected
                     }
+                }.awaitAll()
+            }
+
+            for ((m, links) in resolved) {
+                for (l in links) {
+                    // لا نُمرّر إلا روابط وسائط حقيقية — أي رابط صفحة HTML
+                    // يجعل المشغّل يعطي خطأ 2004 أو ينقطع عند التقديم.
+                    if (isDeadUrl(l.url)) {
+                        Log.w(TAG, "megamax [${m.label}/${m.driver}] HTML page, not media — skipped")
+                        continue
+                    }
+                    // نضمن كتابة رقم الجودة حتى لو أعاد المُستخرِج Unknown،
+                    // فيختار المشغّل الجودة الصحيحة ولا ينقطع أثناء التقديم.
+                    val qv = if (l.quality == Qualities.Unknown.value) m.qNum else l.quality
+                    callback.invoke(
+                        newExtractorLink(
+                            source = "لودي نت",
+                            name = "${m.label} · ${m.driver.ifBlank { "server" }}",
+                            url = l.url,
+                            type = l.type
+                        ) {
+                            this.quality = qv
+                            this.referer = l.referer
+                            this.headers = l.headers
+                        }
+                    )
+                    emitted++
                 }
             }
             emitted
@@ -632,17 +808,6 @@ class LodyProvider : MainAPI() {
             Log.w(TAG, "megamax failed: ${e.message}")
             0
         }
-    }
-
-    /**
-     * رابط صفحة HTML ليس وسائط: المشغّل لا يستطيع تحميله ولا التقديم فيه،
-     * فيعطي ExoPlayer الخطأ 2004 (ERROR_CODE_IO_BAD_HTTP_STATUS).
-     */
-    private fun isDeadUrl(u: String): Boolean {
-        if (u.isBlank() || !u.startsWith("http")) return true
-        val path = u.substringBefore('?').substringBefore('#').lowercase()
-        return path.endsWith(".html") || path.endsWith(".htm") ||
-            path.endsWith(".php") || path.endsWith("/")
     }
 
     private suspend fun tryManualExtract(
