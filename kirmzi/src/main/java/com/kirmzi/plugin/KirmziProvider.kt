@@ -158,29 +158,39 @@ class KirmziProvider : MainAPI() {
         val title = this.attr("title").ifBlank {
             this.selectFirst("img")?.attr("alt").orEmpty()
         }
-        val poster = this.selectFirst("img")?.attr("data-src").orEmpty()
-            .ifBlank { this.selectFirst("img")?.attr("src").orEmpty() }
+        // Extract poster: try data-src (lazy load), then src, then style background-image
+        val img = this.selectFirst("img")
+        val poster = img?.attr("data-src").orEmpty()
+            .ifBlank { img?.attr("src").orEmpty() }
+            .ifBlank {
+                this.attr("style").let {
+                    Regex("""url\(['"]?([^'")]+)['"]?\)""").find(it)?.groupValues?.get(1).orEmpty()
+                }
+            }
         val type = if (href.contains("/episode/")) TvType.TvSeries else TvType.TvSeries
         return when {
             href.contains("/series/") || href.contains("/episode/") ->
-                newTvSeriesSearchResponse(title.ifBlank { "كرمزي" }, href) { this.posterUrl = poster }
+                newTvSeriesSearchResponse(title.ifBlank { "قرمزي" }, href) {
+                    this.posterUrl = poster.ifBlank { null }
+                }
             else -> null
         }
     }
 
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
         val doc = app.get(mainUrl).document
-        val items = doc.select("a.posterThumb[href*=/episode/], a.posterThumb[href*=/series/]")
+        // Only show series, not individual episodes
+        val items = doc.select("a.posterThumb[href*=/series/]")
             .mapNotNull { it.toSearchResponse() }
-        val homeList = HomePageList("آخر الحلقات", items)
+        val homeList = HomePageList("المسلسلات", items)
         return newHomePageResponse(listOf(homeList))
     }
 
     override suspend fun search(query: String): List<SearchResponse> {
         val url = "$mainUrl/?s=${query.trim()}"
         val doc = app.get(url).document
-        // The site stores search results in #load-post article posts too.
-        return doc.select("a.posterThumb").filter { it.attr("href").isNotBlank() }
+        // Filter by series only, not individual episodes
+        return doc.select("a.posterThumb[href*=/series/]").filter { it.attr("href").isNotBlank() }
             .mapNotNull { it.toSearchResponse() }
     }
 
@@ -194,7 +204,14 @@ class KirmziProvider : MainAPI() {
         }
         val doc = app.get(url).document
         val title = doc.selectFirst("h1")?.text()?.trim() ?: return null
+
+        // Extract poster from multiple sources
         val poster = doc.selectFirst("img[src*=/wp-content/uploads/]")?.attr("src")
+            ?.ifBlank { null }
+            ?: doc.selectFirst("img")?.attr("data-src")
+            ?.ifBlank { null }
+            ?: doc.selectFirst("img")?.attr("src")
+
         val description = doc.selectFirst("[class*=description], [class*=sinops], [class*=story]")?.text()
 
         // Episodes from the series page

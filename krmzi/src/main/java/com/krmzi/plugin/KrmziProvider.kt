@@ -156,29 +156,48 @@ class KrmziProvider : MainAPI() {
     private fun Element.searchCard(): SearchResponse? {
         val href = this.attr("href")
         val title = this.attr("title").ifBlank { this.selectFirst(".title")?.text().orEmpty() }
-        // poster lives in .posterThumb .imgBg style background
-        val posterImg = this.selectFirst(".posterThumb .imgBg, .posterThumb")
-        val poster = posterImg?.attr("style")?.let {
-            Regex("""url\(['"]?([^'")]+)['"]?\)""").find(it)?.groupValues?.get(1)
-        } ?: posterImg?.selectFirst("img")?.attr("src")
+
+        // Extract poster: try multiple sources
+        // 1. .posterThumb .imgBg style background-image
+        // 2. img data-src (lazy load)
+        // 3. img src
+        val posterImg = this.selectFirst(".posterThumb .imgBg, .posterThumb, img")
+        val poster = when {
+            // Try style background-image first
+            posterImg?.attr("style")?.let { style ->
+                Regex("""url\(['"]?([^'")]+)['"]?\)""").find(style)?.groupValues?.get(1)
+            } != null -> posterImg?.attr("style")?.let {
+                Regex("""url\(['"]?([^'")]+)['"]?\)""").find(it)?.groupValues?.get(1)
+            } ?: ""
+            // Try data-src
+            posterImg?.attr("data-src")?.isNotEmpty() == true -> posterImg?.attr("data-src") ?: ""
+            // Try src
+            posterImg?.attr("src")?.isNotEmpty() == true -> posterImg?.attr("src") ?: ""
+            else -> ""
+        }
+
         if (href.isBlank() || title.isBlank()) return null
         return if (href.contains("/episode/") || href.contains("/series/"))
-            newTvSeriesSearchResponse(title, href) { this.posterUrl = poster }
+            newTvSeriesSearchResponse(title, href) {
+                this.posterUrl = poster.ifBlank { null }
+            }
         else null
     }
 
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
         val navUrl = if (page <= 1) mainUrl else "$mainUrl/page/$page/"
         val doc = app.get(navUrl).document
-        val items = doc.select("a[href*=/episode/], a[href*=/series/]")
+        // Only show series, not individual episodes
+        val items = doc.select("a[href*=/series/]")
             .mapNotNull { it.searchCard() }
-        return newHomePageResponse(listOf(HomePageList("آخر الحلقات", items)))
+        return newHomePageResponse(listOf(HomePageList("المسلسلات", items)))
     }
 
     override suspend fun search(query: String): List<SearchResponse> {
         val url = "$mainUrl/?s=${query.trim()}"
         val doc = app.get(url).document
-        return doc.select("a[href*=/episode/], a[href*=/series/]")
+        // Filter by series only, not individual episodes
+        return doc.select("a[href*=/series/]")
             .filter { it.attr("href").length > 8 }
             .mapNotNull { it.searchCard() }
     }
@@ -193,9 +212,16 @@ class KrmziProvider : MainAPI() {
         }
         val doc = app.get(url).document
         val title = doc.selectFirst("h1")?.text()?.trim() ?: return null
+
+        // Extract poster from multiple sources
         val poster = doc.selectFirst("[style*='background-image:url']")?.attr("style")?.let {
             Regex("""url\(['"]?([^'")]+)['"]?\)""").find(it)?.groupValues?.get(1)
         } ?: doc.selectFirst("img[src*=/wp-content/uploads/]")?.attr("src")
+            ?.ifBlank { null }
+            ?: doc.selectFirst("img")?.attr("data-src")
+            ?.ifBlank { null }
+            ?: doc.selectFirst("img")?.attr("src")
+
         val description = doc.selectFirst("[class*=description], [class*=sinops], [class*=story], [class*='summary']")?.text()
 
         val episodes = ArrayList<Episode>()
