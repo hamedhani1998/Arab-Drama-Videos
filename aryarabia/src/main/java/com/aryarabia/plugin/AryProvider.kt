@@ -91,6 +91,13 @@ class AryProvider : MainAPI() {
      */
     var useYoutubeRedirect = false
 
+    /**
+     * عند التفعيل نضيف للروابط الأصلية رابط HLS إضافياً من innerTube `/player`
+     * (hlsManifestUrl). بعض الشبكات لا تحجب مضيف الـ HLS (manifest.googlevideo)
+     * كما تحجب `rr*--sn-``. ميتاداتا HLS تمكّن اللاعب (m3u8) عبر بروتوكول مختلف.
+     */
+    var useYoutubeHls = true
+
     // =============================== HTML / GET ===============================
 
     private fun ctx(): JSONObject = JSONObject().put(
@@ -614,32 +621,48 @@ class AryProvider : MainAPI() {
         }
         val watchUrl = "https://www.youtube.com/watch?v=$vid"
 
-        return try {
-            if (useYoutubeRedirect) {
-                loadExtractor(watchUrl, "https://www.youtube.com/", subtitleCallback) { link ->
-                    // الشبكة تحجب مضيفات البث الفرعية (rrN--sn-…googlevideo.com) على TCP:443
-                    // بينما النطاق الأم googlevideo.com (142.251.*) مفتوح. نعيد كتابة المضيف
-                    // إلى googlevideo.com ونبقي بقية الرابط الموقّع كما هو — غالب توقيعات
-                    // YouTube تُقبل عبر النطاق الأم للبث.
-                    val hostRe = Regex("""https://[^/]+\.googlevideo\.com/""")
-                    if (hostRe.containsMatchIn(link.url) && !link.url.startsWith("https://googlevideo.com/")) {
-                        val alt = link.url.replaceFirst(hostRe, "https://googlevideo.com/")
-                        val altLink = ExtractorLink(
-                            link.source, link.name + " (host)", alt, link.referer, link.quality,
-                            link.headers, link.extractorData, link.type, link.audioTracks
-                        )
-                        callback(altLink)
-                    } else {
-                        callback(link)
-                    }
-                }
-            } else {
-                loadExtractor(watchUrl, "https://www.youtube.com/", subtitleCallback, callback)
-            }
+        try {
+            loadExtractor(watchUrl, "https://www.youtube.com/", subtitleCallback, callback)
         } catch (e: Exception) {
             Log.e(TAG, "extraction failed for $vid: ${e.message}")
-            false
         }
+        if (useYoutubeHls) {
+            try {
+                val apiUrl = "https://www.youtube.com/youtubei/v1/player"
+                val payload = JSONObject()
+                    .put("context", JSONObject().put(
+                        "client", JSONObject()
+                            .put("clientName", "WEB")
+                            .put("clientVersion", CLIENT_VERSION)
+                            .put("hl", "ar")
+                            .put("gl", "US")
+                    ))
+                    .put("videoId", vid)
+                val text = app.post(
+                    apiUrl, json = payload,
+                    headers = mapOf(
+                        "Origin" to "https://www.youtube.com",
+                        "Referer" to "https://www.youtube.com/"
+                    )
+                ).text
+                val hls = Regex(""""hlsManifestUrl"\s*:\s*"([^"]+)"""").find(text)?.groupValues?.get(1)
+                    ?.replace("\\u0026", "&")?.replace("\\/", "/")
+                if (!hls.isNullOrBlank()) {
+                    callback(
+                        ExtractorLink(
+                            "ARY العربية", "HLS (m3u8)", hls, "https://www.youtube.com/",
+                            -1, emptyMap(), null, ExtractorLinkType.M3U8
+                        )
+                    )
+                    Log.i(TAG, "added HLS manifest for $vid")
+                } else {
+                    Log.d(TAG, "no hlsManifestUrl in player response for $vid")
+                }
+            } catch (e: Exception) {
+                Log.w(TAG, "HLS fetch failed for $vid: ${e.message}")
+            }
+        }
+        return true
     }
 }
     

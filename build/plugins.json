@@ -288,9 +288,9 @@
   {
     "name": "ARY العربية",
     "internalName": "aryarabia",
-    "version": 8,
-    "fileSize": 26403,
-    "fileHash": "sha256-ab160a8eba7ae6e5c555cc07ef2c81a775a2305f9e066af952630f3c740eeef8",
+    "version": 9,
+    "fileSize": 27305,
+    "fileHash": "sha256-cfe9e70029091a4f379d0556599b964071f7ed7ee8670c5c01f11e4409fecf51",
     "url": "https://raw.githubusercontent.com/hamedhani1998/Arab-Drama-Videos/builds/aryarabia.cs3",
     "repositoryUrl": "https://github.com/hamedhani1998/Arab-Drama-Videos",
     "apiVersion": 1,
