@@ -40,6 +40,25 @@
         "name": "Drama4All"
     },
     {
+        "fileHash": "sha256-c31efd9ce5e973c87b453e51d7fde4b8dcc350d09af6cb860d41b70fedcae5d2",
+        "apiVersion": 1,
+        "repositoryUrl": "https://github.com/hamedhani1998/Arab-Drama-Videos",
+        "fileSize": 18358,
+        "status": 1,
+        "language": "ar",
+        "authors": [
+            "hamedhani1998"
+        ],
+        "tvTypes": [
+            "Live"
+        ],
+        "version": 1,
+        "internalName": "IPTV",
+        "description": "IPTV - قنوات تلفزيونية مباشرة (iptv-org + Free-TV)",
+        "url": "https://raw.githubusercontent.com/hamedhani1998/Arab-Drama-Videos/builds/IPTV.cs3",
+        "name": "IPTV"
+    },
+    {
         "iconUrl": "",
         "fileHash": "sha256-0778f72e95aa7ed65f7f8230ed54a582cec396bcd520419d2a08a9d22dbc63cf",
         "apiVersion": 1,
