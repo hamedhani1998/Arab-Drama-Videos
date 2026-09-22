@@ -40,44 +40,6 @@
         "name": "Drama4All"
     },
     {
-        "fileHash": "sha256-bd9a5f251ba657b36f4b6e6b40e0cb7e9aae628ad3b332cc7284003fd2097a0a",
-        "apiVersion": 1,
-        "repositoryUrl": "https://github.com/hamedhani1998/Arab-Drama-Videos",
-        "fileSize": 16475,
-        "status": 1,
-        "language": "ar",
-        "authors": [
-            "hamedhani1998"
-        ],
-        "tvTypes": [
-            "Live"
-        ],
-        "version": 2,
-        "internalName": "IptvFree",
-        "description": "IPTV Free - قنوات تلفزيونية مباشرة (Free-TV)",
-        "url": "https://raw.githubusercontent.com/hamedhani1998/Arab-Drama-Videos/builds/IptvFree.cs3",
-        "name": "IptvFree"
-    },
-    {
-        "fileHash": "sha256-b0ea85b2df8f6050c755b0d6f807e882ae89aca8556cef23835a931e0021805a",
-        "apiVersion": 1,
-        "repositoryUrl": "https://github.com/hamedhani1998/Arab-Drama-Videos",
-        "fileSize": 15928,
-        "status": 1,
-        "language": "ar",
-        "authors": [
-            "hamedhani1998"
-        ],
-        "tvTypes": [
-            "Live"
-        ],
-        "version": 3,
-        "internalName": "IptvOrg",
-        "description": "IPTV Org - قنوات تلفزيونية مباشرة (iptv-org)",
-        "url": "https://raw.githubusercontent.com/hamedhani1998/Arab-Drama-Videos/builds/IptvOrg.cs3",
-        "name": "IptvOrg"
-    },
-    {
         "iconUrl": "",
         "fileHash": "sha256-0778f72e95aa7ed65f7f8230ed54a582cec396bcd520419d2a08a9d22dbc63cf",
         "apiVersion": 1,
