@@ -336,6 +336,16 @@ class AryProvider : MainAPI() {
 
     private fun posterOf(id: String): String = "https://i.ytimg.com/vi/$id/hqdefault.jpg"
 
+    /**
+     * رابط صفحة القائمة بصيغة يوتيوب الحقيقية. CloudStream يمرّر كل رابط
+     * عبر `fixUrl` قبل `load()`؛ و`fixUrl` يلصق `mainUrl` على أي رابط لا
+     * يبدأ بـ "http" — منها `ary://pl/…` — فيصل مكسوراً. الروابط الحقيقية
+     * `https://www.youtube.com/playlist?list=…` تمرّ سالكة، و`load()`
+     * يستخرج المعرّف من `?list=`. (نتقبّل أيضًا `ary://pl/` متأخّراً في
+     * load() للمحفوظات القديمة.)
+     */
+    private fun playlistUrl(id: String): String = "https://www.youtube.com/playlist?list=$id"
+
     // ============================== playlists ==============================
 
     private data class PlaylistInfo(
@@ -435,7 +445,7 @@ class AryProvider : MainAPI() {
 
     private fun homeFrom(playlists: List<PlaylistInfo>): HomePageResponse {
         val cards = dedupe(playlists).map { p ->
-            newTvSeriesSearchResponse(bareName(p.title), "ary://pl/${p.id}") {
+            newTvSeriesSearchResponse(bareName(p.title), playlistUrl(p.id)) {
                 this.posterUrl = p.cover
             }
         }
@@ -505,23 +515,35 @@ class AryProvider : MainAPI() {
 
     // ================================ load ================================
 
+    /**
+     * ملاحظة مهمة: CloudStream يمرّر كل رابط واصل هنا عبر `fixUrl` قبل
+     * `load()` (في APIRepository.load). `fixUrl` لا يمسك روابط `ary://`
+     * فيُلصق عليها `mainUrl` فيصبح الرابط
+     * `.../channel/UC…/ary://pl/…` ويفشل الفرع. لذلك:
+     *  - الصفحة الرئيسية تُبني بروابط يوتيوب حقيقية `?list=` (لا يكسّرها fixUrl)
+     *  - ونتقبّل معرّف القائمة من موضع أيقونته في الرابط (مكسورٍ أو صافٍ)
+     *    حتى تظل المسلسلات المحفوظة/المشارَكة قديماً تعمل.
+     */
     override suspend fun load(url: String): LoadResponse? {
-        // روابطنا الداخلية: ary://pl/<playlistId>
-        if (url.startsWith("ary://pl/")) {
-            val pid = url.removePrefix("ary://pl/").trim()
+        // 1) روابطنا الداخلية + أي رابط يحمل ary://pl/ مهما كان موضعه.
+        if (url.contains("ary://pl/")) {
+            val pid = url.substringAfter("ary://pl/").trim()
             if (pid.isBlank()) return null
             val info = allPlaylists().firstOrNull { it.id == pid }
                 ?: PlaylistInfo(pid, "مسلسل", null)
             return loadPlaylist(info)
         }
 
-        // روابط يوتيوب الحقيقية، لمن يفتح الإضافة من خارجها
+        // 2) روابط يوتيوب الحقيقية (؟list=) — الصفحة الرئيسية والروابط
+        //    المفتوحة من خارج الإضافة.
         Regex("""[?&]list=([\w-]+)""").find(url)?.let { m ->
             val pid = m.groupValues[1]
             val info = allPlaylists().firstOrNull { it.id == pid }
                 ?: PlaylistInfo(pid, "مسلسل", null)
             return loadPlaylist(info)
         }
+
+        // 3) فيديو مفرد ?v= يفتح كمشاهدة، بشاشة LoadResponse الملائمة.
         Regex("""[?&]v=([\w-]{11})""").find(url)?.let { m ->
             val vid = m.groupValues[1]
             return newMovieLoadResponse("فيديو", url, TvType.Movie, vid) {
@@ -550,7 +572,7 @@ class AryProvider : MainAPI() {
 
         Log.d(TAG, "playlist '${info.title}' -> ${episodes.size} episodes")
 
-        return newTvSeriesLoadResponse(name, "ary://pl/${info.id}", TvType.TvSeries, episodes) {
+        return newTvSeriesLoadResponse(name, playlistUrl(info.id), TvType.TvSeries, episodes) {
             this.posterUrl = poster
         }
     }
