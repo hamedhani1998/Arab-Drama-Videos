@@ -82,6 +82,14 @@ class AryProvider : MainAPI() {
     override val hasQuickSearch = true
     override var lang = "ar"
 
+    /**
+     * بعض الشبكات تحجب مضيفات googlevideo الفرعية (rr2--sn-…googlevideo.com)
+     * الخاصة ببث الفيديو مع السماح بالنطاق الأم (googlevideo.com / redirector).
+     * عند التفعيل نضيف لكل رابطٍ نسخةً بديلة تعبّر عبر redirector.googlevideo.com
+     * حتى يبقى التشغيل ممكناً رغم الحجب. (يدوي للبحث، صحيح افتراضياً)
+     */
+    var useYoutubeRedirect = true
+
     // =============================== HTML / GET ===============================
 
     private fun ctx(): JSONObject = JSONObject().put(
@@ -584,6 +592,11 @@ class AryProvider : MainAPI() {
      * نُمرّر رابط المشاهدة العادي فقط: مُستخرِج يوتيوب المدمج في
      * CloudStream يعرف يوتيوب أصلاً، ويحلّ الرابط إلى ملفات googlevideo.com
      * التي تدعم التقديم والتأخير. لا نُصدر صفحة HTML أبداً (سبب الخطأ 2004).
+     *
+     * تجاوز الحجب: بعض الشبكات تحجب مضيف googlevideo الفرعي (rr2--sn-…)
+     * مع السماح بالنطاق الأم redirector.googlevideo.com. لا يمكن تجاوز التوقيع،
+     * لكن نضيف نسخةً بديلة تعبّر عبر redirector (يقبلها السيرفر أحياناً)،
+     * وبذلك يتاح للاعب خيار آخر عند فشل الأصل.
      */
     override suspend fun loadLinks(
         data: String,
@@ -601,10 +614,28 @@ class AryProvider : MainAPI() {
         val watchUrl = "https://www.youtube.com/watch?v=$vid"
 
         return try {
-            loadExtractor(watchUrl, "https://www.youtube.com/", subtitleCallback, callback)
+            if (useYoutubeRedirect) {
+                loadExtractor(watchUrl, "https://www.youtube.com/", subtitleCallback) { link ->
+                    callback(link)
+                    val goog = Regex("""https://[^/]+\.googlevideo\.com/""")
+                    if (goog.containsMatchIn(link.url)) {
+                        val alt = link.url.replaceFirst(goog, "https://redirector.googlevideo.com/")
+                        if (alt != link.url) {
+                            val altLink = ExtractorLink(
+                                link.source, link.name, alt, link.referer, link.quality,
+                                link.headers, link.extractorData, link.type, link.audioTracks
+                            )
+                            callback(altLink)
+                        }
+                    }
+                }
+            } else {
+                loadExtractor(watchUrl, "https://www.youtube.com/", subtitleCallback, callback)
+            }
         } catch (e: Exception) {
             Log.e(TAG, "extraction failed for $vid: ${e.message}")
             false
         }
     }
 }
+    
