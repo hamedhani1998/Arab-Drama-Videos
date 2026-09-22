@@ -562,8 +562,9 @@ class AryProvider : MainAPI() {
         val poster = eps.firstOrNull()?.second?.thumb ?: info.cover
 
         val episodes = eps.map { (num, l) ->
-            // بيانات الحلقة = معرّف الفيديو؛ يُبنى رابط المشاهدة وقت التشغيل.
-            newEpisode(l.id) {
+            // الحلقة تُمرّر عبر link حقيقي لكي لا يلصق fixUrl عليه mainUrl
+            // (مثل ary://pl/ تماماً)، وloadLinks يقبل الرابط أو المعرّف النقي.
+            newEpisode("https://www.youtube.com/watch?v=${l.id}") {
                 this.name = l.title.ifBlank { "الحلقة $num" }
                 this.episode = num
                 this.posterUrl = l.thumb ?: posterOf(l.id)
@@ -590,8 +591,10 @@ class AryProvider : MainAPI() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
-        val vid = data.trim()
-        if (!Regex("""^[\w-]{11}$""").matches(vid)) {
+        val raw = data.trim()
+        val vid = if (Regex("""^[\w-]{11}$""").matches(raw)) raw
+        else Regex("""[?&]v=([\w-]{11})""").find(raw)?.groupValues?.get(1)
+        if (vid == null) {
             Log.w(TAG, "loadLinks: unexpected data '$data'")
             return false
         }
