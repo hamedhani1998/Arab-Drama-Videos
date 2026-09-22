@@ -1,7 +1,7 @@
-version = 1
+version = 2
 
 cloudstream {
-    description = "IPTV - قنوات تلفزيونية مباشرة (iptv-org + Free-TV)"
+    description = "IPTV Org - قنوات تلفزيونية مباشرة (iptv-org)"
     authors = listOf("hamedhani1998")
     language = "ar"
 
