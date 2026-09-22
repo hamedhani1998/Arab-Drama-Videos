@@ -1,4 +1,4 @@
-version = 2
+version = 3
 
 cloudstream {
     description = "IPTV Org - قنوات تلفزيونية مباشرة (iptv-org)"

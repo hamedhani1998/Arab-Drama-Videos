@@ -37,8 +37,13 @@ class IptvOrgProvider : MainAPI() {
         "https://iptv-org.github.io/iptv/categories/documentary.m3u" to "📽️ وثائقي",
     )
 
-    // عدد القنوات الذي نعرضه لكل تبويب (حتى لا تُثقل الواجهة بالمئات/الآلاف).
-    private val HOME_CAP = 150
+    // مرايا بديلة (jsDelivr) لكل مصدر، عند تعذّر الوصول المباشر.
+    private fun mirrorsOf(feed: String) = listOf(
+        feed,
+        feed.replaceFirst("https://iptv-org.github.io/iptv", "https://cdn.jsdelivr.net/gh/iptv-org/iptv@gh-pages")
+    )
+
+    // عدد نتائج البحث الذي نعرضه (حتى لا تُثقل الواجهة).
     private val SEARCH_CAP = 150
 
     override val mainPage = mainPageOf(*feeds.map { it.second to it.first }.toTypedArray())
@@ -47,8 +52,8 @@ class IptvOrgProvider : MainAPI() {
         if (page > 1) return null
         // mainPage data = الرابط (لأن mainPageOf بنقط المفتاح=الاسم والقيمة=الرابط)
         val feed = request.data
-        val channels = IptvOrgData.fetchCached(feed) ?: return null
-        val list = channels.take(HOME_CAP).map { it.toLiveSearchResponse() }
+        val channels = IptvOrgData.fetchCached(feed, mirrorsOf(feed)) ?: return null
+        val list = channels.map { it.toLiveSearchResponse() }
         if (list.isEmpty()) return null
         return newHomePageResponse(request.name, list)
     }
@@ -56,7 +61,7 @@ class IptvOrgProvider : MainAPI() {
     override suspend fun search(query: String): List<SearchResponse>? {
         val q = query.trim().lowercase()
         if (q.isEmpty()) return null
-        val all = IptvOrgData.fetchCached(feeds.first().first) ?: return null
+        val all = IptvOrgData.fetchCached(feeds.first().first, mirrorsOf(feeds.first().first)) ?: return null
         val seen = java.util.HashSet<String>()
         val out = mutableListOf<SearchResponse>()
         for (ch in all) {
@@ -127,13 +132,14 @@ private data class IptvChannel(
 
 private object IptvOrgData {
     private const val TTL_MS = 10 * 60 * 1000L
+    const val UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36"
     private val cache = HashMap<String, Pair<Long, List<IptvChannel>>>()
     private val byUrl = HashMap<String, IptvChannel>()
 
-    suspend fun fetchCached(feed: String): List<IptvChannel>? {
+    suspend fun fetchCached(feed: String, mirrors: List<String> = listOf(feed)): List<IptvChannel>? {
         val now = System.currentTimeMillis()
         cache[feed]?.let { (ts, list) -> if (now - ts < TTL_MS) return list }
-        val fresh = fetch(feed)
+        val fresh = fetch(feed, mirrors)
         return synchronized(byUrl) {
             if (fresh != null) {
                 cache[feed] = now to fresh
@@ -146,14 +152,19 @@ private object IptvOrgData {
 
     suspend fun lookup(url: String): IptvChannel? = synchronized(byUrl) { byUrl[url] }
 
-    private suspend fun fetch(feed: String): List<IptvChannel>? {
-        return try {
-            val text = app.get(feed, timeout = 60_000L).text
-            val parsed = parseM3u(text)
-            parsed.filterNot { it.isDeadIp() }
-        } catch (e: Exception) {
-            null
+    /** يجلب القائمة من المصدر الأساسي، فإن فشل جرّب مرايا jsDelivr. */
+    private suspend fun fetch(feed: String, mirrors: List<String>): List<IptvChannel>? {
+        for (url in mirrors) {
+            try {
+                val text = app.get(url, headers = mapOf("User-Agent" to UA), timeout = 90_000L).text
+                val parsed = parseM3u(text)
+                val filtered = parsed.filterNot { it.isDeadIp() }
+                if (filtered.isNotEmpty()) return filtered
+            } catch (e: Exception) {
+                // جرّب المصدر التالي
+            }
         }
+        return null
     }
 
     /** يحلل M3U إلى قنوات، مع التقاط #EXTVLCOPT (referrer/user-agent) لكل قناة. */

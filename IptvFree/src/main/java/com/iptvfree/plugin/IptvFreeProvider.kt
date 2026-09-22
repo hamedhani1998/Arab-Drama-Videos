@@ -21,7 +21,7 @@ class IptvFreeProvider : MainAPI() {
     override val supportedTypes = setOf(TvType.Live)
 
     private val freeFeed = "https://raw.githubusercontent.com/Free-TV/IPTV/master/playlist.m3u8"
-    private val HOME_CAP = 200
+    private val freeFeedCdn = "https://cdn.jsdelivr.net/gh/Free-TV/IPTV@master/playlist.m3u8"
     private val SEARCH_CAP = 200
 
     // التبويبات: "الكل" + دول مهمة (كل منها مرشّحاً عبر group-title).
@@ -42,11 +42,13 @@ class IptvFreeProvider : MainAPI() {
         if (page > 1) return null
         val feed = request.data.substringBefore('#')
         val filter = request.data.substringAfter('#').takeIf { it.isNotBlank() }?.lowercase()
-        val all = IptvFreeData.fetchCached(feed) ?: return null
+        val all = IptvFreeData.fetchCached(
+            feed,
+            if (feed == freeFeed) listOf(freeFeed, freeFeedCdn) else listOf(feed)
+        ) ?: return null
         val list = all
             .filter { ch -> filter == null || ch.group?.lowercase()?.contains(filter) == true }
             .filterNot { ch -> ch.isDeadIp() }
-            .take(HOME_CAP)
             .map { it.toLiveSearchResponse() }
         if (list.isEmpty()) return null
         return newHomePageResponse(request.name, list)
@@ -55,7 +57,7 @@ class IptvFreeProvider : MainAPI() {
     override suspend fun search(query: String): List<SearchResponse>? {
         val q = query.trim().lowercase()
         if (q.isEmpty()) return null
-        val all = IptvFreeData.fetchCached(freeFeed) ?: return null
+        val all = IptvFreeData.fetchCached(freeFeed, listOf(freeFeed, freeFeedCdn)) ?: return null
         val out = all.filter { it.matches(q) }.filterNot { it.isDeadIp() }.take(SEARCH_CAP).map { it.toLiveSearchResponse() }
         return out
     }
@@ -116,13 +118,14 @@ private data class IptvChannel(
 
 private object IptvFreeData {
     private const val TTL_MS = 10 * 60 * 1000L
+    const val UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36"
     private val cache = HashMap<String, Pair<Long, List<IptvChannel>>>()
     private val byUrl = HashMap<String, IptvChannel>()
 
-    suspend fun fetchCached(feed: String): List<IptvChannel>? {
+    suspend fun fetchCached(feed: String, mirrors: List<String> = listOf(feed)): List<IptvChannel>? {
         val now = System.currentTimeMillis()
         cache[feed]?.let { (ts, list) -> if (now - ts < TTL_MS) return list }
-        val fresh = fetch(feed)
+        val fresh = fetch(feed, mirrors)
         return synchronized(byUrl) {
             if (fresh != null) {
                 cache[feed] = now to fresh
@@ -135,13 +138,18 @@ private object IptvFreeData {
 
     suspend fun lookup(url: String): IptvChannel? = synchronized(byUrl) { byUrl[url] }
 
-    private suspend fun fetch(feed: String): List<IptvChannel>? {
-        return try {
-            val text = app.get(feed, timeout = 60_000L).text
-            parseM3u(text)
-        } catch (e: Exception) {
-            null
+    /** يجلب القائمة من المصدر الأساسي، فإن فشل جرّب مرآة jsDelivr. */
+    private suspend fun fetch(feed: String, mirrors: List<String>): List<IptvChannel>? {
+        for (url in mirrors) {
+            try {
+                val text = app.get(url, headers = mapOf("User-Agent" to UA), timeout = 90_000L).text
+                val parsed = parseM3u(text)
+                if (!parsed.isNullOrEmpty()) return parsed
+            } catch (e: Exception) {
+                // جرّب المصدر التالي
+            }
         }
+        return null
     }
 
     private fun parseM3u(text: String): List<IptvChannel> {
