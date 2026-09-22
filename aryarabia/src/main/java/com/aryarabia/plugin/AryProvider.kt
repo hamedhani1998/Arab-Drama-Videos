@@ -616,14 +616,15 @@ class AryProvider : MainAPI() {
         return try {
             if (useYoutubeRedirect) {
                 loadExtractor(watchUrl, "https://www.youtube.com/", subtitleCallback) { link ->
-                    // الشبكة تحجب مضيفات البث الفرعية (rrN--sn-…googlevideo.com).
-                    // نمرّر النطاق الأم redirector.googlevideo.com بدلاً من الأصل المحجوب
-                    // حتى لا يهدر اللاعب 30 ثانية على مضيفٍ محجوب ثم يفشل.
+                    // الشبكة تحجب مضيفات البث الفرعية (rrN--sn-…googlevideo.com) على TCP:443
+                    // بينما النطاق الأم googlevideo.com (142.251.*) مفتوح. نعيد كتابة المضيف
+                    // إلى googlevideo.com ونبقي بقية الرابط الموقّع كما هو — غالب توقيعات
+                    // YouTube تُقبل عبر النطاق الأم للبث.
                     val hostRe = Regex("""https://[^/]+\.googlevideo\.com/""")
-                    if (hostRe.containsMatchIn(link.url) && !link.url.startsWith("https://redirector.googlevideo.com/")) {
-                        val alt = link.url.replaceFirst(hostRe, "https://redirector.googlevideo.com/")
+                    if (hostRe.containsMatchIn(link.url) && !link.url.startsWith("https://googlevideo.com/")) {
+                        val alt = link.url.replaceFirst(hostRe, "https://googlevideo.com/")
                         val altLink = ExtractorLink(
-                            link.source, link.name + " (redirect)", alt, link.referer, link.quality,
+                            link.source, link.name + " (host)", alt, link.referer, link.quality,
                             link.headers, link.extractorData, link.type, link.audioTracks
                         )
                         callback(altLink)
