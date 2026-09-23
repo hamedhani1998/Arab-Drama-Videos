@@ -91,13 +91,6 @@ class AryProvider : MainAPI() {
      */
     var useYoutubeRedirect = false
 
-    /**
-     * عند التفعيل نضيف للروابط الأصلية رابط HLS إضافياً من innerTube `/player`
-     * (hlsManifestUrl). بعض الشبكات لا تحجب مضيف الـ HLS (manifest.googlevideo)
-     * كما تحجب `rr*--sn-``. ميتاداتا HLS تمكّن اللاعب (m3u8) عبر بروتوكول مختلف.
-     */
-    var useYoutubeHls = true
-
     // =============================== HTML / GET ===============================
 
     private fun ctx(): JSONObject = JSONObject().put(
@@ -621,47 +614,9 @@ class AryProvider : MainAPI() {
         }
         val watchUrl = "https://www.youtube.com/watch?v=$vid"
 
-        try {
-            loadExtractor(watchUrl, "https://www.youtube.com/", subtitleCallback, callback)
-        } catch (e: Exception) {
-            Log.e(TAG, "extraction failed for $vid: ${e.message}")
-        }
-        if (useYoutubeHls) {
-            try {
-                val apiUrl = "https://www.youtube.com/youtubei/v1/player"
-                val payload = JSONObject()
-                    .put("context", JSONObject().put(
-                        "client", JSONObject()
-                            .put("clientName", "WEB")
-                            .put("clientVersion", CLIENT_VERSION)
-                            .put("hl", "ar")
-                            .put("gl", "US")
-                    ))
-                    .put("videoId", vid)
-                val text = app.post(
-                    apiUrl, json = payload,
-                    headers = mapOf(
-                        "Origin" to "https://www.youtube.com",
-                        "Referer" to "https://www.youtube.com/"
-                    )
-                ).text
-                val hls = Regex(""""hlsManifestUrl"\s*:\s*"([^"]+)"""").find(text)?.groupValues?.get(1)
-                    ?.replace("\\u0026", "&")?.replace("\\/", "/")
-                if (!hls.isNullOrBlank()) {
-                    callback(
-                        ExtractorLink(
-                            "ARY العربية", "HLS (m3u8)", hls, "https://www.youtube.com/",
-                            -1, emptyMap(), null, ExtractorLinkType.M3U8
-                        )
-                    )
-                    Log.i(TAG, "added HLS manifest for $vid")
-                } else {
-                    Log.d(TAG, "no hlsManifestUrl in player response for $vid")
-                }
-            } catch (e: Exception) {
-                Log.w(TAG, "HLS fetch failed for $vid: ${e.message}")
-            }
-        }
+        val startMs = System.currentTimeMillis()
+        loadExtractor(watchUrl, "https://www.youtube.com/", subtitleCallback, callback)
+        Log.d(TAG, "loadLinks for $vid resolved in ${System.currentTimeMillis() - startMs}ms")
         return true
     }
 }
