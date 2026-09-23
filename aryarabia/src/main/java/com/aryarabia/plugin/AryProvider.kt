@@ -6,6 +6,9 @@ import android.util.Log
 import kotlinx.coroutines.delay
 import org.json.JSONArray
 import org.json.JSONObject
+import org.schabi.newpipe.extractor.ServiceList
+import org.schabi.newpipe.extractor.services.youtube.extractors.YoutubeStreamExtractor
+import org.schabi.newpipe.extractor.services.youtube.linkHandler.YoutubeStreamLinkHandlerFactory
 
 /**
  * ARY العربية — قناة يوتيوب واحدة فقط (UC6ApcZBKUPwuL4QcGeWaTZw).
@@ -679,6 +682,141 @@ class AryProvider : MainAPI() {
         return (1..16).map { chars[r.nextInt(chars.length)] }.joinToString("")
     }
 
+    /** رقم الجودة كتسمية (NewPipe قد يعطي height صفراً أحياناً). */
+    private fun qualityLabelOf(vs: org.schabi.newpipe.extractor.stream.VideoStream): String {
+        val height = runCatching { vs.height }.getOrNull() ?: 0
+        if (height > 0) return height.toString()
+        return "video"
+    }
+
+    /**
+     * مسار تشغيل مطابق لسيرفرات إضافة «يوتيوب» في re-3arabi (التي تعمل على
+     * هاتفك): `YoutubeStreamExtractor.fetchPage()` يعطي روابط googlevideo
+     * **مفكوكة التوقيع ومعامل n** بالإضافة إلى نطاقات Initialization/Index لكل
+     * جودة، ثم نبني منها مانيفست DASH محلي (`127.0.0.1`) يعرض كل جودة مع
+     * أفضل صوت لها، فيتلقى يوتيوب طلبات Range شرعية — لا ترفض 2004.
+     *
+     * NewPipe نفسه لا يُضمَّن في الـ cs3؛ تطبيق CloudStream يقدّمه وقت التشغيل.
+     */
+    private suspend fun resolveFromNewPipe(
+        vid: String,
+        subtitleCallback: (SubtitleFile) -> Unit,
+        callback: (ExtractorLink) -> Unit
+    ): Int {
+        var produced = 0
+        val watchUrl = "https://www.youtube.com/watch?v=$vid"
+        try {
+            val link = YoutubeStreamLinkHandlerFactory.getInstance().fromUrl(watchUrl)
+            val s = object : YoutubeStreamExtractor(ServiceList.YouTube, link) {}
+            s.fetchPage()
+
+            val dur = runCatching { s.length }.getOrNull() ?: 0
+            val durationSeconds = if (dur > 0) dur else 3600L
+
+            val seenUrls = mutableSetOf<String>()
+
+            // جودات الفيديو (video-only): مفتاح الاستخراج — وفّقها مع أفضل صوت
+            val videoOnlyList = (s.videoOnlyStreams ?: emptyList()).mapNotNull { vs ->
+                try {
+                    val streamUrl = vs.content ?: return@mapNotNull null
+                    if (!seenUrls.add(streamUrl)) return@mapNotNull null
+
+                    val label = qualityLabelOf(vs)
+                    val height = runCatching { vs.height ?: 0 }.getOrNull() ?: 0
+                    var mime = vs.format?.mimeType
+                    if (mime.isNullOrEmpty()) mime = AryDashServer.mimeFromUrl(streamUrl, false)
+
+                    val initR = if (vs.initStart != null && vs.initEnd != null) "${vs.initStart}-${vs.initEnd}" else null
+                    val indexR = if (vs.indexStart != null && vs.indexEnd != null) "${vs.indexStart}-${vs.indexEnd}" else null
+
+                    StreamInfo(streamUrl, mime, height, label, initR, indexR)
+                } catch (e: Exception) { null }
+            }.distinctBy { it.height }
+
+            val audioInfoList = (s.audioStreams ?: emptyList()).mapNotNull { asr ->
+                try {
+                    val aUrl = asr.content ?: return@mapNotNull null
+                    val bitrate = runCatching { asr.bitrate ?: 128000 }.getOrNull() ?: 128000
+                    var mime = runCatching { asr.format?.mimeType }.getOrNull()
+                    if (mime.isNullOrEmpty()) mime = AryDashServer.mimeFromUrl(aUrl, true)
+
+                    val initR = if (asr.initStart != null && asr.initEnd != null) "${asr.initStart}-${asr.initEnd}" else null
+                    val indexR = if (asr.indexStart != null && asr.indexEnd != null) "${asr.indexStart}-${asr.indexEnd}" else null
+                    var rawLang = runCatching { asr.audioTrackId ?: "Default" }.getOrNull() ?: "Default"
+                    if (rawLang.contains(".")) rawLang = rawLang.substringBefore(".")
+
+                    AudioInfo(aUrl, mime, bitrate, initR, indexR, rawLang.uppercase())
+                } catch (e: Exception) { null }
+            }.distinctBy { it.url }
+            val audiosByLanguage = audioInfoList.groupBy { it.language }
+
+            runCatching {
+                s.subtitlesDefault?.filterNotNull()?.mapNotNull { ss ->
+                    try {
+                        val lang = ss.locale?.language ?: return@mapNotNull null
+                        val content = ss.content ?: ss.url ?: return@mapNotNull null
+                        newSubtitleFile(lang, content)
+                    } catch (e: Exception) { null }
+                }?.forEach { subtitleCallback(it) }
+            }
+
+            AryDashServer.ensureStarted()
+
+            if (audiosByLanguage.isNotEmpty()) {
+                for (video in videoOnlyList) {
+                    for ((lang, audios) in audiosByLanguage) {
+                        val bestAudioForLang = if (video.mimeType.contains("webm")) {
+                            audios.sortedWith(compareByDescending<AudioInfo> { it.mimeType.contains("webm") }.thenByDescending { it.bitrate }).firstOrNull()
+                        } else {
+                            audios.sortedWith(compareByDescending<AudioInfo> { it.mimeType.contains("mp4") }.thenByDescending { it.bitrate }).firstOrNull()
+                        }
+                        if (bestAudioForLang != null) {
+                            val localLink = AryDashServer.buildAndRegister(
+                                video, listOf(bestAudioForLang), durationSeconds
+                            )
+                            if (localLink != null) {
+                                callback(
+                                    newExtractorLink(
+                                        "ARY العربية",
+                                        "${video.label} (${bestAudioForLang.language})",
+                                        localLink,
+                                        type = ExtractorLinkType.DASH
+                                    ) {
+                                        this.referer = mainUrl
+                                        this.quality = video.height
+                                    }
+                                )
+                                produced++
+                            }
+                        }
+                    }
+                }
+            }
+
+            // مقاطع مدمجة (muxed) كاحتياط إضافي — روابط مباشرة
+            (s.videoStreams ?: emptyList()).mapNotNull { vs ->
+                try {
+                    val mUrl = vs.content ?: return@mapNotNull null
+                    if (!seenUrls.add(mUrl)) return@mapNotNull null
+                    Triple(mUrl, qualityLabelOf(vs), runCatching { vs.height ?: 0 }.getOrNull() ?: 0)
+                } catch (e: Exception) { null }
+            }.forEach { (mUrl, mLabel, mHeight) ->
+                callback(
+                    newExtractorLink("ARY العربية", "$mLabel (Legacy)", mUrl, type = INFER_TYPE) {
+                        this.referer = mainUrl
+                        this.quality = mHeight
+                    }
+                )
+                produced++
+            }
+
+            Log.d(TAG, "$vid NewPipe DASH links=$produced qualities=${videoOnlyList.size}")
+        } catch (e: Exception) {
+            Log.w(TAG, "$vid NewPipe resolve failed: ${e.message}")
+        }
+        return produced
+    }
+
     private suspend fun resolveFromHtml(
         vid: String,
         subtitleCallback: (SubtitleFile) -> Unit,
@@ -813,19 +951,26 @@ class AryProvider : MainAPI() {
 
         val startMs = System.currentTimeMillis()
 
-        // 1) المحاولة السريعة: extractor المدمج (يكفي على الشبكات العادية)
-        var links = 0
-        loadExtractor(watchUrl, "https://www.youtube.com/", subtitleCallback, { link ->
-            links++
-            callback(link)
-        })
+        // 1) المسار الأساسي: NewPipe + خادم DASH المحلي (سيرفرات re-3arabi).
+        //    يُنتج روابط مفكوكة التوقيع/n ويعبّرها عبر manifest محلي
+        //    بطلبات Range شرعية — يحلّ خطأ 2004 على هذه الشبكات.
+        var links = resolveFromNewPipe(vid, subtitleCallback, callback)
+        val newpipeMs = System.currentTimeMillis() - startMs
+
+        // 2) إذا لم يصدر الروابط: extractor المدمج كمسار ثانٍ
+        if (links == 0) {
+            loadExtractor(watchUrl, "https://www.youtube.com/", subtitleCallback, { link ->
+                links++
+                callback(link)
+            })
+        }
         val extractorMs = System.currentTimeMillis() - startMs
 
-        // 2) إذا لم تصل أي روابط: اعتمد على استخراج HTML المباشر
+        // 3) آخر مسار: استخراج HTML المباشر (serverAbrStreamingUrl)
         if (links == 0) {
             val n = resolveFromHtml(vid, subtitleCallback, callback)
             links += n
-            Log.d(TAG, "loadLinks $vid extractor=$extractorMs ms (0 links) -> html fallback produced $n links")
+            Log.d(TAG, "loadLinks $vid newpipe=${newpipeMs}ms -> html fallback produced $n links")
         }
 
         val elapsed = System.currentTimeMillis() - startMs
