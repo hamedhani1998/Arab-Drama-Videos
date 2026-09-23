@@ -672,6 +672,13 @@ class AryProvider : MainAPI() {
         }
     }
 
+    /** content playback nonce — يضيفه NewPipe لكل رابط (يوتيوب يتوقعه). */
+    private fun randomCpn(): String {
+        val chars = "0123456789abcdef"
+        val r = java.util.Random()
+        return (1..16).map { chars[r.nextInt(chars.length)] }.joinToString("")
+    }
+
     private suspend fun resolveFromHtml(
         vid: String,
         subtitleCallback: (SubtitleFile) -> Unit,
@@ -696,10 +703,15 @@ class AryProvider : MainAPI() {
             }
             fun emit(url: String, name: String, quality: Int, headers: Map<String, String> = mapOf()) {
                 if (url.isBlank()) return
+                // أسلوب NewPipe: إضافة cpn (content playback nonce) لكل رابط يوتيوب
+                val withCpn = if (url.contains(".googlevideo.com")) {
+                    if (url.contains("cpn=")) url
+                    else url + (if (url.contains("?")) "&" else "?") + "cpn=" + randomCpn()
+                } else url
                 val link = ExtractorLink(
                     "ARY العربية",
                     name,
-                    url,
+                    withCpn,
                     watchUrl,
                     quality,
                     headers,
@@ -709,9 +721,9 @@ class AryProvider : MainAPI() {
                 )
                 produced++
                 callback(link)
-                if (useYoutubeRedirect && url.contains(".googlevideo.com") && !url.contains("redirector.googlevideo.com")) {
-                    val redirected = redirectHost(url)
-                    if (redirected != url) {
+                if (useYoutubeRedirect && withCpn.contains(".googlevideo.com") && !withCpn.contains("redirector.googlevideo.com")) {
+                    val redirected = redirectHost(withCpn)
+                    if (redirected != withCpn) {
                         val link2 = ExtractorLink(
                             "ARY العربية",
                             "$name · redirect",
