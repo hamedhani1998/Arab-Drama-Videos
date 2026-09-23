@@ -304,5 +304,25 @@
     ],
     "iconUrl": "https://yt3.googleusercontent.com/SCqr1wMv6zOj1x5p9GlnsIBgYO6IfWIJ4iuEzB-OMtMmoFpIPlFdU1x7d0SMS_smYa6GeIuqA=s200-c-k-c0x00ffffff-no-rj",
     "description": "قناة ARY العربية على يوتيوب: كل مسلسلاتها وحلقاتها كاملة (ARY Arabia)"
+  },
+  {
+    "name": "Mosalsaly",
+    "internalName": "mosalsaly",
+    "version": 1,
+    "fileSize": 19531,
+    "fileHash": "sha256-d4567545c84a15fe9f2460f1ff7faf1deadf423775a2e45a29a4c3c06f2d6b12",
+    "url": "https://raw.githubusercontent.com/hamedhani1998/Arab-Drama-Videos/builds/mosalsaly.cs3",
+    "repositoryUrl": "https://github.com/hamedhani1998/Arab-Drama-Videos",
+    "apiVersion": 1,
+    "status": 1,
+    "language": "ar",
+    "authors": [
+      "hamedhani1998"
+    ],
+    "tvTypes": [
+      "TvSeries"
+    ],
+    "iconUrl": "https://mosalsaly.com/favicon.ico",
+    "description": "مسلسلي Mosalsaly - مسلسلات قصيرة من 18 منصة (مجمع)"
   }
 ]
