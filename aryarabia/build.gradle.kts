@@ -1,4 +1,4 @@
-version = 14
+version = 15
 
 cloudstream {
     description = "ARY العربية - قناة يوتيوب الرسمية: كل مسلسلاتها وحلقاتها كاملة (ARY Arabia)"

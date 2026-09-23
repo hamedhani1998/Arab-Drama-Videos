@@ -745,21 +745,50 @@ class AryProvider : MainAPI() {
             sd.optJSONArray("formats")?.let { for (i in 0 until it.length()) arr.add(it.getJSONObject(i)) }
             sd.optJSONArray("adaptiveFormats")?.let { for (i in 0 until it.length()) arr.add(it.getJSONObject(i)) }
 
-            // 1) أي تنسيق برابط url جاهز
+            val abr = sd.optString("serverAbrStreamingUrl")
+            val abrHeaders = mapOf("Referer" to "https://www.youtube.com/")
+
+            // 1) أي تنسيق برابط url جاهز (يوتيوب يخفيها حديثاً لكن إن ظهرت استخدمها)
+            var emittedReal = 0
             for (f in arr) {
                 val url = f.optString("url")
                 if (url.isBlank()) continue
                 val q = f.optString("qualityLabel")
                 val name = "ARY ${if (q.isNotBlank()) q else f.optInt("itag").toString()}"
-                emit(url, name, f.optInt("itag"))
+                emit(url, name, f.optInt("itag"), abrHeaders)
+                emittedReal++
             }
-            // 2) تنسيقات بلا url (يوتيوب يحجبها حديثاً): نمرر serverAbrStreamingUrl
-            //    (رابط videoplayback على مضيف rr* -- نفس عائلة المضيف المحجوب على
-            //    بعض الشبكات، لكن على الشبكات العادية هو رابط تشغيلي مباشر).
-            val abr = sd.optString("serverAbrStreamingUrl")
-            if (produced == 0 && abr.isNotBlank()) {
-                emit(abr, "ARY (ABR)", 0, mapOf("Referer" to "https://www.youtube.com/"))
+
+            // 2) كل الجودات الكائنة (encoded في adaptiveFormats لكن url مخفٍ):
+            //    نبني قائمة اختيارات من qualityLabels، كلها تشير إلى ABR المتكيّف
+            //    (serverAbrStreamingUrl يتكيّف تلقائياً بين الجودات).
+            val labels = LinkedHashMap<String, String>() // label -> available quality
+            for (f in arr) {
+                val q = f.optString("qualityLabel")
+                if (q.isBlank()) continue
+                // أبقي أعلى دقة موجودة لكل تسمية (آخر دقة فائقة)
+                labels[q] = q
             }
+            // ترتيب تنازلي للحجم
+            val ordered = labels.keys.sortedByDescending { label ->
+                Regex("""(\d{3,4})p""").find(label)?.groupValues?.get(1)?.toIntOrNull() ?: 0
+            }
+            var emittedAb = 0
+            if (abr.isNotBlank() && produced == 0) {
+                // عند غياب كل url: عرض قائمة الجودات على نفس ABR المتكيّف
+                if (ordered.isEmpty()) {
+                    emit(abr, "ARY (ABR)", 0, abrHeaders)
+                    emittedAb++
+                } else {
+                    for (label in ordered) {
+                        emit(abr, "ARY $label", 0, abrHeaders)
+                        emittedAb++
+                    }
+                }
+            } else if (abr.isNotBlank() && emittedReal == 0) {
+                // روابط url حقيقية وُجدت → لا ندخل تعديلات؛ ABR يبقى احتياطياً
+            }
+            Log.d(TAG, "$vid resolveFromHtml: real=$emittedReal abr-entries=$emittedAb labels=${ordered.size}")
             return produced
         } catch (e: Exception) {
             Log.w(TAG, "$vid resolveFromHtml failed: ${e.message}")
