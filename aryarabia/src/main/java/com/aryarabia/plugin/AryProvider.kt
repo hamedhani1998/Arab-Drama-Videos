@@ -3,7 +3,6 @@ package com.aryarabia.plugin
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
 import android.util.Log
-import java.net.URI
 import kotlinx.coroutines.delay
 import org.json.JSONArray
 import org.json.JSONObject
@@ -600,6 +599,125 @@ class AryProvider : MainAPI() {
      * لكن نضيف نسخةً بديلة تعبّر عبر redirector (يقبلها السيرفر أحياناً)،
      * وبذلك يتاح للاعب خيار آخر عند فشل الأصل.
      */
+    /**
+     * يستخرج كائن `ytInitialPlayerResponse` من HTML بنفس منطق
+     * `ytInitialData`: نجد البداية ونطابق الأقواس المتوازنة مع مراعاة
+     * الأوتار المهرَّبة.
+     */
+    private fun ytPlayerResponse(html: String): JSONObject? {
+        val markers = listOf(
+            "var ytInitialPlayerResponse = ",
+            "window[\"ytInitialPlayerResponse\"] = ",
+            "\"ytInitialPlayerResponse\"] = ",
+            "ytInitialPlayerResponse = "
+        )
+        for (m in markers) {
+            val idx = html.indexOf(m)
+            if (idx < 0) continue
+            val start = idx + m.length
+            if (start >= html.length || html[start] != '{') continue
+            var depth = 0
+            var i = start
+            var inStr = false
+            var esc = false
+            while (i < html.length) {
+                val c = html[i]
+                if (inStr) {
+                    if (esc) esc = false
+                    else if (c == '\\') esc = true
+                    else if (c == '"') inStr = false
+                } else {
+                    when (c) {
+                        '"' -> inStr = true
+                        '{' -> depth++
+                        '}' -> {
+                            depth--
+                            if (depth == 0) {
+                                return try {
+                                    JSONObject(html.substring(start, i + 1))
+                                } catch (_: Exception) {
+                                    null
+                                }
+                            }
+                        }
+                    }
+                }
+                i++
+            }
+        }
+        return null
+    }
+
+    /**
+     * يجلب حلقة يوتيوب مباشرة: صفحة watch.html ثم نستخرج
+     * ytInitialPlayerResponse ونمرر روابطها عبر callback. هذا بديل
+     * مباشر عن extractor المدمج الذي أعطى 0 روابط على هذا الجهاز.
+     */
+    private suspend fun resolveFromHtml(
+        vid: String,
+        subtitleCallback: (SubtitleFile) -> Unit,
+        callback: (ExtractorLink) -> Unit
+    ): Int {
+        var produced = 0
+        val watchUrl = "https://www.youtube.com/watch?v=$vid"
+        try {
+            val res = app.get(
+                watchUrl,
+                headers = mapOf(
+                    "User-Agent" to UA,
+                    "Accept-Language" to "ar",
+                    "Accept" to "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
+                )
+            )
+            val pr = ytPlayerResponse(res.text) ?: return 0
+            val status = pr.optJSONObject("playabilityStatus")?.optString("status")
+            if (status != "OK") {
+                Log.w(TAG, "$vid playableStatus=$status (${pr.optJSONObject("playabilityStatus")?.optString("reason")})")
+                return 0
+            }
+            fun emit(url: String, name: String, quality: Int, headers: Map<String, String> = mapOf()) {
+                if (url.isBlank()) return
+                val link = ExtractorLink(
+                    "ARY العربية",
+                    name,
+                    url,
+                    watchUrl,
+                    quality,
+                    headers,
+                    null,
+                    ExtractorLinkType.M3U8,
+                    emptyList<AudioFile>()
+                )
+                produced++
+                callback(link)
+            }
+            val sd = pr.optJSONObject("streamingData") ?: return 0
+            val arr = ArrayList<JSONObject>()
+            sd.optJSONArray("formats")?.let { for (i in 0 until it.length()) arr.add(it.getJSONObject(i)) }
+            sd.optJSONArray("adaptiveFormats")?.let { for (i in 0 until it.length()) arr.add(it.getJSONObject(i)) }
+
+            // 1) أي تنسيق برابط url جاهز
+            for (f in arr) {
+                val url = f.optString("url")
+                if (url.isBlank()) continue
+                val q = f.optString("qualityLabel")
+                val name = "ARY ${if (q.isNotBlank()) q else f.optInt("itag").toString()}"
+                emit(url, name, f.optInt("itag"))
+            }
+            // 2) تنسيقات بلا url (يوتيوب يحجبها حديثاً): نمرر serverAbrStreamingUrl
+            //    (رابط videoplayback على مضيف rr* -- نفس عائلة المضيف المحجوب على
+            //    بعض الشبكات، لكن على الشبكات العادية هو رابط تشغيلي مباشر).
+            val abr = sd.optString("serverAbrStreamingUrl")
+            if (produced == 0 && abr.isNotBlank()) {
+                emit(abr, "ARY (ABR)", 0, mapOf("Referer" to "https://www.youtube.com/"))
+            }
+            return produced
+        } catch (e: Exception) {
+            Log.w(TAG, "$vid resolveFromHtml failed: ${e.message}")
+            return produced
+        }
+    }
+
     override suspend fun loadLinks(
         data: String,
         isCasting: Boolean,
@@ -615,23 +733,26 @@ class AryProvider : MainAPI() {
         }
         val watchUrl = "https://www.youtube.com/watch?v=$vid"
 
-        var links = 0
-        var firstHost = ""
-        var firstUrl = ""
         val startMs = System.currentTimeMillis()
-        loadExtractor(watchUrl, "https://www.youtube.com/",
-            subtitleCallback,
-            { link ->
-                links++
-                if (firstHost.isEmpty()) {
-                    try { firstHost = URI(link.url).host } catch (e: Exception) { firstHost = "?" }
-                    firstUrl = link.url.take(160)
-                }
-                callback(link)
-            })
+
+        // 1) المحاولة السريعة: extractor المدمج (يكفي على الشبكات العادية)
+        var links = 0
+        loadExtractor(watchUrl, "https://www.youtube.com/", subtitleCallback, { link ->
+            links++
+            callback(link)
+        })
+        val extractorMs = System.currentTimeMillis() - startMs
+
+        // 2) إذا لم تصل أي روابط: اعتمد على استخراج HTML المباشر
+        if (links == 0) {
+            val n = resolveFromHtml(vid, subtitleCallback, callback)
+            links += n
+            Log.d(TAG, "loadLinks $vid extractor=$extractorMs ms (0 links) -> html fallback produced $n links")
+        }
+
         val elapsed = System.currentTimeMillis() - startMs
-        Log.d(TAG, "loadLinks for $vid resolved in ${elapsed}ms, links=$links, host=$firstHost, first=$firstUrl")
-        if (links == 0) Log.w(TAG, "loadLinks for $vid produced ZERO links (elapsed ${elapsed}ms)")
+        Log.d(TAG, "loadLinks for $vid resolved in ${elapsed}ms, links=$links")
+        if (links == 0) Log.w(TAG, "loadLinks for $vid produced ZERO links at all")
         return true
     }
 }
