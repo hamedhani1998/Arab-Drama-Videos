@@ -89,7 +89,7 @@ class AryProvider : MainAPI() {
      * للمضيف الموقّع عليه، لذا قد يعيد البث 403/خطأ شهادة على أي نطاقٍ مبدَّل.
      * الافتراضي معطّل ليعمل لعموم الشبكات. (يدوي للبحث)
      */
-    var useYoutubeRedirect = false
+    var useYoutubeRedirect = true
 
     // =============================== HTML / GET ===============================
 
@@ -653,6 +653,25 @@ class AryProvider : MainAPI() {
      * ytInitialPlayerResponse ونمرر روابطها عبر callback. هذا بديل
      * مباشر عن extractor المدمج الذي أعطى 0 روابط على هذا الجهاز.
      */
+    /**
+     * يعيد توجيه رابط googlevideo عبر النطاق الأم redirector.googlevideo.com
+     * بدل مضيف rr*--sn-… المحجوب على بعض الشبكات. يُحافظ على كل معاملات
+     * التوقيع كما هي. بعض الشبكات تقبل redirect (فيتحول بعده للمضيف الأصلي) —
+     * يُجرب عادةً مع النسخة الأصلية.
+     */
+    private fun redirectHost(url: String): String {
+        return try {
+            val u = java.net.URI(url)
+            if (u.host?.endsWith(".googlevideo.com") == true) {
+                val query = u.rawQuery
+                val base = "https://redirector.googlevideo.com${u.rawPath}"
+                if (!query.isNullOrBlank()) "$base?$query" else base
+            } else url
+        } catch (_: Exception) {
+            url
+        }
+    }
+
     private suspend fun resolveFromHtml(
         vid: String,
         subtitleCallback: (SubtitleFile) -> Unit,
@@ -685,11 +704,29 @@ class AryProvider : MainAPI() {
                     quality,
                     headers,
                     null,
-                    ExtractorLinkType.M3U8,
+                    ExtractorLinkType.VIDEO,
                     emptyList<AudioFile>()
                 )
                 produced++
                 callback(link)
+                if (useYoutubeRedirect && url.contains(".googlevideo.com") && !url.contains("redirector.googlevideo.com")) {
+                    val redirected = redirectHost(url)
+                    if (redirected != url) {
+                        val link2 = ExtractorLink(
+                            "ARY العربية",
+                            "$name · redirect",
+                            redirected,
+                            watchUrl,
+                            quality,
+                            headers,
+                            null,
+                            ExtractorLinkType.VIDEO,
+                            emptyList<AudioFile>()
+                        )
+                        produced++
+                        callback(link2)
+                    }
+                }
             }
             val sd = pr.optJSONObject("streamingData") ?: return 0
             val arr = ArrayList<JSONObject>()
