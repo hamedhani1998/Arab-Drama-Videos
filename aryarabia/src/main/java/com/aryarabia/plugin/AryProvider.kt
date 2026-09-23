@@ -2,6 +2,7 @@ package com.aryarabia.plugin
 
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
+import android.content.SharedPreferences
 import android.util.Log
 import kotlinx.coroutines.delay
 import org.json.JSONArray
@@ -36,7 +37,21 @@ import org.schabi.newpipe.extractor.services.youtube.linkHandler.YoutubeStreamLi
  * تدعم التقديم والتأخير (Accept-Ranges: bytes) — بخلاف صفحات HTML التي
  * تسبب الخطأ 2004.
  */
-class AryProvider : MainAPI() {
+class AryProvider(
+    private val prefs: SharedPreferences? = null
+) : MainAPI() {
+
+    /** خيار محرك التشغيل المختار في الإعدادات ("newpipe" الافتراضي). */
+    private fun playbackMode(): String =
+        prefs?.getString(ArySettingsBottomSheet.KEY_PLAYBACK_MODE, "newpipe") ?: "newpipe"
+
+    /** عرض كل الجودات أم الأعلى فقط. */
+    private fun qualityMode(): String =
+        prefs?.getString(ArySettingsBottomSheet.KEY_MAX_QUALITY, "all") ?: "all"
+
+    /** هل نستخدم النطاق البديل redirector. */
+    private fun useRedirect(): Boolean =
+        prefs?.getBoolean(ArySettingsBottomSheet.KEY_REDIRECT, false) ?: false
 
     companion object {
         private const val TAG = "AryArabia"
@@ -92,7 +107,6 @@ class AryProvider : MainAPI() {
      * للمضيف الموقّع عليه، لذا قد يعيد البث 403/خطأ شهادة على أي نطاقٍ مبدَّل.
      * الافتراضي معطّل ليعمل لعموم الشبكات. (يدوي للبحث)
      */
-    var useYoutubeRedirect = false
 
     // =============================== HTML / GET ===============================
 
@@ -762,8 +776,13 @@ class AryProvider : MainAPI() {
 
             AryDashServer.ensureStarted()
 
+            // إعداد «الجودات»: الأعلى فقط عند اختيار high
+            val effectiveVideos = if (qualityMode() == "high") {
+                videoOnlyList.maxByOrNull { it.height }?.let { listOf(it) } ?: videoOnlyList
+            } else videoOnlyList
+
             if (audiosByLanguage.isNotEmpty()) {
-                for (video in videoOnlyList) {
+                for (video in effectiveVideos) {
                     for ((lang, audios) in audiosByLanguage) {
                         val bestAudioForLang = if (video.mimeType.contains("webm")) {
                             audios.sortedWith(compareByDescending<AudioInfo> { it.mimeType.contains("webm") }.thenByDescending { it.bitrate }).firstOrNull()
@@ -794,13 +813,17 @@ class AryProvider : MainAPI() {
             }
 
             // مقاطع مدمجة (muxed) كاحتياط إضافي — روابط مباشرة
-            (s.videoStreams ?: emptyList()).mapNotNull { vs ->
+            val muxedList = (s.videoStreams ?: emptyList()).mapNotNull { vs ->
                 try {
                     val mUrl = vs.content ?: return@mapNotNull null
                     if (!seenUrls.add(mUrl)) return@mapNotNull null
                     Triple(mUrl, qualityLabelOf(vs), runCatching { vs.height ?: 0 }.getOrNull() ?: 0)
                 } catch (e: Exception) { null }
-            }.forEach { (mUrl, mLabel, mHeight) ->
+            }
+            val effectiveMuxed = if (qualityMode() == "high") {
+                muxedList.maxByOrNull { it.third }?.let { listOf(it) } ?: muxedList
+            } else muxedList
+            effectiveMuxed.forEach { (mUrl, mLabel, mHeight) ->
                 callback(
                     newExtractorLink("ARY العربية", "$mLabel (Legacy)", mUrl, type = INFER_TYPE) {
                         this.referer = mainUrl
@@ -810,7 +833,7 @@ class AryProvider : MainAPI() {
                 produced++
             }
 
-            Log.d(TAG, "$vid NewPipe DASH links=$produced qualities=${videoOnlyList.size}")
+            Log.d(TAG, "$vid NewPipe DASH links=$produced qualities=${effectiveVideos.size}")
         } catch (e: Exception) {
             Log.w(TAG, "$vid NewPipe resolve failed: ${e.message}")
         }
@@ -859,7 +882,7 @@ class AryProvider : MainAPI() {
                 )
                 produced++
                 callback(link)
-                if (useYoutubeRedirect && withCpn.contains(".googlevideo.com") && !withCpn.contains("redirector.googlevideo.com")) {
+                if (useRedirect() && withCpn.contains(".googlevideo.com") && !withCpn.contains("redirector.googlevideo.com")) {
                     val redirected = redirectHost(withCpn)
                     if (redirected != withCpn) {
                         val link2 = ExtractorLink(
@@ -948,33 +971,53 @@ class AryProvider : MainAPI() {
             return false
         }
         val watchUrl = "https://www.youtube.com/watch?v=$vid"
+        val mode = playbackMode()
+
+        // سمّي المسارات على ترتيبها حسب الإعداد: أيها «أساسي» اليوم؟
+        // إذا كان المستخدم اختار extractor أو direct، نبدأ به ونواصل الباقي
+        // احتياطياً ما لم تنتج روابط.
+        val orderedPrimary = when (mode) {
+            "extractor" -> 1
+            "direct" -> 2
+            else -> 0                               // newpipe (الافتراضي)
+        }
 
         val startMs = System.currentTimeMillis()
+        var links = 0
 
-        // 1) المسار الأساسي: NewPipe + خادم DASH المحلي (سيرفرات re-3arabi).
-        //    يُنتج روابط مفكوكة التوقيع/n ويعبّرها عبر manifest محلي
-        //    بطلبات Range شرعية — يحلّ خطأ 2004 على هذه الشبكات.
-        var links = resolveFromNewPipe(vid, subtitleCallback, callback)
-        val newpipeMs = System.currentTimeMillis() - startMs
+        suspend fun runFirst() {
+            when (orderedPrimary) {
+                1 -> {
+                    loadExtractor(watchUrl, "https://www.youtube.com/", subtitleCallback) { link ->
+                        links++
+                        callback(link)
+                    }
+                }
+                2 -> {
+                    links += resolveFromHtml(vid, subtitleCallback, callback)
+                }
+                else -> {
+                    links += resolveFromNewPipe(vid, subtitleCallback, callback)
+                }
+            }
+        }
+        runFirst()
 
-        // 2) إذا لم يصدر الروابط: extractor المدمج كمسار ثانٍ
-        if (links == 0) {
-            loadExtractor(watchUrl, "https://www.youtube.com/", subtitleCallback, { link ->
+        if (links == 0 && orderedPrimary != 0) {
+            links += resolveFromNewPipe(vid, subtitleCallback, callback)
+        }
+        if (links == 0 && orderedPrimary != 1) {
+            loadExtractor(watchUrl, "https://www.youtube.com/", subtitleCallback) { link ->
                 links++
                 callback(link)
-            })
+            }
         }
-        val extractorMs = System.currentTimeMillis() - startMs
-
-        // 3) آخر مسار: استخراج HTML المباشر (serverAbrStreamingUrl)
-        if (links == 0) {
-            val n = resolveFromHtml(vid, subtitleCallback, callback)
-            links += n
-            Log.d(TAG, "loadLinks $vid newpipe=${newpipeMs}ms -> html fallback produced $n links")
+        if (links == 0 && orderedPrimary != 2) {
+            links += resolveFromHtml(vid, subtitleCallback, callback)
         }
 
         val elapsed = System.currentTimeMillis() - startMs
-        Log.d(TAG, "loadLinks for $vid resolved in ${elapsed}ms, links=$links")
+        Log.d(TAG, "loadLinks $vid mode=$mode links=$links in ${elapsed}ms")
         if (links == 0) Log.w(TAG, "loadLinks for $vid produced ZERO links at all")
         return true
     }
