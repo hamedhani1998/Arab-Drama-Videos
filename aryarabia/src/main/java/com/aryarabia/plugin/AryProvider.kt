@@ -3,6 +3,7 @@ package com.aryarabia.plugin
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
 import android.util.Log
+import java.net.URI
 import kotlinx.coroutines.delay
 import org.json.JSONArray
 import org.json.JSONObject
@@ -614,9 +615,23 @@ class AryProvider : MainAPI() {
         }
         val watchUrl = "https://www.youtube.com/watch?v=$vid"
 
+        var links = 0
+        var firstHost = ""
+        var firstUrl = ""
         val startMs = System.currentTimeMillis()
-        loadExtractor(watchUrl, "https://www.youtube.com/", subtitleCallback, callback)
-        Log.d(TAG, "loadLinks for $vid resolved in ${System.currentTimeMillis() - startMs}ms")
+        loadExtractor(watchUrl, "https://www.youtube.com/",
+            subtitleCallback,
+            { link ->
+                links++
+                if (firstHost.isEmpty()) {
+                    try { firstHost = URI(link.url).host } catch (e: Exception) { firstHost = "?" }
+                    firstUrl = link.url.take(160)
+                }
+                callback(link)
+            })
+        val elapsed = System.currentTimeMillis() - startMs
+        Log.d(TAG, "loadLinks for $vid resolved in ${elapsed}ms, links=$links, host=$firstHost, first=$firstUrl")
+        if (links == 0) Log.w(TAG, "loadLinks for $vid produced ZERO links (elapsed ${elapsed}ms)")
         return true
     }
 }
