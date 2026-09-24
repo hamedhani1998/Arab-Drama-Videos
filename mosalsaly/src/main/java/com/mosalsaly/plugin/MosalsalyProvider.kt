@@ -1,8 +1,19 @@
 package com.mosalsaly.plugin
 
 import android.util.Log
+import com.fasterxml.jackson.databind.DeserializationFeature
+import com.fasterxml.jackson.databind.ObjectMapper
+import com.fasterxml.jackson.databind.node.ArrayNode
+import com.fasterxml.jackson.databind.node.ObjectNode
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
+import java.util.Base64
+import javax.crypto.Cipher
+import javax.crypto.spec.GCMParameterSpec
+import javax.crypto.spec.SecretKeySpec
+
+private val mosMapper = ObjectMapper()
+    .configure(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES, false)
 
 private const val TAG = "Mosalsaly"
 
@@ -13,13 +24,47 @@ private const val REEL_MAIN = "https://www.reelshort.com"
 
 private const val GOOD_BASE = "https://goodshort.goodbos.online/hls"
 
+// مفتاح AES-GCM الثابت للموقع لتفكيك مصادر الحلقات من /api/episode-source
+// خوارزمية: base64decode(enc) → iv = أول 12 بايت، ciphertext = الباقي، ثم AES/GCM/NoPadding
+private const val MOS_EP_KEY_B64 = "QC6Ir2trghxRAyyyWZEOEFR4GgLhnfQ4A19I3QBlQkc="
+private val MOS_EP_KEY: ByteArray by lazy {
+    try { Base64.getDecoder().decode(MOS_EP_KEY_B64) } catch (e: Exception) { MOS_EP_KEY_B64.toByteArray() }
+}
+
+// فك تشفير حقل enc من واصف حلقة mosalsaly (AES-GCM، static key كما في JS chunk 2f0jsiav2q67u)
+private fun decryptMosEnc(enc: String): String? {
+    return try {
+        val raw = Base64.getDecoder().decode(enc)
+        if (raw.size <= 12) return null
+        val iv = raw.copyOfRange(0, 12)
+        val ct = raw.copyOfRange(12, raw.size)
+        val cipher = Cipher.getInstance("AES/GCM/NoPadding")
+        cipher.init(Cipher.DECRYPT_MODE, SecretKeySpec(MOS_EP_KEY, "AES"), GCMParameterSpec(128, iv))
+        String(cipher.doFinal(ct), Charsets.UTF_8)
+    } catch (e: Exception) {
+        Log.w(TAG, "decryptMosEnc fail ${e.message}")
+        null
+    }
+}
+
+// تنظيف رابط تم فك تشفيره من واصف (بعض الحقول تأتي بخلفية/مهربات)
+private fun cleanDecryptedUrl(u: String?): String? {
+    if (u.isNullOrBlank()) return null
+    return u.trim()
+        .replace("\\u0026", "&").replace("\\u003c", "<").replace("\\u003e", ">")
+        .replace("\\/", "/")
+        .takeIf { it.startsWith("http") || it.startsWith("https") }
+}
+
 // أسماء المنصات الثمانية عشر (كما في /sources) — تُستخدم أسماء الأقسام في الرئيسية
+// الترتيب: أولاً المنصات المدعومة تشغيلاً (GoodShort, ReelShort)، ثم الباقية (غير مدعومة للعب)
 private val PLATFORMS = listOf(
+    "goodshort" to "GoodShort",
+    "reelshort" to "Reelshort",
     "dotdrama" to "DotDrama",
     "dramabite" to "DramaBite",
     "dramabox" to "DramaBox",
     "flickreels" to "FlickReels",
-    "goodshort" to "GoodShort",
     "happyshort" to "HappyShort",
     "joyreels" to "JoyReels",
     "kalostv" to "KalosTV",
@@ -28,11 +73,31 @@ private val PLATFORMS = listOf(
     "mydramawave" to "MyDramaWave",
     "netshort" to "NetShort",
     "petadrama" to "PetaDrama",
-    "reelshort" to "Reelshort",
     "shorttv" to "ShortTV",
     "shortwave" to "ShortWave",
     "stardust" to "Stardust",
     "storyreel" to "StoryReel",
+)
+
+// أقسام إضافية من /tasnif/ (التصنيفات) تُعرض بعد المنصات في الواجهة الرئيسية
+private val EXTRA_SECTIONS = listOf(
+    "populer" to "⭐ الأكثر شعبية",
+    "newly-added" to "🆕 أحدث الإضافات",
+    "power-comeback" to "⚡ القوة والعودة",
+    "revenge" to "🔥 الانتقام",
+    "romantik" to "❤️ الرومانسية",
+    "guclu-kadin" to "💪 امرأة قوية",
+    "rich-ceo" to "💼 رجل أعمال غني",
+    "modern-ask-evlilik" to "💍 حب وزواج حديث",
+    "fantasy" to "🧙 فانتازيا",
+    "gizli-kimlik" to "🎭 هوية خفية",
+    "dusmandan-aska" to "💘 من عداوة إلى حب",
+    "yukselis-geri-donus" to "🚀 الصعود والعودة",
+    "tarihi-antik" to "🕌 تاريخي",
+    "zaman-yolculugu" to "⏳ السفر عبر الزمن",
+    "second-chance" to "🔁 فرصة ثانية",
+    "ask-ucgeni" to "🔺 مثلث الحب",
+    "aile-dramasi" to "👨‍👩‍👦 دراما عائلية",
 )
 
 class MosalsalyProvider : MainAPI() {
@@ -43,7 +108,11 @@ class MosalsalyProvider : MainAPI() {
     override val hasQuickSearch = true
     override val supportedTypes = setOf(TvType.TvSeries)
 
-    override val mainPage = mainPageOf(*PLATFORMS.map { it.first to it.second }.toTypedArray())
+    // الأقسام الرئيسية: المنصات أولاً ثم الأقسام/التصنيفات الإضافية
+    private val homeSections: List<Pair<String, String>> =
+        PLATFORMS + EXTRA_SECTIONS
+
+    override val mainPage = mainPageOf(*homeSections.toTypedArray())
 
     // جلب مع إعادة محاولة — الموقع بطيء/unstable؛ نفس نمط ReelShort
     private suspend fun getWithRetry(url: String, referer: String?, attempts: Int = 3, backoffMs: Long = 300): String {
@@ -81,9 +150,11 @@ class MosalsalyProvider : MainAPI() {
     }
 
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse? {
-        val platform = request.data
-        val url = if (page <= 1) "$mainUrl/masdar/$platform"
-        else "$mainUrl/masdar/$platform/page/$page"
+        val slug = request.data
+        // أقسام التصنيفات تأتي من /tasnif/ والمنصات من /masdar/
+        val isSection = EXTRA_SECTIONS.any { it.first == slug }
+        val base = if (isSection) "$mainUrl/tasnif/$slug" else "$mainUrl/masdar/$slug"
+        val url = if (page <= 1) base else "$base/page/$page"
         val html = try { getWithRetry(url, mainUrl, 3, 300) } catch (e: Exception) { "" }
         if (html.isEmpty()) return null
         val items = parseCards(html)
@@ -204,7 +275,8 @@ class MosalsalyProvider : MainAPI() {
         val eps = episodes.map { e ->
             index++
             // data: bookId||chapterId||serialRaw||platform||slug
-            val data0 = "$bookId||${e.chapterId}||${e.serial}||$platform||$encSlug"
+            // البادئة النصية في أول حقل تمنع CloudStream من دمج mainUrl أمام رقم
+            val data0 = "id:$bookId||${e.chapterId}||${e.serial}||$platform||$encSlug"
             newEpisode(data0) {
                 episode = index
                 name = "الحلقة $index"
@@ -221,6 +293,64 @@ class MosalsalyProvider : MainAPI() {
         .replace("\\u0026", "&")
         .replace("\\u003c", "<").replace("\\u003e", ">")
 
+    // جلب واصف الحلقة من API الموقع: /api/episode-source/{bookId}/{serial}?lang=ar&refresh=1
+    // يوفّر مصادر مباشرة لكل المنصات (الرابط بعد فك التشفير جاهز للتشغيل)
+    private suspend fun fetchEpisodeDescriptor(bookId: String, serial: Int): ObjectNode? {
+        val url = "$mainUrl/api/episode-source/$bookId/$serial?lang=ar&refresh=1"
+        return try {
+            val text = getWithRetry(url, mainUrl, 3, 400)
+            if (text.isBlank()) { Log.w(TAG, "no descriptor text serial=$serial"); return null }
+            val node = mosMapper.readTree(text)
+            node.get("descriptor") as? ObjectNode
+        } catch (e: Exception) {
+            Log.w(TAG, "descriptor except ${e.message}")
+            null
+        }
+    }
+
+    private suspend fun emitDescriptorLinks(
+        descriptor: ObjectNode,
+        platform: String,
+        serial: Int,
+        subtitleCallback: (SubtitleFile) -> Unit,
+        callback: (ExtractorLink) -> Unit,
+    ): Boolean {
+        val chain = descriptor.get("chain") as? ArrayNode ?: return false
+        var emitted = false
+        val seen = HashSet<String>()
+
+        for (item in chain) {
+            val ch = item as? ObjectNode ?: continue
+            val enc = ch.get("enc")?.asText() ?: continue
+            val url = cleanDecryptedUrl(decryptMosEnc(enc)) ?: continue
+            if (!seen.add(url)) continue
+            val type = ch.get("type")?.asText()?.lowercase()
+            val isHls = url.contains(".m3u8") || type?.contains("hls") == true
+            val isVideo = url.contains(".mp4") || type == "mp4" || type == "stardust" || (!url.contains(".m3u8") && type == "video")
+            val linkType = if (isVideo) ExtractorLinkType.VIDEO else ExtractorLinkType.M3U8
+            val label = "$platform $serial"
+            callback(newExtractorLink(name, label, url, linkType) {
+                this.headers = mapOf("User-Agent" to MOS_UA, "Referer" to mainUrl)
+                if (isVideo) this.quality = getQualityFromName("720p")
+            })
+            emitted = true
+        }
+
+        // ترجمة (اختياري) — فك نفس المفتاح وأرسله كملف ترجمة
+        val sub = descriptor.get("subtitle") as? ObjectNode
+        val subEnc = sub?.get("enc")?.asText()
+        if (!subEnc.isNullOrBlank()) {
+            val subUrl = cleanDecryptedUrl(decryptMosEnc(subEnc))
+            if (!subUrl.isNullOrBlank()) {
+                try {
+                    val lang = sub.get("language")?.asText()?.takeIf { it.isNotBlank() } ?: "ar"
+                    subtitleCallback(newSubtitleFile(lang, subUrl))
+                } catch (e: Exception) { Log.w(TAG, "sub emit fail ${e.message}") }
+            }
+        }
+        return emitted
+    }
+
     override suspend fun loadLinks(
         data: String,
         isCasting: Boolean,
@@ -229,12 +359,26 @@ class MosalsalyProvider : MainAPI() {
     ): Boolean {
         val p = data.split("||")
         if (p.size < 4) return false
-        val bookId = p[0]
+        // أول حقل يحمل بادئة نصية "id:" وربما يصل مدمجاً مع mainUrl — ننظّفه دائماً
+        var bookId = p[0].substringAfterLast("/").removePrefix("id:")
         val chapterId = p[1]
         val serial = p[2].toIntOrNull() ?: return false
         val platform = p[3].lowercase()
         Log.i(TAG, "loadLinks platform=$platform bookId=$bookId ch=$chapterId serial=$serial raw=$data")
 
+        // المسار الموحّد عبر /api/episode-source — يخدم كل المنصات الـ 18
+        // يعيد واصفاً مشفّراً يُفك بمفتاح AES-GCM الثابت إلى رابط مباشر جاهز
+        val descriptor = fetchEpisodeDescriptor(bookId, serial)
+        if (descriptor != null) {
+            val emitted = emitDescriptorLinks(descriptor, platform, serial, subtitleCallback, callback)
+            if (emitted) {
+                Log.i(TAG, "episode-source OK platform=$platform serial=$serial")
+                return true
+            }
+            Log.w(TAG, "descriptor present but no links platform=$platform serial=$serial")
+        }
+
+        // احتياط: مسار المنصة المحدّدة مباشرة إذا فشل الواصف
         return when (platform) {
             "goodshort" -> {
                 // مصدر GoodShort: m3u8 VOD مباشر — جودة واحدة ثابتة 720p (الموقع يتجاهل &q=)
@@ -290,7 +434,7 @@ class MosalsalyProvider : MainAPI() {
                 true
             }
             else -> {
-                Log.w(TAG, "platform $platform not supported (no player)")
+                Log.w(TAG, "platform $platform descriptor failed (no links)")
                 false
             }
         }
