@@ -293,20 +293,15 @@ class MosalsalyProvider : MainAPI() {
         }
     }
 
-    // فحص حي لأي رابط قبلي تسليمه إلى اللاعب؛ يعيد نوع المحتوى الصحيح
-    // من استجابة الخادم (لا من الامتداد) ليتجنّب 3003 (فشل تغليف) و20002/الدوران:
-    //   M3U8  — يبدأ النص بـ #EXTM3U → أرسله كـ HLS
-    //   VIDEO — الملف يدعم نطاق (206) mp4 → أرسله كـ mp4
-    //   null  — الرابط ميت (HTTP 4xx/5xx أو شبكة) → استبعده نهائيًا
+    // فحص حي للمسارات من نوع HLS الوحيدة: يحمّل نص القائمة الصغير فقط ويتأكد أنه #EXTM3U.
+    //    — إن لم يكن HLS حقيقيًا (HTML خطأ / 403 / 404) يُستبعد الرابط نهائيًا.
+    //    — في v10 كنّا نحمّل جسم mp4 كامل هنا، فتعلّق الرابط وانقطع → "لا توجد روابط".
+    //      الآن mp4/mpd لا تمر أصلًا من هنا (تُثَق مباشرة في emitDescriptorLinks).
     private suspend fun probeMedia(url: String): ExtractorLinkType? {
         return try {
             val resp = app.get(url, headers = mapOf("User-Agent" to MOS_UA, "Referer" to mainUrl), referer = mainUrl)
             val body = resp.text
             if (body.isNotBlank() && body.trimStart().startsWith("#EXTM3U")) ExtractorLinkType.M3U8
-            else if (body.isNotEmpty() && !body.trimStart().startsWith("<!doctype") &&
-                !body.startsWith("<!DOCTYPE") && !body.contains("Not Found") &&
-                !body.contains("Forbidden") && !body.contains("Access Denied"))
-                ExtractorLinkType.VIDEO
             else null
         } catch (e: Exception) {
             Log.w(TAG, "probeMedia skip $url — ${e.message}")
@@ -345,12 +340,21 @@ class MosalsalyProvider : MainAPI() {
                 }
             }
 
+            // نوع مباشر (mp4) → ثِق به فورًا دون تحميل الجسم (إصلاح "لا توجد روابط"
+            // في v10 على dotdrama/dramabox/moreshort التي تخزّن mp4 بلا امتداد).
+            // القائمة من الملاحظة: netshort/dramabox/dotdrama/moboreels = mp4.
+            val idU = baseUrl.takeIf { it != null }?.lowercase().orEmpty()
+            val isDirect = type == "mp4" || type == "mpd" || type == "dash" ||
+                idU.contains(".mp4") || idU.contains(".m4v") || idU.contains("videoplayback")
+            val kindHint: ExtractorLinkType? = if (isDirect) ExtractorLinkType.VIDEO else null
+
             for ((url, q) in candidates) {
                 if (!seen.add(url)) continue
-                // فحص حي دقيق لكل رابط — يحدّد النوع من استجابة الخادم ويستبعد الميت نهائيًا.
-                // هذا يعالج 3003 (خبر mp4 مُرسل كـ M3U8) و 20002 (mp4 يُرسل بنوع خاطئ)
-                // و 2004 (m3u8 ميتة 403/404 لم تعد تُرسل للاعب).
-                val kind = probeMedia(url) ?: continue
+                val kind = kindHint ?: probeMedia(url)
+                if (kind == null) {
+                    Log.w(TAG, "skip dead $platform url=${url.take(80)}")
+                    continue
+                }
                 alive.add(CLink(url, q, kind))
             }
         }
