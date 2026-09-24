@@ -292,6 +292,22 @@ class MosalsalyProvider : MainAPI() {
         }
     }
 
+    // فحص حي لقائمة m3u8 قبل إرسالها — يتجاهل الروابط الميتة (happyshort 403 المنتهي،
+    // kalostv proxy 404) ويقبل فقط ما يعيد قائمة بث فعلية. نفحص النص لا الكود (تجنّب فخّ response.code).
+    private suspend fun probeHls(url: String): Boolean {
+        return try {
+            // بدون Range — قوائم m3u8 صغيرة، والتحقق من المصداقية يكون بمحتواها
+            val resp = app.get(url, headers = mapOf("User-Agent" to MOS_UA, "Referer" to mainUrl), referer = mainUrl)
+            val body = resp.text
+            body.isNotBlank() && body.trimStart().startsWith("#EXTM3U")
+        } catch (e: Exception) {
+            Log.w(TAG, "probeHls skip $url — ${e.message}")
+            false
+        }
+    }
+private fun isM3u8Url(url: String): Boolean =
+        url.contains(".m3u8") || url.endsWith(".m3u8") || url.contains("m3u8")
+
     private suspend fun emitDescriptorLinks(
         descriptor: ObjectNode,
         platform: String,
@@ -305,19 +321,38 @@ class MosalsalyProvider : MainAPI() {
 
         for (item in chain) {
             val ch = item as? ObjectNode ?: continue
-            val enc = ch.get("enc")?.asText() ?: continue
-            val url = cleanDecryptedUrl(decryptMosEnc(enc)) ?: continue
-            if (!seen.add(url)) continue
             val type = ch.get("type")?.asText()?.lowercase()
-            val isHls = url.contains(".m3u8") || type?.contains("hls") == true
-            val isVideo = url.contains(".mp4") || type == "mp4" || type == "stardust" || (!url.contains(".m3u8") && type == "video")
-            val linkType = if (isVideo) ExtractorLinkType.VIDEO else ExtractorLinkType.M3U8
-            val label = "$platform $serial"
-            callback(newExtractorLink(name, label, url, linkType) {
-                this.headers = mapOf("User-Agent" to MOS_UA, "Referer" to mainUrl)
-                if (isVideo) this.quality = getQualityFromName("720p")
-            })
-            emitted = true
+            val baseEnc = ch.get("enc")?.asText()
+            val baseUrl = if (baseEnc != null) cleanDecryptedUrl(decryptMosEnc(baseEnc)) else null
+
+            // اجمع المرشحين: الأساس + كل الجودات المتاحة (encByQuality)
+            val candidates = LinkedHashMap<String, String>()  // url -> quality label ("" للأساس)
+            if (baseUrl != null) candidates[baseUrl] = ""
+            val eq = ch.get("encByQuality") as? ObjectNode
+            if (eq != null) {
+                for ((q, v) in eq.fields()) {
+                    val u = cleanDecryptedUrl(decryptMosEnc(v.asText()))
+                    if (u != null) candidates[u] = q
+                }
+            }
+
+            for ((url, q) in candidates) {
+                if (!seen.add(url)) continue
+                val isHls = isM3u8Url(url) || type?.contains("hls") == true
+                // فحص حي فقط لقوائم m3u8 (مصدرها قد يكون ميتاً/منتهي التوقيع) —
+                // فيديوهات mp4 المباشرة تُرسل كما هي (الرابط موثوق من واصف الموقع)
+                if (isHls && !probeHls(url)) continue
+                val linkType = if (isHls) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
+                val label = buildString {
+                    append("$platform $serial")
+                    if (q.isNotBlank() && q != url) append(" · $q")
+                }
+                callback(newExtractorLink(name, label, url, linkType) {
+                    this.headers = mapOf("User-Agent" to MOS_UA, "Referer" to mainUrl)
+                    if (q.isNotBlank()) this.quality = getQualityFromName(q)
+                })
+                emitted = true
+            }
         }
 
         // ترجمة (اختياري) — فك نفس المفتاح وأرسله كملف ترجمة

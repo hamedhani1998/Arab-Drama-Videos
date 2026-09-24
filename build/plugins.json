@@ -308,9 +308,9 @@
   {
     "name": "Mosalsaly",
     "internalName": "mosalsaly",
-    "version": 7,
-    "fileSize": 27502,
-    "fileHash": "sha256-1f5651e30d946ba9b175e2083152283317eb9acb9c26af0355df74aec8757236",
+    "version": 8,
+    "fileSize": 29682,
+    "fileHash": "sha256-1b0f7b7c24e341e16797c772fa4a4cd17aa1aecbec9028f5ac497e18913a9bfd",
     "url": "https://raw.githubusercontent.com/hamedhani1998/Arab-Drama-Videos/builds/mosalsaly.cs3",
     "repositoryUrl": "https://github.com/hamedhani1998/Arab-Drama-Videos",
     "apiVersion": 1,
@@ -323,6 +323,6 @@
       "TvSeries"
     ],
     "iconUrl": "https://mosalsaly.com/favicon.ico",
-    "description": "مسلسلي Mosalsaly - مسلسلات قصيرة من 18 منصة (الأكثر شعبية وأحدث الإضافات أولاً، تشغيل مباشر من المنصات عبر واصف الموقع)"
+    "description": "مسلسلي Mosalsaly - مسلسلات قصيرة من 18 منصة (الأكثر شعبية وأحدث الإضافات أولاً، فحص حي للروابط مع الجودات والترجمات، تشغيل مباشر من المنصات)"
   }
 ]
