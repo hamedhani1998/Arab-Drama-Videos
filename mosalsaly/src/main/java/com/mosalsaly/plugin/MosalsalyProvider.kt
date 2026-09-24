@@ -305,14 +305,22 @@ class MosalsalyProvider : MainAPI() {
         }
     }
 
-    // تصنيف حي للرابط بالاعتماد على الاستجابة الفعلية لا على حقل type وحده.
-    //    — HLS: ردا ببداية نصية #EXTM3U → M3U8 (القائمة صغيرة أصلًا؛ لا خطر تنزيل كبير).
-    //    — MP4-معروف من الوصف (type=mp4): نثق مباشرة → VIDEO دون أي تحميل للجسم
-    //      (نفي الخطأ الشهير v10: تنزيل جسم mp4 بالكامل في probe → تعلّق → "لا توجد روابط").
-    //    — نوع من الوصف غير mp4 وغير HLS حيًا → null (استبعاد الرابط).
-    //    — هذا يعالج moboreels: type=mp4 كاذب لكن الرابط m3u8 حي → نرى #EXTM3U فعلًا
-    //      فيُصنَّف M3U8 (كان يُرسَل كـ VIDEO فسبّب 3003).
+    // تصنيف الرابط بسرعةٍ وموثوقية دون تحميل جسم mp4.
+    //    1) mp4/direct (معلن أو بامتداد) → ثقة فورية بـ VIDEO بدون أي تحميل (سلوك v2/v12 الموثوق؛
+    //       بعض CDN تتجاهل Range فترسل جسم mp4 كامل، فإرسال طلب body كان يبطئ/يُعلق → "لا توجد روابط").
+    //       استثناء: إذا كشف الـ URL علامة HLS (.m3u8/.m3u) رغم declaration mp4 (حالة moboreels) —
+    //       نفحص فعليًا النص الصغير #EXTM3U → M3U8.
+    //    2) كل الأنواع الأخرى (hls/hls-enc/storyreel/...) → حمل أول جزء فقط (Range صغير)؛ إن كان #EXTM3U
+    //       فعمر × M3U8، وإلا استبعاد (404/403/HTML ميت).
     private suspend fun probeMedia(url: String, declaredType: String?): ExtractorLinkType? {
+        val idU = url.lowercase()
+        val isDirect = declaredType == "mp4" || declaredType == "mpd" || declaredType == "dash" ||
+            idU.contains(".mp4") || idU.contains(".m4v") || idU.contains("videoplayback")
+
+        if (isDirect && !idU.contains(".m3u8") && !idU.contains(".m3u")) {
+            return ExtractorLinkType.VIDEO
+        }
+
         return try {
             val resp = app.get(
                 url,
@@ -324,19 +332,10 @@ class MosalsalyProvider : MainAPI() {
                 referer = mainUrl,
             )
             val text = resp.text
-            // HLS: نص يبدأ بـ #EXTM3U (بتجاهل أي مسافات/سطر جديد أولية)
             if (text.isNotBlank() && text.trimStart().startsWith("#EXTM3U")) {
-                return ExtractorLinkType.M3U8
-            }
-            // رابط mono-mp4 معروف (type=mp4 أو امتداد .mp4/.mpd/.m4v/videoplayback)
-            // → نثق به دون تحميل (تجنّب تنزيل جسم كامل — خطأ v10). هذا يعيد أحوال mp4.
-            val idU = url.lowercase()
-            if (declaredType == "mp4" || declaredType == "mpd" || declaredType == "dash" ||
-                idU.contains(".mp4") || idU.contains(".m4v") || idU.contains("videoplayback")
-            ) {
-                ExtractorLinkType.VIDEO
+                ExtractorLinkType.M3U8
             } else {
-                Log.w(TAG, "probeMedia non-media content $url text=${text.take(30)} decl=$declaredType")
+                Log.w(TAG, "probeMedia non-media $url text=${text.take(30)}")
                 null
             }
         } catch (e: Exception) {
