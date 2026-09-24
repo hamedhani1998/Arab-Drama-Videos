@@ -210,7 +210,7 @@ class MosalsalyProvider : MainAPI() {
         val objRe = Regex("""\{[^{}]*chapter_id[^{}]*\}""")
         for (m in objRe.findAll(block)) {
             val obj = m.value
-            val chId = Regex("""(?:\\")?chapter_id(?:\\")?:\s*(?:\\")?([0-9a-zA-Z]+)(?:\\")?""")
+            val chId = Regex("""(?:\\")?chapter_id(?:\\")?:\s*(?:\\")?([^"\\<>/\s]{1,})(?:\\")?""")
                 .find(obj)?.groupValues?.get(1) ?: continue
             val ser = Regex("""(?:\\")?serial_number(?:\\")?:\s*(\d+)""")
                 .find(obj)?.groupValues?.get(1)?.toIntOrNull() ?: continue
@@ -246,8 +246,9 @@ class MosalsalyProvider : MainAPI() {
         val cover = jsonLd?.get("image")
         val plot = jsonLd?.get("description")
         val episodes = parseEpisodes(html)
-        // bookId قد يكون مهرّباً أو عادياً
-        val bookId = Regex("""(?:\\")?bookId(?:\\")?:\s*(?:\\")?([0-9a-zA-Z]+)(?:\\")?""")
+        // bookId قد يكون مهرّباً أو عادياً، وقد يحمل معرّفات لأصيلة (مثل stardust = اسم العمل العربي
+        // `حب-بدأ-بكذبة` يحتوي شرطات وأحرف عربية) — نقبل أي مجموعة ما عدا علامات الإغلاق/الهروب.
+        val bookId = Regex("""(?:\\")?bookId(?:\\")?:\s*(?:\\")?([^"\\<>/\s]{3,})(?:\\")?""")
             .find(html)?.groupValues?.get(1) ?: return null
         if (episodes.isEmpty()) return null
         val platform = extractPlatform(html)?.lowercase() ?: return null
@@ -292,21 +293,26 @@ class MosalsalyProvider : MainAPI() {
         }
     }
 
-    // فحص حي لقائمة m3u8 قبل إرسالها — يتجاهل الروابط الميتة (happyshort 403 المنتهي،
-    // kalostv proxy 404) ويقبل فقط ما يعيد قائمة بث فعلية. نفحص النص لا الكود (تجنّب فخّ response.code).
-    private suspend fun probeHls(url: String): Boolean {
+    // فحص حي لأي رابط قبلي تسليمه إلى اللاعب؛ يعيد نوع المحتوى الصحيح
+    // من استجابة الخادم (لا من الامتداد) ليتجنّب 3003 (فشل تغليف) و20002/الدوران:
+    //   M3U8  — يبدأ النص بـ #EXTM3U → أرسله كـ HLS
+    //   VIDEO — الملف يدعم نطاق (206) mp4 → أرسله كـ mp4
+    //   null  — الرابط ميت (HTTP 4xx/5xx أو شبكة) → استبعده نهائيًا
+    private suspend fun probeMedia(url: String): ExtractorLinkType? {
         return try {
-            // بدون Range — قوائم m3u8 صغيرة، والتحقق من المصداقية يكون بمحتواها
             val resp = app.get(url, headers = mapOf("User-Agent" to MOS_UA, "Referer" to mainUrl), referer = mainUrl)
             val body = resp.text
-            body.isNotBlank() && body.trimStart().startsWith("#EXTM3U")
+            if (body.isNotBlank() && body.trimStart().startsWith("#EXTM3U")) ExtractorLinkType.M3U8
+            else if (body.isNotEmpty() && !body.trimStart().startsWith("<!doctype") &&
+                !body.startsWith("<!DOCTYPE") && !body.contains("Not Found") &&
+                !body.contains("Forbidden") && !body.contains("Access Denied"))
+                ExtractorLinkType.VIDEO
+            else null
         } catch (e: Exception) {
-            Log.w(TAG, "probeHls skip $url — ${e.message}")
-            false
+            Log.w(TAG, "probeMedia skip $url — ${e.message}")
+            null
         }
     }
-private fun isM3u8Url(url: String): Boolean =
-        url.contains(".m3u8") || url.endsWith(".m3u8") || url.contains("m3u8")
 
     private suspend fun emitDescriptorLinks(
         descriptor: ObjectNode,
@@ -318,9 +324,8 @@ private fun isM3u8Url(url: String): Boolean =
         val chain = descriptor.get("chain") as? ArrayNode ?: return false
         var emitted = false
         val seen = HashSet<String>()
-        // الروابط المؤكدة حيًا تُرسل أولًا (يربط اللاعب أول ما يحصل عليه) —
-        // الروابط الميتة (m3u8 403/404) تُستبعد نهائيًا فلا يقع اختيار اللاعب عليها أبدًا.
-        data class CLink(val url: String, val q: String, val isHls: Boolean)
+        // رابط حي يمرّ فحص المحتوى؛ llega فقط الحيّ وهو مُصنّف بنوعه الصحيح (M3U8/VIDEO)
+        data class CLink(val url: String, val q: String, val kind: ExtractorLinkType)
 
         val alive = ArrayList<CLink>()
         for (item in chain) {
@@ -342,23 +347,22 @@ private fun isM3u8Url(url: String): Boolean =
 
             for ((url, q) in candidates) {
                 if (!seen.add(url)) continue
-                val isHls = isM3u8Url(url) || type?.contains("hls") == true
-                // فحص حي فقط لقوائم m3u8 (مصدرها قد يكون ميتاً/منتهي التوقيع) —
-                // فيديوهات mp4 المباشرة تُرسل كما هي (الرابط موثوق من واصف الموقع)
-                if (isHls && !probeHls(url)) continue
-                alive.add(CLink(url, q, isHls))
+                // فحص حي دقيق لكل رابط — يحدّد النوع من استجابة الخادم ويستبعد الميت نهائيًا.
+                // هذا يعالج 3003 (خبر mp4 مُرسل كـ M3U8) و 20002 (mp4 يُرسل بنوع خاطئ)
+                // و 2004 (m3u8 ميتة 403/404 لم تعد تُرسل للاعب).
+                val kind = probeMedia(url) ?: continue
+                alive.add(CLink(url, q, kind))
             }
         }
 
-        // الروابط الحية أولًا — هذا ما يلتقطه اللاعب فورًا (يعالج اختيار الرابط الميت الذي شوهد).
-        alive.sortBy { !it.isHls }  // mp4 أولًا (أسرع)، ثم m3u8
+        // الروابط السطحية (mp4) أولًا (أسرع استجابة)، ثم m3u8
+        alive.sortBy { it.kind != ExtractorLinkType.VIDEO }
         for (lnk in alive) {
-            val linkType = if (lnk.isHls) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
             val label = buildString {
                 append("$platform $serial")
                 if (lnk.q.isNotBlank() && lnk.q != lnk.url) append(" · ${lnk.q}")
             }
-            callback(newExtractorLink(name, label, lnk.url, linkType) {
+            callback(newExtractorLink(name, label, lnk.url, lnk.kind) {
                 this.headers = mapOf("User-Agent" to MOS_UA, "Referer" to mainUrl)
                 if (lnk.q.isNotBlank()) this.quality = getQualityFromName(lnk.q)
             })
@@ -373,7 +377,10 @@ private fun isM3u8Url(url: String): Boolean =
             if (!subUrl.isNullOrBlank()) {
                 try {
                     val lang = sub.get("language")?.asText()?.takeIf { it.isNotBlank() } ?: "ar"
-                    subtitleCallback(newSubtitleFile(lang, subUrl))
+                    // headers مهمة — بعض الخوادم ترفض طلبات الترجمة بلا وكيل/مرجع
+                    subtitleCallback(newSubtitleFile(lang, subUrl) {
+                        this.headers = mapOf("User-Agent" to MOS_UA, "Referer" to mainUrl)
+                    })
                 } catch (e: Exception) { Log.w(TAG, "sub emit fail ${e.message}") }
             }
         }
