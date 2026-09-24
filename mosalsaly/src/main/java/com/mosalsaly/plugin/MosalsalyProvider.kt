@@ -409,7 +409,13 @@ class MosalsalyProvider : MainAPI() {
             val subUrl = cleanDecryptedUrl(decryptMosEnc(subEnc))
             if (!subUrl.isNullOrBlank()) {
                 try {
-                    val lang = sub.get("language")?.asText()?.takeIf { it.isNotBlank() } ?: "ar"
+                    val rawLang = sub.get("language")?.asText()?.takeIf { it.isNotBlank() } ?: "ar"
+                    // تطبيع كود اللغة: ar_AE/ar-SA/ar_EG → ar (معيار ISO 639-1)
+                    val lang = when {
+                        rawLang.startsWith("ar", true) -> "ar"
+                        rawLang.startsWith("en", true) -> "en"
+                        else -> rawLang
+                    }
                     // CloudStream يحدد MIME الترجمة من نهاية الرابط (SubtitleHelper.toSubtitleMimeType()).
                     // روابط netshort تنتهي بـ ?auth_key=... → تُقرأ كـ SRT (application/x-subrip)
                     // رغم أن الخادم يرسل WebVTT (text/vtt) → ExoPlayer يحاول فك WebVTT كـ SRT
