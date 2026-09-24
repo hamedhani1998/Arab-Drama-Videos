@@ -491,12 +491,23 @@ class MosalsalyProvider(
                     // العلاج: نُنهي الرابط بـ .vtt (أو .srt حسب format) — بارامتر إضافي بلا قيمة
                     // يتجاهله خادم الأقراص (الكثير من المزوّدين يفعلون هذا) ويجعل اللاعب يتعرف على النوع.
                     val fmt = sub.get("format")?.asText()?.lowercase().orEmpty()
-                    val subUrlFixed = when {
+                    var subUrlFixed = when {
                         subUrlActive.endsWith(".vtt", true) || subUrlActive.endsWith(".srt", true) -> subUrlActive
                         fmt.contains("srt") ->
                             if (subUrlActive.contains("?")) "$subUrlActive&.srt" else "$subUrlActive.srt"
                         else ->
                             if (subUrlActive.contains("?")) "$subUrlActive&.vtt" else "$subUrlActive.vtt"
+                    }
+                    // NetsShort: جلب اللاعب للترجمة الخارجية يفشل 403 على الجهاز لنفس الرابط
+                    // (في حين فيديو المضيف نفسه يعمل). نمرّر الترجمة عبر خادم محلي يجلب الجسم
+                    // بنفسه (HttpURLConnection HTTP/1.1) ويسلّمه للمشغّل من 127.0.0.1 بلا CDN
+                    // في المسار — فيستحيل الـ 403 المتقطع. باقي المنصات تبقى مباشرة دون تغيير.
+                    val isNet = subUrlActive.contains("netshort.com")
+                    val proxyUrl = if (isNet) MosSubServer.register(subUrlActive, mapOf(
+                        "User-Agent" to MOS_UA, "Referer" to mainUrl)) else null
+                    if (proxyUrl != null) {
+                        subUrlFixed = proxyUrl
+                        Log.i(TAG, "netshort sub routed via local $proxyUrl")
                     }
                     subtitleCallback(newSubtitleFile(lang, subUrlFixed) {
                         this.headers = mapOf("User-Agent" to MOS_UA, "Referer" to mainUrl)
