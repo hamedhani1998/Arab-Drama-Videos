@@ -318,7 +318,11 @@ private fun isM3u8Url(url: String): Boolean =
         val chain = descriptor.get("chain") as? ArrayNode ?: return false
         var emitted = false
         val seen = HashSet<String>()
+        // الروابط المؤكدة حيًا تُرسل أولًا (يربط اللاعب أول ما يحصل عليه) —
+        // الروابط الميتة (m3u8 403/404) تُستبعد نهائيًا فلا يقع اختيار اللاعب عليها أبدًا.
+        data class CLink(val url: String, val q: String, val isHls: Boolean)
 
+        val alive = ArrayList<CLink>()
         for (item in chain) {
             val ch = item as? ObjectNode ?: continue
             val type = ch.get("type")?.asText()?.lowercase()
@@ -342,17 +346,23 @@ private fun isM3u8Url(url: String): Boolean =
                 // فحص حي فقط لقوائم m3u8 (مصدرها قد يكون ميتاً/منتهي التوقيع) —
                 // فيديوهات mp4 المباشرة تُرسل كما هي (الرابط موثوق من واصف الموقع)
                 if (isHls && !probeHls(url)) continue
-                val linkType = if (isHls) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
-                val label = buildString {
-                    append("$platform $serial")
-                    if (q.isNotBlank() && q != url) append(" · $q")
-                }
-                callback(newExtractorLink(name, label, url, linkType) {
-                    this.headers = mapOf("User-Agent" to MOS_UA, "Referer" to mainUrl)
-                    if (q.isNotBlank()) this.quality = getQualityFromName(q)
-                })
-                emitted = true
+                alive.add(CLink(url, q, isHls))
             }
+        }
+
+        // الروابط الحية أولًا — هذا ما يلتقطه اللاعب فورًا (يعالج اختيار الرابط الميت الذي شوهد).
+        alive.sortBy { !it.isHls }  // mp4 أولًا (أسرع)، ثم m3u8
+        for (lnk in alive) {
+            val linkType = if (lnk.isHls) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
+            val label = buildString {
+                append("$platform $serial")
+                if (lnk.q.isNotBlank() && lnk.q != lnk.url) append(" · ${lnk.q}")
+            }
+            callback(newExtractorLink(name, label, lnk.url, linkType) {
+                this.headers = mapOf("User-Agent" to MOS_UA, "Referer" to mainUrl)
+                if (lnk.q.isNotBlank()) this.quality = getQualityFromName(lnk.q)
+            })
+            emitted = true
         }
 
         // ترجمة (اختياري) — فك نفس المفتاح وأرسله كملف ترجمة
