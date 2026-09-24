@@ -111,8 +111,11 @@ class MosalsalyProvider : MainAPI() {
         return last
     }
 
+    // البطاقات: <article class="group "><a ... aria-label="Title" href="/mosalsal/slug"><img ... src="POSTER">...
+    // الصورة قد تأتي عبر src= (معظم المنصات) أو srcSet= حصراً (كانت بطاقات dramabox تستخدم srcSet
+    // في بعض اللقطات) — نلتقط src إن وجد، وإلا أول URL من srcSet.
     private val cardRe = Regex(
-        """<article class="group "[^>]*>[\s\S]*?<a\s+[^>]*?(?:href="(/mosalsal/([^"/]*))"[^>]*?aria-label="([^"]*)"|aria-label="([^"]*)"[^>]*?href="(/mosalsal/([^"/]*))")[\s\S]*?<\s*img\b[^>]*?src="(https://[^"]+)""""
+        """<article class="group "[^>]*>[\s\S]*?<a\s+[^>]*?(?:href="(/mosalsal/([^"/]*))"[^>]*?aria-label="([^"]*)"|aria-label="([^"]*)"[^>]*?href="(/mosalsal/([^"/]*))")[\s\S]*?<\s*img\b[^>]*?(?:src="(https://[^"]+)"|srcSet="(https://[^ ]+))""""
     )
 
     private fun parseCards(html: String): List<SearchResponse> {
@@ -123,7 +126,10 @@ class MosalsalyProvider : MainAPI() {
             val title = if (m.groupValues[3].isNotBlank()) m.groupValues[3] else m.groupValues[4]
             val slug = if (m.groupValues[2].isNotBlank()) m.groupValues[2] else m.groupValues[6]
             if (title.isBlank() || slug.isBlank()) continue
-            val poster = m.groupValues[7]
+            // الأغلفة: src= مباشر أو srcset (أول URL) — قد يحمل @w= Suffixes الكثيرة؛ نُبقيها كلها
+            // لأن CloudStream يعرضها مباشرةً في البطاقات (سريعة).
+            val poster = if (m.groupValues[7].isNotBlank()) m.groupValues[7] else m.groupValues[8]
+            if (poster.isBlank()) continue
             val url = "$mainUrl/mosalsal/$slug"
             if (!seen.add(url)) continue
             out.add(newTvSeriesSearchResponse(title, url, TvType.TvSeries) {
@@ -293,16 +299,40 @@ class MosalsalyProvider : MainAPI() {
         }
     }
 
-    // فحص حي للمسارات من نوع HLS الوحيدة: يحمّل نص القائمة الصغير فقط ويتأكد أنه #EXTM3U.
-    //    — إن لم يكن HLS حقيقيًا (HTML خطأ / 403 / 404) يُستبعد الرابط نهائيًا.
-    //    — في v10 كنّا نحمّل جسم mp4 كامل هنا، فتعلّق الرابط وانقطع → "لا توجد روابط".
-    //      الآن mp4/mpd لا تمر أصلًا من هنا (تُثَق مباشرة في emitDescriptorLinks).
-    private suspend fun probeMedia(url: String): ExtractorLinkType? {
+    // تصنيف حي للرابط بالاعتماد على الاستجابة الفعلية لا على حقل type وحده.
+    //    — HLS: ردا ببداية نصية #EXTM3U → M3U8 (القائمة صغيرة أصلًا؛ لا خطر تنزيل كبير).
+    //    — MP4-معروف من الوصف (type=mp4): نثق مباشرة → VIDEO دون أي تحميل للجسم
+    //      (نفي الخطأ الشهير v10: تنزيل جسم mp4 بالكامل في probe → تعلّق → "لا توجد روابط").
+    //    — نوع من الوصف غير mp4 وغير HLS حيًا → null (استبعاد الرابط).
+    //    — هذا يعالج moboreels: type=mp4 كاذب لكن الرابط m3u8 حي → نرى #EXTM3U فعلًا
+    //      فيُصنَّف M3U8 (كان يُرسَل كـ VIDEO فسبّب 3003).
+    private suspend fun probeMedia(url: String, declaredType: String?): ExtractorLinkType? {
         return try {
-            val resp = app.get(url, headers = mapOf("User-Agent" to MOS_UA, "Referer" to mainUrl), referer = mainUrl)
-            val body = resp.text
-            if (body.isNotBlank() && body.trimStart().startsWith("#EXTM3U")) ExtractorLinkType.M3U8
-            else null
+            val resp = app.get(
+                url,
+                headers = mapOf(
+                    "User-Agent" to MOS_UA,
+                    "Referer" to mainUrl,
+                    "Range" to "bytes=0-65535",
+                ),
+                referer = mainUrl,
+            )
+            val text = resp.text
+            // HLS: نص يبدأ بـ #EXTM3U (بتجاهل أي مسافات/سطر جديد أولية)
+            if (text.isNotBlank() && text.trimStart().startsWith("#EXTM3U")) {
+                return ExtractorLinkType.M3U8
+            }
+            // رابط mono-mp4 معروف (type=mp4 أو امتداد .mp4/.mpd/.m4v/videoplayback)
+            // → نثق به دون تحميل (تجنّب تنزيل جسم كامل — خطأ v10). هذا يعيد أحوال mp4.
+            val idU = url.lowercase()
+            if (declaredType == "mp4" || declaredType == "mpd" || declaredType == "dash" ||
+                idU.contains(".mp4") || idU.contains(".m4v") || idU.contains("videoplayback")
+            ) {
+                ExtractorLinkType.VIDEO
+            } else {
+                Log.w(TAG, "probeMedia non-media content $url text=${text.take(30)} decl=$declaredType")
+                null
+            }
         } catch (e: Exception) {
             Log.w(TAG, "probeMedia skip $url — ${e.message}")
             null
@@ -340,19 +370,13 @@ class MosalsalyProvider : MainAPI() {
                 }
             }
 
-            // نوع مباشر (mp4) → ثِق به فورًا دون تحميل الجسم (إصلاح "لا توجد روابط"
-            // في v10 على dotdrama/dramabox/moreshort التي تخزّن mp4 بلا امتداد).
-            // القائمة من الملاحظة: netshort/dramabox/dotdrama/moboreels = mp4.
-            val idU = baseUrl.takeIf { it != null }?.lowercase().orEmpty()
-            val isDirect = type == "mp4" || type == "mpd" || type == "dash" ||
-                idU.contains(".mp4") || idU.contains(".m4v") || idU.contains("videoplayback")
-            val kindHint: ExtractorLinkType? = if (isDirect) ExtractorLinkType.VIDEO else null
-
+            // نصنّف المحتوى (وليس الثقة بحقل type): #EXTM3U ⇒ M3U8؛ mp4 المعلن/الممتد ⇒ VIDEO.
+            // يبعد الروابط الميتة (404/403/HTML) ويصحّح التصنيف الكاذب (moboreels m3u8 كـ mp4 → 3003).
             for ((url, q) in candidates) {
                 if (!seen.add(url)) continue
-                val kind = kindHint ?: probeMedia(url)
+                val kind = probeMedia(url, type)
                 if (kind == null) {
-                    Log.w(TAG, "skip dead $platform url=${url.take(80)}")
+                    Log.w(TAG, "skip dead/mismatched $platform url=${url.take(80)}")
                     continue
                 }
                 alive.add(CLink(url, q, kind))
