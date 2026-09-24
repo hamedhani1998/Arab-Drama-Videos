@@ -1,4 +1,4 @@
-version = 1
+version = 2
 
 cloudstream {
     description = "مسلسلي Mosalsaly - مسلسلات قصيرة من 18 منصة (مجمع)"

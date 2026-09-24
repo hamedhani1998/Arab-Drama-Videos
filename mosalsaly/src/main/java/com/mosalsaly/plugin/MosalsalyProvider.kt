@@ -88,41 +88,59 @@ class MosalsalyProvider : MainAPI() {
     }
 
     override suspend fun search(query: String): List<SearchResponse>? {
-        if (query.trim().isBlank()) return emptyList()
-        val q = java.net.URLEncoder.encode(query.trim(), "UTF-8")
+        if (query.trim().length < 3) return emptyList()
+        val q = java.net.URLEncoder.encode(query.trim(), "UTF-8").replace("+", "%20")
         val html = try {
             getWithRetry("$mainUrl/search?q=$q", mainUrl, 3, 300)
         } catch (e: Exception) { return emptyList() }
         return parseCards(html)
     }
 
-    // استخراج حقل من JSON-LD @graph -> TVSeries
-    private fun jsonLdField(html: String, key: String): String? {
-        // نقتطف كائن TVSeries كاملاً ثم حقله المطلوب
-        val m = Regex(""""(@type)":\s*"TVSeries"[\s\S]{0,2500}?""").find(html)
-        val seg = m?.value ?: return null
-        val v = Regex(""""$key":\s*"((?:[^"\\]|\\.)*)""").find(seg)?.groupValues?.get(1)
-        return v?.let {
-            it.replace("\\\"", "\"").replace("\\\\", "\\")
-        } ?: run {
-            // image / numberOfEpisodes قد تكون أرقاماً أو بلا quotes
-            val vn = Regex(""""$key":\s*([0-9]+)""").find(seg)?.groupValues?.get(1)
-            vn
+    // قراءة كائن TVSeries من JSON-LD (<script type="application/ld+json">) — يعمل للنص غير المهرب
+    private fun jsonLdSeries(html: String): Map<String, String?>? {
+        val m = Regex(""""@type":\s*"TVSeries"""").find(html) ?: return null
+        // نرجع إلى { المفتوح قبل المؤشر ثم نتتبع الأقواس حتى إغلاق الكائن
+        val open = html.lastIndexOf('{', m.range.first)
+        if (open < 0) return null
+        var depth = 0
+        for (i in open until html.length) {
+            when (html[i]) {
+                '{' -> depth++
+                '}' -> {
+                    depth--
+                    if (depth == 0) {
+                        // استخلاص الحقول المطلوبة من النص الخام للكائن
+                        val block = html.substring(open, i + 1)
+                        fun field(key: String): String? =
+                            Regex("\"$key\"\\s*:\\s*\"((?:[^\"\\\\]|\\\\.)*)\"")
+                                .find(block)?.groupValues?.get(1)
+                                ?.replace("\\\"", "\"")?.replace("\\\\", "\\")
+                        return mapOf(
+                            "name" to field("name"),
+                            "image" to field("image"),
+                            "description" to field("description"),
+                        )
+                    }
+                }
+            }
         }
+        return null
     }
 
     private data class EpInfo(val chapterId: String, val serial: Int, val cover: String?)
 
     // المصفوفة المهروبة: [...,"$L42",null,{"bookId":"...","episodes":[{...},...],"slug":...]
+    // المفاتيح مهربة عادة (\"chapter_id\") لكن بعض الصفحات تكون غير مهربة — نتعامل مع الاثنين
     private fun parseEpisodes(html: String): List<EpInfo> {
         val out = mutableListOf<EpInfo>()
-        // نلتقط كل كائن حلقة ضمناً من "episodes":[...]
-        val idx = html.indexOf("\\\"episodes\\\":[")
+        // نقبل "episodes":[ و \"episodes\":[
+        var idx = html.indexOf("\\\"episodes\\\":[")
+        if (idx < 0) idx = html.indexOf("\"episodes\":[")
         if (idx < 0) return out
         // مقطع يبدأ عند episodes ويستمر حتى إغلاق المصفوفة — يدعم orders late/early bookId
         var depth = 0
         var closedAt = -1
-        var i = idx + "\\\"episodes\\\":[".length - 1
+        var i = idx
         while (i < html.length) {
             val ch = html[i]
             if (ch == '[') depth++
@@ -131,16 +149,18 @@ class MosalsalyProvider : MainAPI() {
         }
         if (closedAt < 0) return out
         val block = html.substring(idx, closedAt + 1)
-        val objRe = Regex("""\{[^{}]*"chapter_id":[^{}]*\}""")
+        val objRe = Regex("""\{[^{}]*chapter_id[^{}]*\}""")
         for (m in objRe.findAll(block)) {
             val obj = m.value
-            val chId = Regex("""\\"chapter_id\\":\\"([0-9a-zA-Z]+)\\"""").find(obj)?.groupValues?.get(1)
-                ?: continue
-            val ser = Regex("""\\"serial_number\\":\s*(\d+)""").find(obj)?.groupValues?.get(1)?.toIntOrNull()
-                ?: continue
-            if (ser < 1) continue
-            val cover = Regex("""\\"cover\\":\\"([^"\\]*)""").find(obj)?.groupValues?.get(1)
-                ?.takeIf { it.startsWith("http") }
+            val chId = Regex("""(?:\\")?chapter_id(?:\\")?:\s*(?:\\")?([0-9a-zA-Z]+)(?:\\")?""")
+                .find(obj)?.groupValues?.get(1) ?: continue
+            val ser = Regex("""(?:\\")?serial_number(?:\\")?:\s*(\d+)""")
+                .find(obj)?.groupValues?.get(1)?.toIntOrNull() ?: continue
+            // ReelShort يبدأ serial من 0 — لا نفيلتر هنا
+            if (ser < 0) continue
+            val cover = Regex("""(?:\\")?cover(?:\\")?:\s*(?:\\")?((?:[^"\\]|\\.)*)""")
+                .find(obj)?.groupValues?.get(1)
+                ?.replace("\\/", "/")?.takeIf { it.startsWith("http") }
             out.add(EpInfo(chId, ser, cover))
         }
         return out.distinctBy { it.serial }.sortedBy { it.serial }
@@ -148,13 +168,10 @@ class MosalsalyProvider : MainAPI() {
 
     private fun extractPlatform(html: String): String? {
         // سطر المصدر في التفاصيل: <dt>المصدر</dt><dd><a href="/masdar/<p>">
-        // نبحث أولاً عن «المصدر» ثم نقرأ أول رابط /masdar/ بعده (قائمة التنقل تسبقه عادة)
+        // نبحث أولاً عن «المصدر» ثم نقرأ أول /masdar/ بعده (مهرّب أو عادي)
         val sourceIdx = html.indexOf("المصدر")
-        val window = if (sourceIdx >= 0) html.substring(sourceIdx, minOf(html.length, sourceIdx + 1500)) else html
-        val plain = Regex("""href="(/masdar/([a-z]+))"""").find(window)?.groupValues?.get(2)
-        if (plain != null) return plain
-        val esc = Regex("""href=.?/(masdar/([a-z]+)).?""").find(window)?.groupValues?.get(2)
-        return esc
+        val window = if (sourceIdx >= 0) html.substring(sourceIdx, minOf(html.length, sourceIdx + 2000)) else html
+        return Regex("""/masdar/([a-z]+)""").find(window)?.groupValues?.get(1)?.lowercase()
     }
 
     override suspend fun load(url: String): LoadResponse? {
@@ -166,31 +183,34 @@ class MosalsalyProvider : MainAPI() {
 
         // meta title h1
         val h1 = Regex("""<h1[^>]*>\s*([^<]{2,})\s*</h1>""").find(html)?.groupValues?.get(1)?.trim()
-        val title = h1 ?: jsonLdField(html, "name") ?: return null
-        val cover = jsonLdField(html, "image")
-        val plot = jsonLdField(html, "description")
+        val jsonLd = jsonLdSeries(html)
+        val title = h1 ?: jsonLd?.get("name") ?: return null
+        val cover = jsonLd?.get("image")
+        val plot = jsonLd?.get("description")
         val episodes = parseEpisodes(html)
-        val bookId = Regex("""\\"bookId\\":\\"([0-9a-zA-Z]+)\\"""").find(html)?.groupValues?.get(1)
-            ?: return null
+        // bookId قد يكون مهرّباً أو عادياً
+        val bookId = Regex("""(?:\\")?bookId(?:\\")?:\s*(?:\\")?([0-9a-zA-Z]+)(?:\\")?""")
+            .find(html)?.groupValues?.get(1) ?: return null
         if (episodes.isEmpty()) return null
         val platform = extractPlatform(html)?.lowercase() ?: return null
         // slug الأصلي من الرابط — أفضل من slug مشتق من العنوان (قد يختلف)
         val encSlug = java.net.URLEncoder.encode(slug, "UTF-8").replace("+", "%20")
 
+        var index = 0
         val eps = episodes.map { e ->
-            // data: bookId||chapterId||serial||platform||slug
+            index++
+            // data: bookId||chapterId||serialRaw||platform||slug
             val data0 = "$bookId||${e.chapterId}||${e.serial}||$platform||$encSlug"
             newEpisode(data0) {
-                episode = e.serial
-                name = "الحلقة ${e.serial}"
+                episode = index
+                name = "الحلقة $index"
                 this.posterUrl = e.cover
             }
         }
-        val res = newTvSeriesLoadResponse(title, url, TvType.TvSeries, eps) {
+        return newTvSeriesLoadResponse(title, url, TvType.TvSeries, eps) {
             this.posterUrl = cover
             this.plot = plot
         }
-        return res
     }
 
     private fun cleanM3u8(url: String): String = url
@@ -226,7 +246,7 @@ class MosalsalyProvider : MainAPI() {
             }
             "reelshort" -> {
                 // إعادة بناء صفحة الحلقة على ReelShort ثم قراءة video_url من __NEXT_DATA__
-                // النمط: /ar/episodes/episode-{serial}-{slug}-{bookId}-{chapterId}
+                // ReelShort serial_number يبدأ من 0 — p[2] يحمل serial الأصلي
                 val slugEnc = if (p.size >= 5) p[4] else ""
                 if (slugEnc.isBlank()) return false
                 val epUrl = "$REEL_MAIN/ar/episodes/episode-$serial-$slugEnc-$bookId-$chapterId"
