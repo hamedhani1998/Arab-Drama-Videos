@@ -308,9 +308,9 @@
   {
     "name": "Mosalsaly",
     "internalName": "mosalsaly",
-    "version": 2,
-    "fileSize": 20025,
-    "fileHash": "sha256-dceb5b2a730edfa13ba8434ec8dbab0aa0354786f032265691d8df44f1e3283f",
+    "version": 3,
+    "fileSize": 19940,
+    "fileHash": "sha256-15df27999684e491b47ae9247845b1b0f94f7ca0ce184f3b40aa21f2b11fba0d",
     "url": "https://raw.githubusercontent.com/hamedhani1998/Arab-Drama-Videos/builds/mosalsaly.cs3",
     "repositoryUrl": "https://github.com/hamedhani1998/Arab-Drama-Videos",
     "apiVersion": 1,

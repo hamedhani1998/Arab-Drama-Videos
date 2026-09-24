@@ -168,10 +168,10 @@ class MosalsalyProvider : MainAPI() {
 
     private fun extractPlatform(html: String): String? {
         // سطر المصدر في التفاصيل: <dt>المصدر</dt><dd><a href="/masdar/<p>">
-        // نبحث أولاً عن «المصدر» ثم نقرأ أول /masdar/ بعده (مهرّب أو عادي)
-        val sourceIdx = html.indexOf("المصدر")
-        val window = if (sourceIdx >= 0) html.substring(sourceIdx, minOf(html.length, sourceIdx + 2000)) else html
-        return Regex("""/masdar/([a-z]+)""").find(window)?.groupValues?.get(1)?.lowercase()
+        // «المصدر» يظهر أولاً في القوائم/الإشعارات أيضاً؛ نطابق التواجد الذي يليه
+        // رابط /masdar/ خلال 500 حرف — هذا هو صف المصدر الفعلي (مهرّب أو عادي)
+        return Regex("""المصدر.{0,500}?/masdar/([a-z]+)""")
+            .find(html)?.groupValues?.get(1)?.lowercase()
     }
 
     override suspend fun load(url: String): LoadResponse? {
