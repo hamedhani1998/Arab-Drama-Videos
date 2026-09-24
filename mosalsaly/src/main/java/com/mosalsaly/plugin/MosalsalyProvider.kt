@@ -56,8 +56,7 @@ private fun cleanDecryptedUrl(u: String?): String? {
         .takeIf { it.startsWith("http") || it.startsWith("https") }
 }
 
-// أسماء المنصات الثمانية عشر (كما في /sources) — تُستخدم أسماء الأقسام في الرئيسية
-// الترتيب: أولاً المنصات المدعومة تشغيلاً (GoodShort, ReelShort)، ثم الباقية (غير مدعومة للعب)
+// المنصات الثمانية عشر (كما في /sources) — كلها قابلة للتشغيل عبر /api/episode-source
 private val PLATFORMS = listOf(
     "goodshort" to "GoodShort",
     "reelshort" to "Reelshort",
@@ -79,25 +78,10 @@ private val PLATFORMS = listOf(
     "storyreel" to "StoryReel",
 )
 
-// أقسام إضافية من /tasnif/ (التصنيفات) تُعرض بعد المنصات في الواجهة الرئيسية
+// أقسام إضافية من /tasnif/ (التصنيفات) — تُعرض أولاً في الواجهة الرئيسية
 private val EXTRA_SECTIONS = listOf(
     "populer" to "⭐ الأكثر شعبية",
     "newly-added" to "🆕 أحدث الإضافات",
-    "power-comeback" to "⚡ القوة والعودة",
-    "revenge" to "🔥 الانتقام",
-    "romantik" to "❤️ الرومانسية",
-    "guclu-kadin" to "💪 امرأة قوية",
-    "rich-ceo" to "💼 رجل أعمال غني",
-    "modern-ask-evlilik" to "💍 حب وزواج حديث",
-    "fantasy" to "🧙 فانتازيا",
-    "gizli-kimlik" to "🎭 هوية خفية",
-    "dusmandan-aska" to "💘 من عداوة إلى حب",
-    "yukselis-geri-donus" to "🚀 الصعود والعودة",
-    "tarihi-antik" to "🕌 تاريخي",
-    "zaman-yolculugu" to "⏳ السفر عبر الزمن",
-    "second-chance" to "🔁 فرصة ثانية",
-    "ask-ucgeni" to "🔺 مثلث الحب",
-    "aile-dramasi" to "👨‍👩‍👦 دراما عائلية",
 )
 
 class MosalsalyProvider : MainAPI() {
@@ -108,9 +92,9 @@ class MosalsalyProvider : MainAPI() {
     override val hasQuickSearch = true
     override val supportedTypes = setOf(TvType.TvSeries)
 
-    // الأقسام الرئيسية: المنصات أولاً ثم الأقسام/التصنيفات الإضافية
+    // الأقسام الرئيسية: الأكثر شعبية وأحدث الإضافات أولاً، ثم المنصات الثمانية عشر
     private val homeSections: List<Pair<String, String>> =
-        PLATFORMS + EXTRA_SECTIONS
+        EXTRA_SECTIONS + PLATFORMS
 
     override val mainPage = mainPageOf(*homeSections.toTypedArray())
 

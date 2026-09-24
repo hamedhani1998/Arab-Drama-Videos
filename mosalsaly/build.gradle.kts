@@ -1,7 +1,7 @@
-version = 6
+version = 7
 
 cloudstream {
-    description = "مسلسلي Mosalsaly - مسلسلات قصيرة من 18 منصة (تشغيل مباشر من المنصات عبر واصف الموقع)."
+    description = "مسلسلي Mosalsaly - مسلسلات قصيرة من 18 منصة (الأكثر شعبية وأحدث الإضافات أولاً، تشغيل مباشر من المنصات عبر واصف الموقع)."
     authors = listOf("hamedhani1998")
     language = "ar"
 
