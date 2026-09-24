@@ -1,7 +1,10 @@
 package com.mosalsaly.plugin
 
+import android.util.Log
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
+
+private const val TAG = "Mosalsaly"
 
 private const val MOS_UA =
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
@@ -193,6 +196,7 @@ class MosalsalyProvider : MainAPI() {
             .find(html)?.groupValues?.get(1) ?: return null
         if (episodes.isEmpty()) return null
         val platform = extractPlatform(html)?.lowercase() ?: return null
+        Log.i(TAG, "load ok slug=$slug bookId=$bookId platform=$platform eps=${episodes.size}")
         // slug الأصلي من الرابط — أفضل من slug مشتق من العنوان (قد يختلف)
         val encSlug = java.net.URLEncoder.encode(slug, "UTF-8").replace("+", "%20")
 
@@ -229,6 +233,7 @@ class MosalsalyProvider : MainAPI() {
         val chapterId = p[1]
         val serial = p[2].toIntOrNull() ?: return false
         val platform = p[3].lowercase()
+        Log.i(TAG, "loadLinks platform=$platform bookId=$bookId ch=$chapterId serial=$serial raw=$data")
 
         return when (platform) {
             "goodshort" -> {
@@ -236,33 +241,58 @@ class MosalsalyProvider : MainAPI() {
                 val m3u8 = "$GOOD_BASE/$chapterId?bookId=$bookId&q=720p"
                 try {
                     val master = getWithRetry(m3u8, mainUrl, 4, 400)
-                    if (master.isBlank() || !master.contains("#EXTM3U")) return false
+                    if (master.isBlank() || !master.contains("#EXTM3U")) {
+                        Log.w(TAG, "goodshort no master bookId=$bookId ch=$chapterId len=${master.length}")
+                        return false
+                    }
                     callback(newExtractorLink(name, "GoodShort $serial", cleanM3u8(m3u8), ExtractorLinkType.M3U8) {
                         referer = mainUrl
                         quality = getQualityFromName("720p")
                     })
+                    Log.i(TAG, "goodshort OK serial=$serial")
                     true
-                } catch (e: Exception) { false }
+                } catch (e: Exception) {
+                    Log.w(TAG, "goodshort except ${e.message}")
+                    false
+                }
             }
             "reelshort" -> {
                 // إعادة بناء صفحة الحلقة على ReelShort ثم قراءة video_url من __NEXT_DATA__
                 // ReelShort serial_number يبدأ من 0 — p[2] يحمل serial الأصلي
                 val slugEnc = if (p.size >= 5) p[4] else ""
-                if (slugEnc.isBlank()) return false
+                if (slugEnc.isBlank()) {
+                    Log.w(TAG, "reelshort blank slug")
+                    return false
+                }
                 val epUrl = "$REEL_MAIN/ar/episodes/episode-$serial-$slugEnc-$bookId-$chapterId"
-                val html = try { getWithRetry(epUrl, REEL_MAIN, 5, 400) } catch (e: Exception) { return false }
+                val html = try { getWithRetry(epUrl, REEL_MAIN, 5, 400) } catch (e: Exception) {
+                    Log.w(TAG, "reelshort fetch except ${e.message}")
+                    return false
+                }
                 val root = Regex("""<script[^>]*id="__NEXT_DATA__"[^>]*type="application/json"[^>]*>\s*([\s\S]*?)\s*</script>""")
-                    .find(html)?.groupValues?.get(1) ?: return false
+                    .find(html)?.groupValues?.get(1)
+                if (root == null) {
+                    Log.w(TAG, "reelshort no NEXT_DATA len=${html.length} url=$epUrl")
+                    return false
+                }
                 val videoUrl = Regex(""""video_url":\s*"([^"]+)"""").find(root)?.groupValues?.get(1)?.let {
                     cleanM3u8(if (it.startsWith("http")) it else "https:$it")
-                } ?: return false
+                }
+                if (videoUrl == null) {
+                    Log.w(TAG, "reelshort no video_url root=${root.length}")
+                    return false
+                }
                 callback(newExtractorLink(name, "ReelShort $serial ($bookId)", videoUrl, ExtractorLinkType.M3U8) {
                     referer = REEL_MAIN
                     quality = getQualityFromName("720p")
                 })
+                Log.i(TAG, "reelshort OK serial=$serial")
                 true
             }
-            else -> false
+            else -> {
+                Log.w(TAG, "platform $platform not supported (no player)")
+                false
+            }
         }
     }
 }
