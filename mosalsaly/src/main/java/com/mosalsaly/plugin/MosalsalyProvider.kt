@@ -381,8 +381,22 @@ class MosalsalyProvider : MainAPI() {
             if (!subUrl.isNullOrBlank()) {
                 try {
                     val lang = sub.get("language")?.asText()?.takeIf { it.isNotBlank() } ?: "ar"
-                    // headers مهمة — بعض الخوادم ترفض طلبات الترجمة بلا وكيل/مرجع
-                    subtitleCallback(newSubtitleFile(lang, subUrl) {
+                    // CloudStream يحدد MIME الترجمة من نهاية الرابط (SubtitleHelper.toSubtitleMimeType()).
+                    // روابط netshort تنتهي بـ ?auth_key=... → تُقرأ كـ SRT (application/x-subrip)
+                    // رغم أن الخادم يرسل WebVTT (text/vtt) → ExoPlayer يحاول فك WebVTT كـ SRT
+                    // فتفشل القدرة على إنشاء track نص (EmbeddedSubtitlesFetchedEvent tracks=[])
+                    // والترجمة لا تعمل عند تحديدها رغم أن الخادم يرد WEBVTT سليمًا.
+                    // العلاج: نُنهي الرابط بـ .vtt (أو .srt حسب format) — بارامتر إضافي بلا قيمة
+                    // يتجاهله خادم الأقراص (الكثير من المزوّدين يفعلون هذا) ويجعل اللاعب يتعرف على النوع.
+                    val fmt = sub.get("format")?.asText()?.lowercase().orEmpty()
+                    val subUrlFixed = when {
+                        subUrl.endsWith(".vtt", true) || subUrl.endsWith(".srt", true) -> subUrl
+                        fmt.contains("srt") ->
+                            if (subUrl.contains("?")) "$subUrl&.srt" else "$subUrl.srt"
+                        else ->
+                            if (subUrl.contains("?")) "$subUrl&.vtt" else "$subUrl.vtt"
+                    }
+                    subtitleCallback(newSubtitleFile(lang, subUrlFixed) {
                         this.headers = mapOf("User-Agent" to MOS_UA, "Referer" to mainUrl)
                     })
                 } catch (e: Exception) { Log.w(TAG, "sub emit fail ${e.message}") }
