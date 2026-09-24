@@ -114,22 +114,26 @@ class MosalsalyProvider : MainAPI() {
     // البطاقات: <article class="group "><a ... aria-label="Title" href="/mosalsal/slug"><img ... src="POSTER">...
     // الصورة قد تأتي عبر src= (معظم المنصات) أو srcSet= حصراً (كانت بطاقات dramabox تستخدم srcSet
     // في بعض اللقطات) — نلتقط src إن وجد، وإلا أول URL من srcSet.
-    private val cardRe = Regex(
-        """<article class="group "[^>]*>[\s\S]*?<a\s+[^>]*?(?:href="(/mosalsal/([^"/]*))"[^>]*?aria-label="([^"]*)"|aria-label="([^"]*)"[^>]*?href="(/mosalsal/([^"/]*))")[\s\S]*?<\s*img\b[^>]*?(?:src="(https://[^"]+)"|srcSet="(https://[^ ]+))""""
-    )
+    // الأسلوب المُقسَّم (article-block): قصّ كل بطاقة بمفردها ثم اقرأ حقولها داخل بلوكها،
+    // بدل regex واحد مع [\s\S]*? عبر الصفحة — أكثر مقاومة لتغيّر ترتيب السمات.
+    private val articleBlockRe = Regex("""<article class="group ">[\s\S]*?</article>""")
 
     private fun parseCards(html: String): List<SearchResponse> {
         val seen = HashSet<String>()
         val out = mutableListOf<SearchResponse>()
-        for (m in cardRe.findAll(html)) {
-            // ترتيب المجموعات يعتمد على أيهما أتى أولاً (href ثم aria | aria ثم href)
-            val title = if (m.groupValues[3].isNotBlank()) m.groupValues[3] else m.groupValues[4]
-            val slug = if (m.groupValues[2].isNotBlank()) m.groupValues[2] else m.groupValues[6]
+        val titleRe = Regex("""aria-label="([^"]*)"""")
+        val hrefRe = Regex("""href="(/mosalsal/([^"/]*))"""")
+        val srcRe = Regex("""\bsrc="(https://[^"]+)"""")
+        val srcSetRe = Regex("""\bsrcSet="(https://[^ ]+)""")
+
+        for (art in articleBlockRe.findAll(html)) {
+            val block = art.value
+            val title = titleRe.find(block)?.groupValues?.get(1) ?: continue
+            val slug = hrefRe.find(block)?.groupValues?.get(2) ?: continue
             if (title.isBlank() || slug.isBlank()) continue
-            // الأغلفة: src= مباشر أو srcset (أول URL) — قد يحمل @w= Suffixes الكثيرة؛ نُبقيها كلها
-            // لأن CloudStream يعرضها مباشرةً في البطاقات (سريعة).
-            val poster = if (m.groupValues[7].isNotBlank()) m.groupValues[7] else m.groupValues[8]
-            if (poster.isBlank()) continue
+            val poster = srcRe.find(block)?.groupValues?.get(1)
+                ?: srcSetRe.find(block)?.groupValues?.get(1)
+            if (poster.isNullOrBlank()) continue
             val url = "$mainUrl/mosalsal/$slug"
             if (!seen.add(url)) continue
             out.add(newTvSeriesSearchResponse(title, url, TvType.TvSeries) {
@@ -146,8 +150,10 @@ class MosalsalyProvider : MainAPI() {
         val base = if (isSection) "$mainUrl/tasnif/$slug" else "$mainUrl/masdar/$slug"
         val url = if (page <= 1) base else "$base/page/$page"
         val html = try { getWithRetry(url, mainUrl, 3, 300) } catch (e: Exception) { "" }
+        Log.i(TAG, "getMainPage slug=$slug len=${html.length}")
         if (html.isEmpty()) return null
         val items = parseCards(html)
+        Log.i(TAG, "getMainPage slug=$slug cards=${items.size}")
         return if (items.isEmpty()) null else newHomePageResponse(request.name, items)
     }
 
