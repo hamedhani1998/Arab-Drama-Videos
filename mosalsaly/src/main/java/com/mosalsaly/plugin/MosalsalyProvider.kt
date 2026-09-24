@@ -341,10 +341,24 @@ class MosalsalyProvider(
     //       نفحص فعليًا النص الصغير #EXTM3U → M3U8.
     //    2) كل الأنواع الأخرى (hls/hls-enc/storyreel/...) → حمل أول جزء فقط (Range صغير)؛ إن كان #EXTM3U
     //       فعمر × M3U8، وإلا استبعاد (404/403/HTML ميت).
+    // رابط منتهٍ مؤكداً؟ نرفضه قبل العرض متى حمل Expires= صريحاً في الماضي
+    // (مثل encByQuality من netshort الذي يبقي mosalsaly linkاً قديماً → على الجهاز 403 حتى مع Referer).
+    private fun isExplicitlyExpired(url: String): Boolean {
+        return Regex("expires=(\\d+)", RegexOption.IGNORE_CASE)
+            .find(url)?.groupValues?.get(1)?.toLongOrNull()
+            ?.let { it < System.currentTimeMillis() / 1000 }
+            ?: false
+    }
+
     private suspend fun probeMedia(url: String, declaredType: String?): ExtractorLinkType? {
         val idU = url.lowercase()
         val isDirect = declaredType == "mp4" || declaredType == "mpd" || declaredType == "dash" ||
             idU.contains(".mp4") || idU.contains(".m4v") || idU.contains("videoplayback")
+
+        if (isExplicitlyExpired(url)) {
+            Log.w(TAG, "probeMedia expires-in-past skip $url")
+            return null
+        }
 
         if (isDirect && !idU.contains(".m3u8") && !idU.contains(".m3u")) {
             return ExtractorLinkType.VIDEO
