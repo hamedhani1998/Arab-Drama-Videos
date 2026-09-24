@@ -84,7 +84,9 @@ private val EXTRA_SECTIONS = listOf(
     "newly-added" to "🆕 أحدث الإضافات",
 )
 
-class MosalsalyProvider : MainAPI() {
+class MosalsalyProvider(
+    private val prefs: android.content.SharedPreferences? = null
+) : MainAPI() {
     override var name = "Mosalsaly"
     override var mainUrl = "https://mosalsaly.com"
     override var lang = "ar"
@@ -93,10 +95,15 @@ class MosalsalyProvider : MainAPI() {
     override val supportedTypes = setOf(TvType.TvSeries)
 
     // الأقسام الرئيسية: الأكثر شعبية وأحدث الإضافات أولاً، ثم المنصات الثمانية عشر
-    private val homeSections: List<Pair<String, String>> =
-        EXTRA_SECTIONS + PLATFORMS
+    // (إعداد «أقسام الواجهة» يتحكم بإظهار/إخفاء EXTRA_SECTIONS)
+    private val homeSections: List<Pair<String, String>> by lazy {
+        val extras = if (MosalsalySettings.showExtra(prefs)) EXTRA_SECTIONS else emptyList()
+        val platforms = PLATFORMS.filter { MosalsalySettings.isPlatformEnabled(prefs, it.first) }
+        // لا تدع الواجهة تفرغ حتى لو عطّل المستخدم كل المنصات — نعيد الافتراضي
+        if (extras.isEmpty() && platforms.isEmpty()) EXTRA_SECTIONS + PLATFORMS else extras + platforms
+    }
 
-    override val mainPage = mainPageOf(*homeSections.toTypedArray())
+    override val mainPage by lazy { mainPageOf(*homeSections.toTypedArray()) }
 
     // جلب مع إعادة محاولة — الموقع بطيء/unstable؛ نفس نمط ReelShort
     private suspend fun getWithRetry(url: String, referer: String?, attempts: Int = 3, backoffMs: Long = 300): String {
@@ -291,9 +298,13 @@ class MosalsalyProvider : MainAPI() {
         .replace("\\u003c", "<").replace("\\u003e", ">")
 
     // جلب واصف الحلقة من API الموقع: /api/episode-source/{bookId}/{serial}?lang=ar&refresh=1
-    // يوفّر مصادر مباشرة لكل المنصات (الرابط بعد فك التشفير جاهز للتشغيل)
+    // يوفّر مصادر مباشرة لكل المنصات (الرابط بعد فك التشفير جاهز للتشغيل).
+    // refreshFlag: "1" عادة، أو "0/rand" عند إعداد «تحديث الروابط قسرياً» لتفادي كاش CloudStream.
     private suspend fun fetchEpisodeDescriptor(bookId: String, serial: Int): ObjectNode? {
-        val url = "$mainUrl/api/episode-source/$bookId/$serial?lang=ar&refresh=1"
+        val refreshFlag = if (MosalsalySettings.forceRefresh(prefs)) {
+            "1&_t=${System.currentTimeMillis()}"   // معرّف عشوائي يكسر ذاكرة التخزين
+        } else "1"
+        val url = "$mainUrl/api/episode-source/$bookId/$serial?lang=ar&refresh=$refreshFlag"
         return try {
             val text = getWithRetry(url, mainUrl, 3, 400)
             if (text.isBlank()) { Log.w(TAG, "no descriptor text serial=$serial"); return null }
@@ -379,6 +390,13 @@ class MosalsalyProvider : MainAPI() {
             // يبعد الروابط الميتة (404/403/HTML) ويصحّح التصنيف الكاذب (moboreels m3u8 كـ mp4 → 3003).
             for ((url, q) in candidates) {
                 if (!seen.add(url)) continue
+
+                // إعداد «الجودات»: "high" = الأعلى فقط — يعرض رابطاً واحداً (الأساس غالباً)
+                if (MosalsalySettings.qualityMode(prefs) == "high" && q.isNotBlank()) {
+                    Log.i(TAG, "qualityMode=high, skipping $platform $q")
+                    continue
+                }
+
                 val kind = probeMedia(url, type)
                 if (kind == null) {
                     Log.w(TAG, "skip dead/mismatched $platform url=${url.take(80)}")
@@ -392,20 +410,30 @@ class MosalsalyProvider : MainAPI() {
         alive.sortBy { it.kind != ExtractorLinkType.VIDEO }
         for (lnk in alive) {
             val label = buildString {
-                append("$platform $serial")
-                if (lnk.q.isNotBlank() && lnk.q != lnk.url) append(" · ${lnk.q}")
+                if (MosalsalySettings.rawLinks(prefs)) {
+                    // «الروابط الخام» (تصحيح): التسمية تصبح الرابط نفسه لو فُعلت
+                    append(lnk.url.take(120))
+                } else {
+                    append("$platform $serial")
+                    if (lnk.q.isNotBlank() && lnk.q != lnk.url) append(" · ${lnk.q}")
+                }
             }
             callback(newExtractorLink(name, label, lnk.url, lnk.kind) {
                 this.headers = mapOf("User-Agent" to MOS_UA, "Referer" to mainUrl)
+                // شغّل حقل referer نفسه (وليس فقط headers) — CronetDataSource يبني الطلب
+                // من ExtractorLink.referer وليس headers، وCDNs (مثل netshort) ترفض 403
+                // عندما يصل الطلب بلا Referer → "Source error" / فشل التشغيل.
+                this.referer = mainUrl
                 if (lnk.q.isNotBlank()) this.quality = getQualityFromName(lnk.q)
             })
             emitted = true
         }
 
-        // ترجمة (اختياري) — فك نفس المفتاح وأرسله كملف ترجمة
+        // ترجمة (اختياري) — فك نفس المفتاح وأرسله كملف ترجمة.
+        // إعداد «الترجمات» في الإعدادات يتحكم بإظهارها/إخفائها.
         val sub = descriptor.get("subtitle") as? ObjectNode
         val subEnc = sub?.get("enc")?.asText()
-        if (!subEnc.isNullOrBlank()) {
+        if (MosalsalySettings.showSubtitles(prefs) && !subEnc.isNullOrBlank()) {
             val subUrl = cleanDecryptedUrl(decryptMosEnc(subEnc))
             if (!subUrl.isNullOrBlank()) {
                 try {
@@ -454,6 +482,12 @@ class MosalsalyProvider : MainAPI() {
         val serial = p[2].toIntOrNull() ?: return false
         val platform = p[3].lowercase()
         Log.i(TAG, "loadLinks platform=$platform bookId=$bookId ch=$chapterId serial=$serial raw=$data")
+
+        // المنصة معطلة في الإعدادات → لا تجلب أصلاً (وقت/طلبان أقل)
+        if (!MosalsalySettings.isPlatformEnabled(prefs, platform)) {
+            Log.i(TAG, "platform disabled in settings: $platform")
+            return false
+        }
 
         // المسار الموحّد عبر /api/episode-source — يخدم كل المنصات الـ 18
         // يعيد واصفاً مشفّراً يُفك بمفتاح AES-GCM الثابت إلى رابط مباشر جاهز
