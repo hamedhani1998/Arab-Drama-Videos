@@ -56,6 +56,24 @@ private fun cleanDecryptedUrl(u: String?): String? {
         .takeIf { it.startsWith("http") || it.startsWith("https") }
 }
 
+// عندما يعيد mosalsaly back-end رابط ترجمة بـ auth_key قديم/منتهي الصلاحية (تركتُ
+// netshort يتأثر: sub auth يجلس أياماً قديماً بينما auth الفيديو طازج → الترجمة 403)،
+// نستبدل auth الترجمة بـ auth الفيديو الأساسي الطازج — auth_key على هذه الأقراص عام لكل
+// المسارات على نفس المضيف (تحقق: sub path + video auth → 200 WEBVTT).
+private fun refreshSubtitleAuth(subUrl: String, videoUrl: String?): String {
+    if (videoUrl.isNullOrBlank()) return subUrl
+    val subHost = Regex("https://([^/]+)").find(subUrl)?.groupValues?.get(1) ?: return subUrl
+    val videoHost = Regex("https://([^/]+)").find(videoUrl)?.groupValues?.get(1) ?: return subUrl
+    // كلا الرابطين على نفس CDN netshort (auth عام فقط هناك) — الاحتياط الأمان: لا نلمس غيره
+    if (subHost != videoHost || !subUrl.contains("auth_key") || !videoUrl.contains("auth_key")) return subUrl
+    val subTs = Regex("auth_key=(\\d+)").find(subUrl)?.groupValues?.get(1)?.toLongOrNull() ?: return subUrl
+    val videoTs = Regex("auth_key=(\\d+)").find(videoUrl)?.groupValues?.get(1)?.toLongOrNull() ?: return subUrl
+    if (subTs >= videoTs) return subUrl   // ترجمة لا تزال أعذب/مثل الفيديو → أبقِها
+    // استبدل رقم auth ومنتصف القيمة (توقيع md5 متبوع بشروط) بنفس منقسم القيمة الطازج كاملاً
+    return subUrl.replace(Regex("auth_key=[^&\\s]+"), "auth_key=" +
+        Regex("auth_key=([^&\\s]+)").find(videoUrl)!!.groupValues[1])
+}
+
 // المنصات الثمانية عشر (كما في /sources) — كلها قابلة للتشغيل عبر /api/episode-source
 private val PLATFORMS = listOf(
     "goodshort" to "GoodShort",
@@ -369,11 +387,14 @@ class MosalsalyProvider(
         data class CLink(val url: String, val q: String, val kind: ExtractorLinkType)
 
         val alive = ArrayList<CLink>()
+        // رابط الفيديو الأساسي (auth طازج) — يُستخدم لتجديد auth الترجمة عند انتهائه
+        var primaryVideoUrl: String? = null
         for (item in chain) {
             val ch = item as? ObjectNode ?: continue
             val type = ch.get("type")?.asText()?.lowercase()
             val baseEnc = ch.get("enc")?.asText()
             val baseUrl = if (baseEnc != null) cleanDecryptedUrl(decryptMosEnc(baseEnc)) else null
+            if (primaryVideoUrl == null) primaryVideoUrl = baseUrl
 
             // اجمع المرشحين: الأساس + كل الجودات المتاحة (encByQuality)
             val candidates = LinkedHashMap<String, String>()  // url -> quality label ("" للأساس)
@@ -437,6 +458,10 @@ class MosalsalyProvider(
             val subUrl = cleanDecryptedUrl(decryptMosEnc(subEnc))
             if (!subUrl.isNullOrBlank()) {
                 try {
+                    // netshort: back-end قد يُرجع auth ترجمة منتهي → نستبدله بأحدث auth فيديو
+                    // (نفس المضيف، auth عام لكل المسارات) لمّا كانت الترجمة لا تزال في فترة الصلاحية
+                    val subUrlActive = refreshSubtitleAuth(subUrl, primaryVideoUrl)
+                    if (subUrlActive != subUrl) Log.i(TAG, "refreshed sub auth (stale ${subUrl.take(70)} → ${subUrlActive.take(70)})")
                     val rawLang = sub.get("language")?.asText()?.takeIf { it.isNotBlank() } ?: "ar"
                     // تطبيع كود اللغة: ar_AE/ar-SA/ar_EG → ar (معيار ISO 639-1)
                     val lang = when {
@@ -453,11 +478,11 @@ class MosalsalyProvider(
                     // يتجاهله خادم الأقراص (الكثير من المزوّدين يفعلون هذا) ويجعل اللاعب يتعرف على النوع.
                     val fmt = sub.get("format")?.asText()?.lowercase().orEmpty()
                     val subUrlFixed = when {
-                        subUrl.endsWith(".vtt", true) || subUrl.endsWith(".srt", true) -> subUrl
+                        subUrlActive.endsWith(".vtt", true) || subUrlActive.endsWith(".srt", true) -> subUrlActive
                         fmt.contains("srt") ->
-                            if (subUrl.contains("?")) "$subUrl&.srt" else "$subUrl.srt"
+                            if (subUrlActive.contains("?")) "$subUrlActive&.srt" else "$subUrlActive.srt"
                         else ->
-                            if (subUrl.contains("?")) "$subUrl&.vtt" else "$subUrl.vtt"
+                            if (subUrlActive.contains("?")) "$subUrlActive&.vtt" else "$subUrlActive.vtt"
                     }
                     subtitleCallback(newSubtitleFile(lang, subUrlFixed) {
                         this.headers = mapOf("User-Agent" to MOS_UA, "Referer" to mainUrl)
