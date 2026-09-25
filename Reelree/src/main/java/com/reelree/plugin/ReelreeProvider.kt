@@ -9,6 +9,8 @@ import android.content.SharedPreferences
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.GlobalScope
 import kotlinx.coroutines.launch
+import okhttp3.MediaType.Companion.toMediaType
+import okhttp3.RequestBody.Companion.toRequestBody
 import org.jsoup.nodes.Document
 
 private val mapper = ObjectMapper().registerKotlinModule()
@@ -170,13 +172,17 @@ class ReelreeProvider(private val prefs: SharedPreferences? = null) : MainAPI() 
                     if (go) {
                         android.util.Log.e("Reelree", "starting background warm of all rows")
                         GlobalScope.launch(Dispatchers.IO) {
-                            for (b in allRows) {
-                                if (b == base) continue
-                                val cards = fetchRowCards(b, 1)
-                                if (cards != null && cards.isNotEmpty()) {
-                                    synchronized(rowLock) { rowCache[b] = cards }
+                            // احمّل كل قسم بمعزلٍ عن الآخر (ترابط لكل صف) بدل التتابع —
+                            // فتملأ الأقسام الـ16 بسرعة وكل قسم يظهر فور جاهزيته.
+                            val remaining = allRows.filter { it != base }
+                            remaining.map { b ->
+                                launch(Dispatchers.IO) {
+                                    val cards = fetchRowCards(b, 1)
+                                    if (cards != null && cards.isNotEmpty()) {
+                                        synchronized(rowLock) { rowCache[b] = cards }
+                                    }
                                 }
-                            }
+                            }.forEach { it.join() }
                             android.util.Log.e("Reelree", "background warm complete (cached=${synchronized(rowLock) { rowCache.size }})")
                         }
                     }
@@ -237,6 +243,9 @@ class ReelreeProvider(private val prefs: SharedPreferences? = null) : MainAPI() 
             val mediaTemplate = watch?.attr("data-media")?.trim()
             val episodes = watch?.attr("data-episodes")?.trim()?.toIntOrNull() ?: 1
             val dataSource = watch?.attr("data-source")?.trim().orEmpty()
+            // seriesId يُمرَّر داخل حقل data للحلقات ليتسنّى لـ loadLinks الوصول إلى
+            // واجهة الترجمة/الجودات (POST /api/subtitles لـ ns، و /api/{src}/{id}/{n}.json لسواها).
+            val seriesId = watch?.attr("data-series")?.trim().orEmpty()
             val rrServer = parseRrServer(watch?.attr("data-rr-server2"))
 
             // قائمة الحلقات:
@@ -262,7 +271,7 @@ class ReelreeProvider(private val prefs: SharedPreferences? = null) : MainAPI() 
                 }
             } else {
                 for (n in 1..episodes) {
-                    eps.add(newEpisode("$mediaTemplate|$n") {
+                    eps.add(newEpisode("$mediaTemplate|$n|$dataSource|$seriesId") {
                         episode = n
                         name = "الحلقة $n"
                     })
@@ -389,27 +398,146 @@ class ReelreeProvider(private val prefs: SharedPreferences? = null) : MainAPI() 
         //   - /api/rs/*/{n}.m3u8 → HLS حقيقي (#EXTM3U...)
         // لذلك نفحص أول بايتات (range صغير سريع) لتحديد النوع الصحيح — إرسال HLS كـ VIDEO
         // يفشل بـ UnrecognizedInputFormatException، وإرسال MP4 كـ HLS يفشل بـ Source error أيضًا.
-        val parts = data.split("|", limit = 2)
+        // (v5) نمرّر ضمن data أيضًا منصة المصدر + seriesId (من data-source/data-series) لنستخرج
+        // منه الترجمة والجودات الإضافية من واجهة Reelree (راجع fetchEpisodeExtras أدناه).
+        val parts = data.split("|", limit = 4)
         val template = parts.getOrNull(0)?.trim() ?: return false
         val ep = parts.getOrNull(1)?.trim() ?: return false
+        val source = parts.getOrNull(2)?.trim().orEmpty()
+        val seriesId = parts.getOrNull(3)?.trim().orEmpty()
         if (template.isBlank() || !template.startsWith("http")) return false
 
         val epUrl = template.replace("%EP%", ep)
-        return try {
-            val isHls = epUrl.endsWith(".m3u8") && runCatching {
-                val sig = app.get(epUrl, referer = mainUrl, headers = mapOf(
-                    "User-Agent" to UA,
-                    "Range" to "bytes=0-199"
-                )).text
-                sig.startsWith("#EXT") || sig.startsWith("#EXTM3U") || sig.contains("#EXT-X-")
-            }.getOrDefault(false)
-            callback(newExtractorLink(name, "الحلقة $ep", epUrl,
-                if (isHls) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO) {
-                referer = mainUrl
-                quality = getQualityFromName("720p")
-            })
-            true
-        } catch (e: Exception) { false }
+        val isHls = epUrl.endsWith(".m3u8") && runCatching {
+            val sig = app.get(epUrl, referer = mainUrl, headers = mapOf(
+                "User-Agent" to UA,
+                "Range" to "bytes=0-199"
+            )).text
+            sig.startsWith("#EXT") || sig.startsWith("#EXTM3U") || sig.contains("#EXT-X-")
+        }.getOrDefault(false)
+        callback(newExtractorLink(name, "الحلقة $ep", epUrl,
+            if (isHls) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO) {
+            referer = mainUrl
+            quality = getQualityFromName("720p")
+        })
+        // الجودات والترجمات الإضافية (إن وُجدت) — بعد بثّ رابط الحلقة أصلًا حتى لا
+        // يتأخر التشغيل إطلاقًا؛ أي فشل هنا لا يمسّ الرابط الأساسي (المشغّل يتجاهله).
+        runCatching {
+            fetchEpisodeExtras(ep, source, seriesId, subtitleCallback, callback)
+        }
+        return true
+    }
+
+    /** نصّف قائمة ترجمات المصدر (حقول كما في normalizeSubs بموقع Reelree) إلى SubtitleFile. */
+    private suspend fun normalizeSubs(node: com.fasterxml.jackson.databind.JsonNode?): List<SubtitleFile> {
+        val out = mutableListOf<SubtitleFile>()
+        if (node == null || !node.isArray) return out
+        val seen = HashSet<String>()
+        var i = 0
+        for (s in node) {
+            val url = s.get("url")?.asText()
+                ?: s.get("subtitleUrl")?.asText()
+                ?: s.get("filePath")?.asText()
+                ?: s.get("vtt")?.asText()
+                ?: s.get("srt")?.asText()
+            if (url.isNullOrBlank()) continue
+            val code = s.get("lang")?.asText()
+                ?: s.get("language")?.asText()
+                ?: s.get("subtitleLanguage")?.asText()
+                ?: s.get("code")?.asText()
+            val label = s.get("label")?.asText()
+                ?: s.get("name")?.asText()
+                ?: s.get("display_name")?.asText()
+                ?: s.get("title")?.asText()
+                ?: ""
+            val lang = (code ?: label).ifBlank { "sub$i" }.trim()
+            val key = "$lang|${label.orEmpty()}"
+            if (!seen.add(key)) continue
+            out.add(newSubtitleFile(lang, url))
+            i++
+        }
+        return out
+    }
+
+    private suspend fun fetchEpisodeExtras(
+        ep: String,
+        source: String,
+        seriesId: String,
+        subtitleCallback: (SubtitleFile) -> Unit,
+        callback: (ExtractorLink) -> Unit,
+    ) {
+        if (source.isBlank() || seriesId.isBlank()) return
+        val showSubs = prefs?.getBoolean(ReelreeSettingsBottomSheet.KEY_SHOW_SUBTITLES, true) != false
+        val jsonHeaders = mapOf(
+            "User-Agent" to UA,
+            "Content-Type" to "application/json",
+            "Origin" to mainUrl,
+            "Referer" to mainUrl,
+        )
+        if (source == "ns") {
+            // ===== NetShort: POST /api/episode/play → قائمة الحلقات المرتبة (voucher لكل جودة)،
+            // ثم POST /api/subtitles بـ (shortPlayId, episodeId) =====
+            val body = mapper.writeValueAsString(mapOf(
+                "shortPlayId" to seriesId,
+                "playClarity" to "720p",
+                "codec" to "h264",
+                "_lang" to "ar_AE",
+            ))
+            val node = runCatching { mapper.readTree(app.post("$mainUrl/api/episode/play",
+                requestBody = body.toRequestBody("application/json; charset=utf-8".toMediaType()),
+                headers = jsonHeaders, referer = mainUrl).text) }.getOrNull() ?: return
+            val list = node.get("data")?.get("episodePlayList") ?: return
+            val n = ep.toIntOrNull() ?: return
+            if (list.isArray && list.size() >= n) {
+                val ent = list[n - 1]
+                val episodeId = ent?.get("episodeId")?.asText()?.takeIf { it.isNotBlank() }
+                val voucher = ent?.get("playVoucher")?.asText()?.takeIf { it.isNotBlank() }
+                if (!voucher.isNullOrBlank()) {
+                    val clarity = ent.get("playClarity")?.asText()?.trim().orEmpty()
+                    callback(newExtractorLink(name, "الحلقة $ep${if (clarity.isBlank()) "" else " · $clarity"}",
+                        voucher, ExtractorLinkType.VIDEO) {
+                        referer = mainUrl
+                        quality = getQualityFromName(if (clarity.isBlank()) "720p" else clarity)
+                    })
+                }
+                if (showSubs && !episodeId.isNullOrBlank()) {
+                    val subBody = mapper.writeValueAsString(mapOf(
+                        "shortPlayId" to seriesId,
+                        "episodeId" to episodeId,
+                        "codec" to "h264",
+                        "_lang" to "ar_AE",
+                    ))
+                    val subNode = runCatching { mapper.readTree(app.post("$mainUrl/api/subtitles",
+                        requestBody = subBody.toRequestBody("application/json; charset=utf-8".toMediaType()),
+                        headers = jsonHeaders, referer = mainUrl).text) }.getOrNull() ?: return
+                    val subs = subNode.get("data")?.get("subtitleList")
+                    for (sf in normalizeSubs(subs)) subtitleCallback(sf)
+                }
+            }
+        } else if (source in setOf("dw", "dx", "sm", "fr", "ft") && seriesId.isNotBlank()) {
+            // ===== سواها (DramaBox/Swan/FullTV...): GET /api/{src}/{seriesId}/{n}.json
+            // يحمل subs و qualities في النداء نفسه =====
+            val node = runCatching { mapper.readTree(app.get("$mainUrl/api/$source/$seriesId/$ep.json", referer = mainUrl,
+                headers = mapOf("User-Agent" to UA)).text) }.getOrNull() ?: return
+            if (showSubs) {
+                val subs = node.get("subs") ?: node.get("data")?.get("subs")
+                for (sf in normalizeSubs(subs)) subtitleCallback(sf)
+            }
+            val quals = node.get("qualities") ?: node.get("data")?.get("qualities")
+            if (quals != null && quals.isArray) {
+                val seenUrls = HashSet<String>()
+                for (q in quals) {
+                    val qUrl = q.get("url")?.asText() ?: q.get("directUrl")?.asText() ?: continue
+                    if (!seenUrls.add(qUrl)) continue
+                    val qLabel = q.get("quality")?.asText() ?: q.get("label")?.asText() ?: q.get("playClarity")?.asText().orEmpty()
+                    callback(newExtractorLink(name, "الحلقة $ep · ${qLabel.ifBlank { "جودة إضافية" }}",
+                        qUrl, if (qUrl.endsWith(".m3u8")) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO) {
+                        referer = mainUrl
+                        quality = getQualityFromName(if (qLabel.isBlank()) "720p" else qLabel)
+                    })
+                }
+            }
+        }
     }
 
     private fun cleanTitle(t: String): String {
