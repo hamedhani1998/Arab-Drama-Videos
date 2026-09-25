@@ -3,6 +3,8 @@ package com.dramaglance.plugin
 import com.fasterxml.jackson.databind.ObjectMapper
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
+import android.content.SharedPreferences
+import android.util.Log
 import org.jsoup.nodes.Document
 import java.net.URLDecoder
 import java.net.URLEncoder
@@ -32,7 +34,7 @@ private const val UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/53
  *  - المكتبة /ar/genres/...: نفس شكل البطاقات، وهي الطريق الوحيد للتصفح
  *    الأوسع (الرئيسية لا تكشف سوى 20 مسلسلاً).
  *  - البحث: div.module-card-item.module-item (شكل مختلف عن الرئيسية، ونصوصه
- *    إنجليزية دائماً لأن /search غير مربوط بمCrysoftca عربية).
+ *    إنجليزية دائماً لأن /search غير مربوط بالواجهة العربية).
  *  - التفاصيل: سكربت var player_aaaa={...} فيه encrypt و url مشفّرة بـ
  *    URL-encoding (encrypt:1)، و encrypt:2 = base64.
  *
@@ -42,7 +44,7 @@ private const val UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/53
  * من طرف الموقع. لذلك المصدر يعرض المعاينة الحرة ويذكر عدد حلقات المعاينة
  * صراحةً في اسم الحلقة بدل أن يوهم بمشاهدة السلسلة كاملة.
  */
-class DramaGlanceProvider : MainAPI() {
+class DramaGlanceProvider(private val prefs: SharedPreferences? = null) : MainAPI() {
     override var name = "DramaGlance"
     override var mainUrl = "https://www.dramaglance.com"
     override var lang = "ar"
@@ -65,6 +67,13 @@ class DramaGlanceProvider : MainAPI() {
         "Origin" to mainUrl,
         "Accept" to "*/*",
     )
+
+    // ---- الإعدادات (اختيارية: prefs == null ⇒ كل الافتراضيات) ----
+    private fun diagnostics(): Boolean = prefs?.getBoolean(DramaGlanceSettingsBottomSheet.KEY_DIAGNOSTICS, false) == true
+
+    private fun log(msg: String) {
+        if (diagnostics()) Log.e("DramaGlance", msg)
+    }
 
     /**
      * بطاقات MAIN: div.module-poster-item.module-item
@@ -219,6 +228,9 @@ class DramaGlanceProvider : MainAPI() {
                     episode = 1
                     name = previewLabel ?: "الحلقات المتاحة"
                 })
+                log("'$title' — المعاينة المعلنة: ${previewLabel ?: "غير محددة"} → $playUrl")
+            } else {
+                log("'$title' — لا توجد معاينة في player_aaaa")
             }
 
             // الوسم يوضّح للمستخدم أن ما سيشاهده هو معاينة مجانية فقط: الموقع
@@ -249,12 +261,13 @@ class DramaGlanceProvider : MainAPI() {
         val playUrl = data.substring(firstPipe + 1).trim()
         if (!playUrl.startsWith("http")) return false
 
-        // رابط HLS واحد بلا تشفير (#EXT-X-KEY غير موجود) وبلا ترميزات (#EXT-X-MEDIA غير موجود)
-        // → لا جودات متعددة ولا ترجمات لاستخراجها؛ نسلّمه كما هو بترويسات المتصفح.
+        // The preview playlist is a single variant: no #EXT-X-STREAM-INF, no
+        // #EXT-X-MEDIA, no #EXT-X-KEY. So there is nothing to enumerate -- one
+        // link, full browser headers (Cloudflare 403s anything less).
         callback(newExtractorLink(name, "الحلقات المتاحة مجاناً", playUrl, ExtractorLinkType.M3U8) {
             this.headers = browserHeaders()
-            // CloudStream يستخدم headers في نداءات app، لكن مشغّل الفيديو نفسه يبني
-            // طلبه من Referer — نملأ الاثنين معًا وإلا رفض Cloudflare الطلب (403).
+            // CloudStream uses headers in app calls, but the video player builds
+            // its own request from Referer -- set both or Cloudflare 403s it.
             this.referer = "$mainUrl/"
             this.quality = getQualityFromName("720p")
         })
