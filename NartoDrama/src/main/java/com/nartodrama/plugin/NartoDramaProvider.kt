@@ -7,9 +7,9 @@ import com.fasterxml.jackson.databind.ObjectMapper
 import com.fasterxml.jackson.module.kotlin.registerKotlinModule
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
-import kotlinx.coroutines.async
-import kotlinx.coroutines.awaitAll
-import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.GlobalScope
+import kotlinx.coroutines.launch
 
 private val mapper = ObjectMapper().registerKotlinModule()
     .configure(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES, false)
@@ -104,6 +104,10 @@ class NartoDramaProvider(private val prefs: SharedPreferences? = null) : MainAPI
     // renders identically under any tab name.
     private var homeFeedCache: String? = null
 
+    // One-shot gate: the OTHER tabs + home feed are warmed ONCE in a detached background
+    // coroutine (never blocks first paint). Subsequent getMainPage calls tab-hop into warm caches.
+    private var warmStarted = false
+
     // Detect whether a stream URL is HLS or a direct video file. URL-based, no network probe.
     private fun inferStreamType(url: String): ExtractorLinkType {
         val lower = url.lowercase()
@@ -178,17 +182,11 @@ class NartoDramaProvider(private val prefs: SharedPreferences? = null) : MainAPI
         val t0 = System.currentTimeMillis()
         return try {
             val q = request.data.trim()
-            // One shared warm-up: fire the 3 OTHER category feeds + the home feed in parallel while
-            // the requested tab's own feed loads, so tab-hopping (which calls getMainPage again)
-            // hits the cache instead of re-fetching a 4-6s /search page. The requested tab's fetch
-            // runs inline (we need its answer for first paint anyway).
-            val warm = coroutineScope {
-                val targets = homeSections.filter { it != q } + "/*home*/"
-                targets.map { warmQ ->
-                    async { if (warmQ == "/*home*/") fetchHomeFeed() else fetchSearch(warmQ) }
-                }.awaitAll()
-            }
-            android.util.Log.e("NartoDrama", "getMainPage q=$q warm=${warm.count { it != null }}")
+            // سرعة الواجهة: نعرض القسم المطلوب فوراً (fetch واحد فقط)، ونجهّز بقية
+            // الأقسام في الخلفية دفعةً واحدة بمعزل عن العرض — نفس نمط Reelree.
+            // بهذا لا يُحجب أول رسمٍ بانتظار أبطأ fetch من الأقسام الأخرى (كانت
+            // التدفئة القديمة awaitAll تنتظر الجميع قبل إرجاع القسم المطلوب).
+            warmOthersBackground(q)
 
             var html = fetchSearch(q)
             var fromFallback = false
@@ -214,6 +212,27 @@ class NartoDramaProvider(private val prefs: SharedPreferences? = null) : MainAPI
         } catch (e: Exception) {
             android.util.Log.e("NartoDrama", "getMainPage ERROR", e)
             null
+        }
+    }
+
+    // Warm the OTHER category feeds + the home feed in ONE detached background coroutine
+    // (each fetch its own thread), so tab-hopping never waits. Runs once per app life;
+    // getMainPage calls it before its inline fetch, but the two never block each other.
+    private fun warmOthersBackground(q: String) {
+        if (warmStarted) return
+        synchronized(this) {
+            if (warmStarted) return
+            warmStarted = true
+        }
+        android.util.Log.e("NartoDrama", "starting background warm (q=$q)")
+        GlobalScope.launch(Dispatchers.IO) {
+            val targets = homeSections.filter { it != q } + "/*home*/"
+            targets.map { warmQ ->
+                launch(Dispatchers.IO) {
+                    if (warmQ == "/*home*/") fetchHomeFeed() else fetchSearch(warmQ)
+                }
+            }.forEach { it.join() }
+            android.util.Log.e("NartoDrama", "background warm complete (searchCache=${searchCache.size})")
         }
     }
 
