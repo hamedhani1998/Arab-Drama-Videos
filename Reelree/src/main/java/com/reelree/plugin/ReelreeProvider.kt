@@ -393,11 +393,16 @@ class ReelreeProvider(private val prefs: SharedPreferences? = null) : MainAPI() 
         }
 
         // ===== المسار 2: الحلقات المنفصلة بالرقم — عبر data-media / %EP% =====
-        // روابط /api/{dx|rs}/{id}/{n}.m3u8 — رغم الامتداد .m3u8 المتشابه فإن المحتوى مختلف:
-        //   - /api/dx/*/{n}.m3u8 → ملف MP4 مباشر (ftypisom...)
-        //   - /api/rs/*/{n}.m3u8 → HLS حقيقي (#EXTM3U...)
-        // لذلك نفحص أول بايتات (range صغير سريع) لتحديد النوع الصحيح — إرسال HLS كـ VIDEO
-        // يفشل بـ UnrecognizedInputFormatException، وإرسال MP4 كـ HLS يفشل بـ Source error أيضًا.
+        // روابط /api/{dx|rs|gs|...}/{id}/{n}.m3u8 — كلها **302-إعادة توجيه** إلى سيرفر
+        // المصدر الحقيقي (فالبايتات التي يرجعها النداء هي "Found. Redirecting..." لا
+        // الملف نفسه). والنوع مختلف حسب المنصة:
+        //   - dx (DramaBox): يعيد التوجيه إلى .../{n}.mp4 → MP4 (بعض الحلقات HLS)
+        //   - rs (ReelShort): يعيد التوجيه إلى crazymaple...m3u8 → HLS
+        //   - gs (GoodShort): يعيد التوجيه إلى goodshort...m3u8 → HLS
+        // لذلك نقرأ هيدر Location (الوجهة الفعلية) ونصنّف بالامتداد (المنهج نفسه الذي
+        // يعتمده موقع Reelree نفسه: isHlsUrl = /\.m3u8/)، ونبثّ رابط السيرفر الحقيقي
+        // مباشرة. إرسال HLS كـ VIDEO = UnrecognizedInputFormatException (خطأ 3003)،
+        // وإرسال MP4 كـ HLS = Source error — فتصنيف الوجهة هو ما يمنع كليهما.
         // (v5) نمرّر ضمن data أيضًا منصة المصدر + seriesId (من data-source/data-series) لنستخرج
         // منه الترجمة والجودات الإضافية من واجهة Reelree (راجع fetchEpisodeExtras أدناه).
         val parts = data.split("|", limit = 4)
@@ -408,14 +413,44 @@ class ReelreeProvider(private val prefs: SharedPreferences? = null) : MainAPI() 
         if (template.isBlank() || !template.startsWith("http")) return false
 
         val epUrl = template.replace("%EP%", ep)
-        val isHls = epUrl.endsWith(".m3u8") && runCatching {
-            val sig = app.get(epUrl, referer = mainUrl, headers = mapOf(
+        // نكتشف وجهة السيرفر الحقيقي (Location) عبر طلب مرافق من منتصف الطريق.
+        // CloudStream يتابع 302 تلقائيًا أحيانًا (فتغيب Location ونقرأ المحتوى)، وقد لا
+        // يتابعه (فنقرأ Location). وفي الحالتين نصنّف الوجهة الفعلية:
+        //   - المنصة `db` (DramaBox عبر miniepisode): قالبها .mp4 لكن الهدف m3u8 → HLS
+        //   - المنصة `dx` (DramaBox): قالبها .m3u8 لكن الهدف .mp4 → VIDEO
+        //   - rs/gs/sm/ft/dw: قالبها .m3u8 والهدف m3u8 → HLS
+        // نبثّ رابط السيرفر الحقيقي مباشرة (بدل وسيط reelree.com) — أسرع وأضمن لمشغّل
+        // أطراف ثالثة، ويحوّل HLS كـ M3U8 وMP4 كـ VIDEO فلا خطأَ 3003 ولا Source error.
+        var playUrl = epUrl
+        val isHls = runCatching {
+            val resp = app.get(epUrl, referer = mainUrl, headers = mapOf(
                 "User-Agent" to UA,
                 "Range" to "bytes=0-199"
-            )).text
-            sig.startsWith("#EXT") || sig.startsWith("#EXTM3U") || sig.contains("#EXT-X-")
-        }.getOrDefault(false)
-        callback(newExtractorLink(name, "الحلقة $ep", epUrl,
+            ))
+            val loc = resp.headers["Location"]
+            if (loc != null && loc.startsWith("http")) {
+                playUrl = loc
+                // قد تكون الوجهة وسيطًا داخليًا آخر (~/{n}.mp4) بعدها الشبكة الفعلية — نتبعها.
+                var check = loc
+                if (loc.contains("reelree.com/api") && loc.contains(".mp4")) {
+                    val resp2 = app.get(loc, referer = mainUrl, headers = mapOf("User-Agent" to UA))
+                    val loc2 = resp2.headers["Location"]
+                    if (loc2 != null && loc2.startsWith("http")) {
+                        playUrl = loc2
+                        check = loc2
+                    } else {
+                        check = resp2.text
+                    }
+                }
+                check.contains(".m3u8") || check.contains("m3u8") ||
+                    (!check.startsWith("http") && (check.startsWith("#EXT") || check.contains("#EXT-X-")))
+            } else {
+                val t = resp.text
+                playUrl = epUrl
+                t.startsWith("#EXT") || t.startsWith("#EXTM3U") || t.contains("#EXT-X-")
+            }
+        }.getOrDefault(epUrl.endsWith(".m3u8"))
+        callback(newExtractorLink(name, "الحلقة $ep", playUrl,
             if (isHls) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO) {
             referer = mainUrl
             quality = getQualityFromName("720p")
