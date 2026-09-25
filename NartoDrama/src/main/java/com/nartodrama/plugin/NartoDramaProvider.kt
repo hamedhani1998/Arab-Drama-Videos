@@ -315,39 +315,51 @@ class NartoDramaProvider(private val prefs: SharedPreferences? = null) : MainAPI
         }
     }
 
-    // Fetch the refresh-source payload for this provider's OWN host only (narto-drama.com).
-    // Per-episode cooldown handling: retryable gate that we wait out (bounded) then retry.
+    // Fetch the refresh-source payload for this provider's OWN host (narto-drama.com), with a
+    // fallback to the edge host on network/DNS failure. Per-episode cooldown handling: retryable
+    // gate that we wait out (bounded) then retry. On a transient device-DNS blip (UnknownHost on
+    // main domain) this still resolves via edge, so loadLinks never returns empty needlessly.
     private suspend fun fetchRefresh(slug: String, ep: String): NartoResponse? {
+        // Try each host in order; final host = the other one (never the same twice).
+        val hosts = listOf(mainUrl, BRW_HOST)
         var waited = false
-        var attempt = 0
-        while (attempt < 2) {
-            attempt++
-            try {
-                val body = app.get(
-                    "$mainUrl/e/rs/detail/watch/$slug/$ep/refresh-source?rs_ctx=$fakeRsCtx",
-                    referer = nartoOrigin,
-                    timeout = 60000L
-                ).text
-                val edge = mapper.readValue(body, NartoResponse::class.java)
-                if (edge.ok != true && (edge.message == "refresh_source_recently_failed" || edge.message == "refresh_source_cooldown_active")) {
-                    if (waited) {
-                        android.util.Log.e("NartoDrama", "fetchRefresh COOLDOWN persists slug=$slug ep=$ep retryAfter=${edge.retryAfterSeconds}")
-                        return null
+        var lastErr: Exception? = null
+        for (h in hosts) {
+            var attempt = 0
+            while (attempt < 2) {
+                attempt++
+                try {
+                    val tl0 = System.currentTimeMillis()
+                    val body = app.get(
+                        "$h/e/rs/detail/watch/$slug/$ep/refresh-source?rs_ctx=$fakeRsCtx",
+                        referer = nartoOrigin,
+                        timeout = 30000L
+                    ).text
+                    val ms = System.currentTimeMillis() - tl0
+                    val edge = mapper.readValue(body, NartoResponse::class.java)
+                    if (edge.ok != true && (edge.message == "refresh_source_recently_failed" || edge.message == "refresh_source_cooldown_active")) {
+                        if (waited) {
+                            android.util.Log.e("NartoDrama", "fetchRefresh COOLDOWN persists slug=$slug ep=$ep retryAfter=${edge.retryAfterSeconds}")
+                            return null
+                        }
+                        waited = true
+                        val waitMs = ((edge.retryAfterSeconds ?: 15).coerceIn(4, 12)) * 1000L
+                        android.util.Log.e("NartoDrama", "fetchRefresh COOLDOWN slug=$slug ep=$ep waiting=${waitMs}ms")
+                        try { Thread.sleep(waitMs) } catch (e2: InterruptedException) { Thread.currentThread().interrupt() }
+                        continue
                     }
-                    waited = true
-                    val waitMs = ((edge.retryAfterSeconds ?: 15).coerceIn(4, 12)) * 1000L
-                    android.util.Log.e("NartoDrama", "fetchRefresh COOLDOWN slug=$slug ep=$ep waiting=${waitMs}ms")
-                    try { Thread.sleep(waitMs) } catch (e2: InterruptedException) { Thread.currentThread().interrupt() }
-                    continue
-                }
-                return edge
-            } catch (e: Exception) {
-                android.util.Log.e("NartoDrama", "fetchRefresh ERROR attempt=$attempt/2 slug=$slug ep=$ep", e)
-                if (attempt < 2) {
-                    try { Thread.sleep(800) } catch (e2: InterruptedException) { Thread.currentThread().interrupt() }
+                    android.util.Log.e("NartoDrama", "fetchRefresh OK host=$h slug=$slug ep=$ep ${ms}ms ok=${edge.ok} play=${edge.directPlayUrl?.take(50) ?: edge.playUrl?.take(50)}")
+                    return edge
+                } catch (e: Exception) {
+                    lastErr = e
+                    android.util.Log.e("NartoDrama", "fetchRefresh ERROR host=$h attempt=$attempt/2 slug=$slug ep=$ep", e)
+                    if (attempt < 2) {
+                        try { Thread.sleep(800) } catch (e2: InterruptedException) { Thread.currentThread().interrupt() }
+                    }
                 }
             }
         }
+        android.util.Log.e("NartoDrama", "fetchRefresh ALL HOSTS FAILED slug=$slug ep=$ep lastErr=${lastErr?.message?.take(80)}")
         return null
     }
 
@@ -642,7 +654,23 @@ class NartoDramaProvider(private val prefs: SharedPreferences? = null) : MainAPI
             }
 
             if (emitted.isEmpty()) {
-                android.util.Log.e("NartoDrama", "loadLinks no qualities emitted (all died?) slug=$slug")
+                // Last resort: the API gave us at least one real URL — hand the player the raw
+                // direct URL WITHOUT the isAlive probe (device DNS can be transiently flaky; a
+                // dead token is better than "no links", and the player surfaces a clear error).
+                android.util.Log.e("NartoDrama", "loadLinks no links survived probes — emitting raw API URL slug=$slug")
+                val raw = listOfNotNull(edge.directPlayUrl, edge.playUrl)
+                    .firstOrNull { !it.isNullOrBlank() }
+                if (!raw.isNullOrBlank()) {
+                    val t = inferStreamType(raw)
+                    collected.add(
+                        newExtractorLink(source = name, name = "كامل", url = raw, type = t) {
+                            referer = nartoOrigin
+                            quality = getQualityFromName("480p")
+                            headers = mapOf("Referer" to nartoOrigin)
+                        }
+                    )
+                    any = true
+                }
             }
 
             android.util.Log.e("NartoDrama", "loadLinks DONE slug=$slug ep=$ep links=${emitted.size} subs=${subTracks.size} deadSkipped=$skippedDead any=$any")
