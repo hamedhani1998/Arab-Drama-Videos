@@ -345,7 +345,13 @@ class MosalsalyProvider(
             val text = getWithRetry(url, mainUrl, 3, 400)
             if (text.isBlank()) { Log.w(TAG, "no descriptor text serial=$serial"); return null }
             val node = mosMapper.readTree(text)
-            if (text.length > 300) Log.i(TAG, "DESCRIPTOR ${text.take(2000)}")
+            runCatching {
+                val d = node.get("descriptor") as? ObjectNode
+                val sub = d?.get("subtitle") as? ObjectNode
+                val subJson = if (sub != null) sub.toString().take(500) else "null"
+                val refresh = d?.get("chain")?.get(0)?.get("refreshAfter")?.asText().orEmpty()
+                Log.i(TAG, "SUBINFO refresh=$refresh sub=$subJson")
+            }
             node.get("descriptor") as? ObjectNode
         } catch (e: Exception) {
             Log.w(TAG, "descriptor except ${e.message}")
