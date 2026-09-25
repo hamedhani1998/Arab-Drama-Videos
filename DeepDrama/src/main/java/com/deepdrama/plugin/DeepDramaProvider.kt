@@ -1,5 +1,6 @@
 package com.deepdrama.plugin
 
+import android.content.SharedPreferences
 import com.fasterxml.jackson.databind.DeserializationFeature
 import com.fasterxml.jackson.databind.JsonNode
 import com.fasterxml.jackson.databind.ObjectMapper
@@ -37,7 +38,7 @@ private class DdEntry(
  * البيانات (روابط الخوادم) تُخزَّن في الحلقة أثناء عرض التفاصيل، وتُحلّ كل
  * نتيجة مرة واحدة وتُخزَّن مؤقتًا ليكون التشغيل فوريًا.
  */
-class DeepDramaProvider : MainAPI() {
+class DeepDramaProvider(private val prefs: SharedPreferences? = null) : MainAPI() {
     override var name = "Deep Drama"
     override var mainUrl = DD_MAIN
     override var lang = "ar"
@@ -531,11 +532,17 @@ class DeepDramaProvider : MainAPI() {
      * لا نكرّر نقطة جودة واحدة (إن كانت الجودات مفردة) — الـ master وحده يكفي.
      */
     private suspend fun emitServer(
+        prefs: SharedPreferences?,
         server: ServerResolved,
         primary: Boolean,
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit,
     ) {
+        // نجمع روابط هذا الخادم أولاً، ثم نبثّها بعد فرزها حسب اختيار المستخدم.
+        // الافتراضي (default) يبثّها بنفس ترتيبها تماماً كما كان — بلا أي تغيير.
+        val collected = mutableListOf<ExtractorLink>()
+        val sink: (ExtractorLink) -> Unit = { collected.add(it); Unit }
+
         val tag = server.name
         val master = server.hls ?: server.renditions.maxByOrNull { it.height }?.url
         val renditions = server.renditions.sortedBy { it.height }
@@ -543,7 +550,7 @@ class DeepDramaProvider : MainAPI() {
         // 1) الـ master التكيفي — الخيار المضمون الذي يشمل كل الجودات.
         if (master != null) {
             val max = renditions.maxOfOrNull { it.height } ?: 1080
-            callback(newExtractorLink(name, "${if (primary) "★ " else ""}$tag · جميع الجودات", master, ExtractorLinkType.M3U8) {
+            sink(newExtractorLink(name, "${if (primary) "★ " else ""}$tag · جميع الجودات", master, ExtractorLinkType.M3U8) {
                 this.quality = getQualityFromName("${max}p")
                 this.headers = headers()
             })
@@ -554,7 +561,7 @@ class DeepDramaProvider : MainAPI() {
         //    Rumble: واحد أو اثنان (قد يختلفان بالبت-ريت لا بالقياس) — نعرض كلًّا منها.
         renditions.forEachIndexed { idx, r ->
             val bw = if (r.bandwidth > 0) " · ${(r.bandwidth / 1000)}k" else ""
-            callback(newExtractorLink(name, "${if (primary) "★ " else ""}$tag ${r.height}p$bw", r.url, ExtractorLinkType.M3U8) {
+            sink(newExtractorLink(name, "${if (primary) "★ " else ""}$tag ${r.height}p$bw", r.url, ExtractorLinkType.M3U8) {
                 this.quality = getQualityFromName("${r.height}p")
                 this.headers = headers()
             })
@@ -565,7 +572,7 @@ class DeepDramaProvider : MainAPI() {
         //     chunklist دائمًا (رصد حي 2026-09-07). هذه جودة المتاح الفعلي.
         server.extraHls.forEach { x ->
             val label = if (x.height > 0) "${x.height}p" else (server.altLabel.ifBlank { "جودة" })
-            callback(newExtractorLink(name, "${if (primary) "★ " else ""}$tag · ${label} · chunklist", x.url, ExtractorLinkType.M3U8) {
+            sink(newExtractorLink(name, "${if (primary) "★ " else ""}$tag · ${label} · chunklist", x.url, ExtractorLinkType.M3U8) {
                 this.quality = getQualityFromName(x.height.takeIf { it > 0 }?.let { "${it}p" } ?: "480p")
                 this.headers = headers()
                 this.referer = "https://rumble.com/"
@@ -586,7 +593,7 @@ class DeepDramaProvider : MainAPI() {
             } else {
                 val q = Regex("""/(\d{3,4})p/""").find(mp4)?.groupValues?.get(1)
                     ?: if (mp4.contains("1080")) "1080" else if (mp4.contains("720")) "720" else "480"
-                callback(newExtractorLink(name, "$tag MP4", mp4, ExtractorLinkType.VIDEO) {
+                sink(newExtractorLink(name, "$tag MP4", mp4, ExtractorLinkType.VIDEO) {
                     this.quality = getQualityFromName("${q}p")
                     this.headers = headers()
                 })
@@ -598,13 +605,30 @@ class DeepDramaProvider : MainAPI() {
         // السيرفر بصفحة خطأ 403 تُعرض كرموز.
         server.subtitles.forEach { sub ->
             try {
-                subtitleCallback(
-                    newSubtitleFile(sub.label, sub.url) {
-                        this.headers = subHeaders(server.name)
-                    }
-                )
+                if (prefs?.getBoolean(DeepDramaSettingsBottomSheet.KEY_SHOW_SUBTITLES, true) != false) {
+                    subtitleCallback(
+                        newSubtitleFile(sub.label, sub.url) {
+                            this.headers = subHeaders(server.name)
+                        }
+                    )
+                }
             } catch (_: Exception) {}
         }
+
+        // ★ بثّ الروابط بعد اكتمالها: «افتراضي» = نفس الترتيب تماماً، و«تصاعدي/
+        // تنازلي» يعيدان ترتيبها فقط (فرز مستقر: المتساوية تحتفظ بترتيبها، ولا
+        // حذف ولا تكرار).
+        val order = when (prefs?.getString(DeepDramaSettingsBottomSheet.KEY_QUALITY_ORDER, "default")) {
+            "asc" -> "asc"
+            "desc" -> "desc"
+            else -> "default"
+        }
+        val sorted = when (order) {
+            "asc" -> collected.sortedBy { it.quality }
+            "desc" -> collected.sortedByDescending { it.quality }
+            else -> collected
+        }
+        sorted.forEach { callback(it) }
     }
 
     override suspend fun loadLinks(
@@ -649,7 +673,7 @@ class DeepDramaProvider : MainAPI() {
                     // فيبدأ الفيديو بسرعة ولا ينتظر المحاولتين معاً.
                     val anyPlayable = resolvedServer.hls != null || resolvedServer.renditions.isNotEmpty() ||
                         resolvedServer.directVideo != null || resolvedServer.extraHls.isNotEmpty()
-                    emitServer(resolvedServer, resolved.isEmpty() && anyPlayable, subtitleCallback, callback)
+                    emitServer(prefs, resolvedServer, resolved.isEmpty() && anyPlayable, subtitleCallback, callback)
                     if (anyPlayable) resolved.add(resolvedServer)
                 }
             }
@@ -663,7 +687,7 @@ class DeepDramaProvider : MainAPI() {
                 val first = serverUrls.firstOrNull()
                 if (first != null) {
                     val retry = if (first.contains("rumble")) resolveRumble(first) else if (first.contains("vidaraa")) resolveVidaraa(first) else resolveVoe(first)
-                    emitServer(retry, true, subtitleCallback, callback)
+                    if (retry != null) emitServer(prefs, retry, true, subtitleCallback, callback)
                 }
             }
             true
