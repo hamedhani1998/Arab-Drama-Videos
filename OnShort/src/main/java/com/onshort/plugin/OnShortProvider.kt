@@ -42,7 +42,7 @@ private val detailTicketRe = Regex("""data-player-ticket="([^"]+)"""")
  * - التذكرة تُجلب في الخلفية أثناء load() وتُحفظ، وتُستعاد عند التشغيل.
  */
 class OnShortProvider(private val prefs: SharedPreferences? = null) : MainAPI() {
-    override var name = "OnShort (عربي)"
+    override var name = "OnShort"
     override var mainUrl = ONS_MAIN
     override var lang = "ar"
     override val hasMainPage = true
@@ -61,8 +61,9 @@ class OnShortProvider(private val prefs: SharedPreferences? = null) : MainAPI() 
     // (يرجع "Provider is not handled by REST bridge" مثل NetShort/StoryReel/DramaBite/VibeShort) —
     // هذا قيدٌ من جهة السيرفر، وليس خطأً في الإضافة.
     // ترتيب: المنصات العاملة فعليًا عبر OnShort أولًا (10)، ثم المنصات الست المرفوضة
-    // من سيرفر OnShort نفسه (لا يمكن تشغيلها عبره) في نهاية القائمة، مع توجيهٍ
-    // إلى مزودها المستقل (NetShort/ShortTV مشغَّلة أصلًا في التطبيق).
+    // من سيرفر OnShort نفسه في نهاية القائمة. هذه — وإن لم تُشغَّل عبر OnShort — تُشتغل
+    // عبر جسر Mosalsaly (بحث تلقائي بالعنوان في mosalsaly.com ثم بثّ /api/episode-source)،
+    // قابل للإيقاف من إعدادات الوحدة.
     private val platformRows = listOf(
         "reelshort" to "أحدث مسلسلات ReelShort",
         "dramabox" to "أحدث مسلسلات DramaBox",
@@ -75,13 +76,13 @@ class OnShortProvider(private val prefs: SharedPreferences? = null) : MainAPI() 
         "shortswave" to "أحدث مسلسلات ShortsWave",
         "stardusttv" to "أحدث مسلسلات StardustTV",
         "dotdrama" to "أحدث مسلسلات DotDrama",
-        // ————— غير متاحة عبر OnShort (مرفوضة من سيربره) — تصل عبر مزود مستقل —————
-        "netshort" to "NetShort (مزود مستقل)",
-        "shortmax" to "ShortMax (مزود مستقل)",
-        "goodshort" to "GoodShort (غير متاح)",
-        "dramabite" to "DramaBite (غير متاح)",
-        "storyreel" to "StoryReel (غير متاح)",
-        "vibeshort-goodbos" to "VibeShort (غير متاح)",
+        // ————— غير متاحة عبر OnShort (مرفوضة من سيربره) — تُشتغل عبر جسر Mosalsaly —————
+        "netshort" to "NetShort (عبر Mosalsaly)",
+        "shortmax" to "ShortMax (عبر Mosalsaly)",
+        "goodshort" to "GoodShort (عبر Mosalsaly)",
+        "dramabite" to "DramaBite (عبر Mosalsaly)",
+        "storyreel" to "StoryReel (عبر Mosalsaly)",
+        "vibeshort-goodbos" to "VibeShort (عبر Mosalsaly)",
     )
 
     override val mainPage = mainPageOf(
@@ -121,13 +122,16 @@ class OnShortProvider(private val prefs: SharedPreferences? = null) : MainAPI() 
     }
 
     // ---------- بيانات مضمّنة في رابط البطاقة (لجعل load() فوريًا) ----------
-    // النموذج: {realUrl}?cs={id}|{total}|{title}|{poster}
-    private fun embedMeta(realUrl: String, id: String, total: Int, title: String, poster: String?): String {
+    // النموذج: {realUrl}?cs={id}|{total}|{title}|{poster}|{platform}
+    // platform = صف المنصة في OnShort (مثل storyreel/dramabite/... لصفحة ذكرها الرئيسية
+    // أو platform.slug من البحث) — يُمرَّر إلى loadLinks ليفعّل جسر Mosalsaly عند الحاجة.
+    private fun embedMeta(realUrl: String, id: String, total: Int, title: String, poster: String?, platform: String?): String {
         return "$realUrl?cs=${URLEncoder.encode(id, "UTF-8")}|${URLEncoder.encode(total.toString(), "UTF-8")}|" +
-            "${URLEncoder.encode(title, "UTF-8")}|${URLEncoder.encode(poster ?: "", "UTF-8")}"
+            "${URLEncoder.encode(title, "UTF-8")}|${URLEncoder.encode(poster ?: "", "UTF-8")}|" +
+            "${URLEncoder.encode(platform ?: "", "UTF-8")}"
     }
 
-    private data class Meta(val id: String, val total: Int, val title: String, val poster: String?)
+    private data class Meta(val id: String, val total: Int, val title: String, val poster: String?, val platform: String?)
 
     private fun parseMeta(url: String): Meta? {
         val i = url.indexOf("?cs=")
@@ -138,7 +142,8 @@ class OnShortProvider(private val prefs: SharedPreferences? = null) : MainAPI() 
         val total = URLDecoder.decode(raw[1], "UTF-8").toIntOrNull() ?: 1
         val title = if (raw.size > 2) URLDecoder.decode(raw[2], "UTF-8") else ""
         val poster = if (raw.size > 3 && raw[3].isNotEmpty()) URLDecoder.decode(raw[3], "UTF-8") else null
-        return Meta(id, total, title, poster)
+        val platform = if (raw.size > 4 && raw[4].isNotEmpty()) URLDecoder.decode(raw[4], "UTF-8") else null
+        return Meta(id, total, title, poster, platform)
     }
 
     private fun stripMeta(url: String): String {
@@ -159,7 +164,7 @@ class OnShortProvider(private val prefs: SharedPreferences? = null) : MainAPI() 
     private fun detailUrl(postId: String): String = "https://onshort.net/?p=$postId"
 
     // ---------- الصفحة الرئيسية / العرض ----------
-    private fun parseListingHtml(html: String, seen: MutableSet<String>): List<SearchResponse> {
+    private fun parseListingHtml(html: String, seen: MutableSet<String>, platform: String): List<SearchResponse> {
         val out = mutableListOf<SearchResponse>()
         for (m in cardRe.findAll(html)) {
             val id = m.groupValues[1]
@@ -169,7 +174,7 @@ class OnShortProvider(private val prefs: SharedPreferences? = null) : MainAPI() 
             val total = m.groupValues[5].toIntOrNull() ?: 1
             val safeTitle = title.replace(Regex("""\s+"""), " ").trim()
             if (safeTitle.isBlank() || !seen.add(url)) continue
-            val metaUrl = embedMeta(url, id, total, safeTitle, poster)
+            val metaUrl = embedMeta(url, id, total, safeTitle, poster, platform)
             out.add(newTvSeriesSearchResponse(safeTitle, metaUrl, TvType.TvSeries) {
                 this.posterUrl = poster
             })
@@ -185,7 +190,7 @@ class OnShortProvider(private val prefs: SharedPreferences? = null) : MainAPI() 
             val url = if (p == 1) "$ONS_MAIN/platform/$slug/"
                 else "$ONS_MAIN/platform/$slug/page/$p/"
             val resp = getWithRetry(url, mainUrl, headers()) ?: return null
-            val items = parseListingHtml(resp, java.util.HashSet())
+            val items = parseListingHtml(resp, java.util.HashSet(), slug)
             if (items.isEmpty()) null
             else newHomePageResponse(request.name, items)
         } catch (e: Exception) { null }
@@ -216,8 +221,10 @@ class OnShortProvider(private val prefs: SharedPreferences? = null) : MainAPI() 
                 val poster = it.get("cover")?.asText()
                 val id = it.get("id")?.asText() ?: continue
                 val total = it.get("total")?.asInt() ?: 1
+                // أيضًا نمرر platform.slug (الكائن في البحث) — يفيد الجسر عندما تفشل منصة
+                val platform = it.get("platform")?.get("slug")?.asText()?.takeIf { p -> p.isNotBlank() }
                 if (!seen.add(url)) continue
-                val metaUrl = embedMeta(url, id, total, title, poster)
+                val metaUrl = embedMeta(url, id, total, title, poster, platform)
                 out.add(newTvSeriesSearchResponse(title, metaUrl, TvType.TvSeries) {
                     this.posterUrl = poster
                     if (total > 1) this.episodes = total
@@ -253,7 +260,7 @@ class OnShortProvider(private val prefs: SharedPreferences? = null) : MainAPI() 
                 // (عبر bootstrap API السريع — أسرع من صفحة ?p= البطيئة)
                 val cleanId = extractPostId(meta.id)
                 bootstrapTicketViaApi(cleanId)
-                return buildEpisodes(cleanId, meta.total, meta.title, meta.poster, stripMeta(url))
+                return buildEpisodes(cleanId, meta.total, meta.title, meta.poster, stripMeta(url), meta.platform)
             }
 
             // احتياطي: رابط بدون بيانات (روابط قديمة/مشاركة) — نجلب صفحة التفاصيل
@@ -264,21 +271,27 @@ class OnShortProvider(private val prefs: SharedPreferences? = null) : MainAPI() 
             if (ticket != null) cached = PlayCache(postId, ticket)
             val total = Regex("""(?:total"|Episodes")\s*:\s*(\d{1,5})""")
                 .find(res)?.groupValues?.get(1)?.toIntOrNull() ?: 1
-            buildEpisodes(postId, total, extractTitle(res, stripMeta(url)), extractPoster(res), stripMeta(url))
+            // الاستخراج الاحتياطي لا يُمرّر platform (غير متاح من صفحة ?p= سهلًا) —
+            // الجسر سيشتغل من البحث بالعنوان فقط عندها
+            buildEpisodes(postId, total, extractTitle(res, stripMeta(url)), extractPoster(res), stripMeta(url), null)
         } catch (e: Exception) { null }
     }
 
-    // data الحلقة = "postId|رقم" (صيغة قياسية لا تتلف في التطبيق)
+    // data الحلقة = "postId|رقم|[platform]|[EncodedTitle]" — الصيغة القياسية لا تتلف في
+    // التطبيق، والجزءان الأخيران (اختياريان) يغذّيان جسر Mosalsaly في loadLinks.
     private suspend fun buildEpisodes(
         postId: String,
         total: Int,
         title: String,
         poster: String?,
-        url: String
+        url: String,
+        platform: String? = null
     ): LoadResponse {
         val eps = mutableListOf<Episode>()
+        val encTitle = URLEncoder.encode(title, "UTF-8")
         for (n in 1..maxOf(total, 1)) {
-            eps.add(newEpisode("$postId|$n") {
+            val data = if (platform.isNullOrBlank()) "$postId|$n" else "$postId|$n|$platform|$encTitle"
+            eps.add(newEpisode(data) {
                 this.episode = n
                 this.name = "الحلقة $n"
             })
@@ -441,10 +454,15 @@ class OnShortProvider(private val prefs: SharedPreferences? = null) : MainAPI() 
             val collected = mutableListOf<ExtractorLink>()
             logD("OnShort.loadLinks data='$data'")
             val parts = data.split("|")
-            if (parts.size != 2) { logD("OnShort.loadLinks bad data size=${parts.size}"); return false }
+            if (parts.size < 2) { logD("OnShort.loadLinks bad data size=${parts.size}"); return false }
             // postId قد يصل رابطًا كاملًا (…/186910) من روابط قديمة/مشاركة — نطبّعه إلى الرقم
             val postId = extractPostId(parts[0])
             val ep = parts[1].toIntOrNull() ?: return false
+            // الجزءان الاختياريان (يأتيان من buildEpisodes على template الحديث):
+            // |platform|EncodedTitle — يغذّيان جسر Mosalsaly عندما يرفض OnShort المنصة.
+            val platform = if (parts.size > 2) URLDecoder.decode(parts[2], "UTF-8") else ""
+            val title = if (parts.size > 3 && parts[3].isNotBlank()) URLDecoder.decode(parts[3], "UTF-8") else ""
+            logD("OnShort.loadLinks platform='$platform' title='$title'")
 
             // التذكرة: إن كانت محفوظة نستخدمها، وإلا نبدأ بدون تذكرة —
             // fetchEpisode يبني التذكرة بنفسه من استجابة التشغيل (بدون صفحة ?p= البطيئة)
@@ -468,13 +486,28 @@ class OnShortProvider(private val prefs: SharedPreferences? = null) : MainAPI() 
             logD("OnShort.loadLinks after prefetch-wait cached=${cachedTicket2?.isNotBlank() == true}")
             val effectiveTicket = cachedTicket2 ?: cachedTicket
 
-            val node = fetchEpisode(postId, ep, effectiveTicket) ?: run {
-                logD("OnShort.loadLinks fetchEpisode null -> false")
-                return false
-            }
+            val node = fetchEpisode(postId, ep, effectiveTicket)
 
-            if (node.has("error") || node.get("ok")?.asBoolean(false) == false) {
-                logD("OnShort.loadLinks ok=false -> false (${rejectReason(node)})")
+            // جسر Mosalsaly: حين يرفض سيرفر OnShort المنصة نهائيًا — أو تفشل كل محاولات
+            // OnShort — نعتمد على Mosalsaly (نفس المحتوى على الأغلب) عبر البحث بالعنوان.
+            // لا نقيّد على المنصة: بحث العنوان + منصة صفحة Mosalsaly يحدّدان النجاح
+            // تلقائيًا (العمل قد يكون منشورًا على منصة مختلفة عند Mosalsaly).
+            if (node == null || !(node.get("ok")?.asBoolean() ?: true)) {
+                val reason = if (node == null) "null" else rejectReason(node)
+                val bridgeEnabled = prefs?.getBoolean(OnShortSettingsBottomSheet.KEY_BRIDGE_ENABLED, true) ?: true
+                logD("OnShort.loadLinks OnShort failed (reason='$reason') bridge=$bridgeEnabled titleLen=${title.length}")
+                if (bridgeEnabled && title.isNotBlank()) {
+                    val bridge = OnShortMosalsalyBridge(prefs)
+                    val bridged = bridge.playViaMosalsaly(data, title, platform, subtitleCallback) { link -> collected.add(link) }
+                    if (bridged) {
+                        emitSorted(prefs, collected, callback)
+                        return true
+                    }
+                    logD("OnShort.loadLinks Mosalsaly bridge did not produce links")
+                }
+                // لا جسر (معطّل) أو لم يجد نصًا — أبلغ بالسبب ونُرجع false
+                if (node == null) logD("OnShort.loadLinks fetchEpisode null -> false")
+                else logD("OnShort.loadLinks ok=false -> false (${reason})")
                 return false
             }
 
@@ -819,7 +852,7 @@ class OnShortProvider(private val prefs: SharedPreferences? = null) : MainAPI() 
         val msg = node?.get("message")?.asText() ?: return ""
         return when {
             msg.contains("REST bridge") || msg.contains("not handled") ->
-                "هذه المنصة مرفوضة من خادم OnShort نفسه. متاحة عبر مزودها المستقل من التطبيق (NetShort / ShortTV / ReelShort)."
+                "هذه المنصة مرفوضة من خادم OnShort نفسه — يعتمد التشغيل على جسر Mosalsaly (بحث تلقائي بالعنوان)."
             msg.contains("session expired") -> "انتهت جلسة التذكرة — حاول مرة أخرى"
             msg.contains("flextv") && msg.contains("ALL-EPISODES") && msg.contains("failed") ->
                 "مصدر FlexTV معطّل من جهة OnShort حاليًا (فشل جلب الحلقات كاملة) — جرّب منصة أخرى."

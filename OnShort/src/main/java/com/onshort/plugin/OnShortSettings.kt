@@ -69,6 +69,7 @@ class OnShortSettingsBottomSheet(private val prefs: SharedPreferences) : BottomS
         const val KEY_QUALITY_ORDER = "os_quality_order"    // "default" | "asc" | "desc"
         const val KEY_SHOW_AUTO = "os_show_auto"           // Boolean — الافتراضي true
         const val KEY_MIN_HEIGHT = "os_min_height"         // "all" | "480" | "360"
+        const val KEY_BRIDGE_ENABLED = "os_bridge_enabled"  // Boolean — جسر Mosalsaly، الافتراضي true
 
         fun show(fm: FragmentManager, prefs: SharedPreferences) {
             OnShortSettingsBottomSheet(prefs).show(fm, "os_settings")
@@ -138,6 +139,17 @@ class OnShortSettingsBottomSheet(private val prefs: SharedPreferences) : BottomS
             }
             playbackCategory.addPreference(minHeightPref)
 
+            // جسر Mosalsaly: عند رفض سيرفر OnShort تشغيل منصة نهائيًا
+            // (NetShort/ShortMax/GoodShort/DramaBite/StoryReel/VibeShort) يبحث
+            // جسرٌ تلقائي بالعنوان في mosalsaly.com ليوفّر روابط التشغيل.
+            val bridgePref = SwitchPreferenceCompat(ctx).apply {
+                key = KEY_BRIDGE_ENABLED
+                title = "جسر تشغيل Mosalsaly"
+                summary = "تشغيل المنصات المرفوضة من OnShort عبر Mosalsaly (بحث بالعنوان)"
+                setDefaultValue(true)
+            }
+            playbackCategory.addPreference(bridgePref)
+
             val resetPref = Preference(ctx).apply {
                 key = "os_reset_prefs"
                 title = "إعادة الضبط الافتراضي"
@@ -147,6 +159,7 @@ class OnShortSettingsBottomSheet(private val prefs: SharedPreferences) : BottomS
                         remove(KEY_QUALITY_ORDER)
                         remove(KEY_SHOW_AUTO)
                         remove(KEY_MIN_HEIGHT)
+                        remove(KEY_BRIDGE_ENABLED)
                     }.apply()
                     Toast.makeText(ctx, "تمت إعادة الضبط", Toast.LENGTH_SHORT).show()
                     true
