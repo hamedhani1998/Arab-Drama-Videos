@@ -9,6 +9,7 @@ replay_pid*.log
 
 # Provider-level build output (Gradle caches) — but NOT root build/ (holds .cs3 files)
 OnShort/build/
+ArabShortDrama/build/
 NetShort/build/
 ReelShort/build/
 DeepDrama/build/
