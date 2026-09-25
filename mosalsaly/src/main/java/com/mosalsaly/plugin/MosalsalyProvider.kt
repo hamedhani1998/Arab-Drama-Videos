@@ -114,6 +114,12 @@ private val PLATFORMS = listOf(
     "storyreel" to "StoryReel",
 )
 
+// خريطة اسم العرض -> slug المنصة (لصفحات RSC التي تُحمَّل المصدر lazily عبر <template>
+// فلا يظهر صف «المصدر» inline، بل يتجسّد في جملة الوصف "ومصدره منصة KalosTV").
+private val PLATFORM_BY_DISPLAY: Map<String, String> by lazy {
+    PLATFORMS.associateBy({ it.second }, { it.first })
+}
+
 // أقسام إضافية من /tasnif/ (التصنيفات) — تُعرض أولاً في الواجهة الرئيسية
 private val EXTRA_SECTIONS = listOf(
     "populer" to "⭐ الأكثر شعبية",
@@ -282,9 +288,17 @@ class MosalsalyProvider(
     private fun extractPlatform(html: String): String? {
         // سطر المصدر في التفاصيل: <dt>المصدر</dt><dd><a href="/masdar/<p>">
         // «المصدر» يظهر أولاً في القوائم/الإشعارات أيضاً؛ نطابق التواجد الذي يليه
-        // رابط /masdar/ خلال 500 حرف — هذا هو صف المصدر الفعلي (مهرّب أو عادي)
-        return Regex("""المصدر.{0,500}?/masdar/([a-z]+)""")
+        // رابط /masdar/ خلال 500 حرف — هذا هو صف المصدر الفعلي (مهرّب أو عادي).
+        // بعض المسلسلات (مثل «عودة الوريثة الصغير») تُنشر بصفحة RSC تحمّل صف المصدر
+        // lazily عبر <template id="P:..."> فلا يظهر /masdar/ أبداً inline. مصدرها الحقيقي
+        // يتجسّد في جملة الوصف "مصدره منصة KalosTV". الاحتياط: إن فشل النمط القديم،
+        // نقرأ اسم المنصة من الوصف ونطابقه في خريطة display->slug.
+        Regex("""المصدر.{0,500}?/masdar/([a-z]+)""")
             .find(html)?.groupValues?.get(1)?.lowercase()
+            ?.let { return it }
+        return Regex("""ومصدره منصة\s+([A-Za-z][A-Za-z0-9]*)""")
+            .find(html)?.groupValues?.get(1)
+            ?.let { PLATFORM_BY_DISPLAY[it] }
     }
 
     override suspend fun load(url: String): LoadResponse? {
