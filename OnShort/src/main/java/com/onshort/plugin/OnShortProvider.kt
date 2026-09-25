@@ -316,21 +316,26 @@ class OnShortProvider(private val prefs: SharedPreferences? = null) : MainAPI() 
                     compareByDescending<SearchRaw> { normalizeSearchTitle(it.title) == normTarget }
                         .thenByDescending { (it.platform ?: "").lowercase() in setOf("dramabox", "reelshort", "dotdrama", "stardusttv", "moborels") }
                 )
-            var tried = 0
-            for (cand in ranked) {
-                if (tried >= 4) break
-                tried++
-                logD("OnShort.playViaCrossPost try cand id=${cand.id} platform=${cand.platform} title='${cand.title}'")
-                val node = fetchEpisode(cand.id, ep, null)
-                if (node != null && (node.get("ok")?.asBoolean() ?: true)) {
-                    val main = node.get("url")?.asText()
-                    if (main.isNullOrBlank()) continue
+            // تحسين السرعة: إن لم يوجد أي منشور بديل على منصة قابلة للتشغيل، نرجع مبكرًا
+            // بلا أي fetchEpisode (التبديل إلى Mosalsaly مباشرة). لا نضيّع شبكة عبثًا.
+            if (ranked.isEmpty()) {
+                logD("OnShort.playViaCrossPost no playable-primary alternate")
+                return false
+            }
+            // نجرّب المرشح الأعلى ترتيبًا فقط — لا نكرّر 4 محاولات (كل fetchEpisode
+            // رحلات شبكة باهظة). إن فشل، ينتقل المتصل إلى الجسر التالي (Mosalsaly).
+            val cand = ranked.first()
+            logD("OnShort.playViaCrossPost try top cand id=${cand.id} platform=${cand.platform} title='${cand.title}'")
+            val node = fetchEpisode(cand.id, ep, null)
+            if (node != null && (node.get("ok")?.asBoolean() ?: true)) {
+                val main = node.get("url")?.asText()
+                if (!main.isNullOrBlank()) {
                     emitNode(node, "OnShort · عبر النشر المزدوج", collected, subtitleCallback)
                     logD("OnShort.playViaCrossPost SUCCESS via post ${cand.id} platform=${cand.platform}")
                     return true
                 }
             }
-            logD("OnShort.playViaCrossPost no playable alternate")
+            logD("OnShort.playViaCrossPost top candidate not playable")
             false
         } catch (e: Exception) {
             logE("OnShort.playViaCrossPost exception ${e.message}")
@@ -712,30 +717,36 @@ class OnShortProvider(private val prefs: SharedPreferences? = null) : MainAPI() 
             val node = fetchEpisode(postId, ep, effectiveTicket)
 
             // سلسلة الجسور لكل مصدر: حين يرفض سيرفر OnShort تشغيل المنشور الحالي
-            // (أو يفشل مؤقتًا) نجرّب جسرَي تشغيل بالترتيب — جسر إعادة البحث ثم جسر
+            // (أو يفشل مؤقتًا) نجرّب الجسور المفعّلة بالترتيب — جسر إعادة البحث ثم جسر
             // Mosalsaly — وأول مصدر يُصدر رابطًا حيًا يربح. العمل نفسه قد يكون منشورًا
             // على منصة أخرى قابلة للتشغيل عند OnShort (cross-post) أو على mosalsaly.com
             // (بحث بالعنوان)؛ لا نقيّد على المنصة — بحث العنوان يحدد النجاح تلقائيًا.
             if (node == null || !(node.get("ok")?.asBoolean() ?: true)) {
                 val reason = if (node == null) "null" else rejectReason(node)
                 val bridgeEnabled = prefs?.getBoolean(OnShortSettingsBottomSheet.KEY_BRIDGE_ENABLED, true) ?: true
-                logD("OnShort.loadLinks OnShort failed (reason='$reason') bridge=$bridgeEnabled titleLen=${title.length}")
+                val crossEnabled = prefs?.getBoolean(OnShortSettingsBottomSheet.KEY_CROSSPOST_ENABLED, true) ?: true
+                val mosEnabled = prefs?.getBoolean(OnShortSettingsBottomSheet.KEY_MOSALSALY_ENABLED, true) ?: true
+                logD("OnShort.loadLinks OnShort failed (reason='$reason') bridge=$bridgeEnabled cross=$crossEnabled mos=$mosEnabled titleLen=${title.length}")
                 if (bridgeEnabled && title.isNotBlank()) {
-                    // 1) جسر إعادة البحث: منشور بديل على منصة قابلة للتشغيل
-                    val cross = playViaCrossPost(title, ep, platform, postId, collected, subtitleCallback)
-                    if (cross) {
-                        emitSorted(prefs, collected, callback)
-                        return true
+                    // 1) جسر إعادة البحث: منشور بديل على منصة قابلة للتشغيل (إن كان مفعّلًا)
+                    if (crossEnabled) {
+                        val cross = playViaCrossPost(title, ep, platform, postId, collected, subtitleCallback)
+                        if (cross) {
+                            emitSorted(prefs, collected, callback)
+                            return true
+                        }
+                        logD("OnShort.loadLinks cross-post bridge did not produce links")
                     }
-                    logD("OnShort.loadLinks cross-post bridge did not produce links")
-                    // 2) جسر Mosalsaly: بحث العنوان في mosalsaly.com
-                    val bridge = OnShortMosalsalyBridge(prefs)
-                    val bridged = bridge.playViaMosalsaly(data, title, platform, subtitleCallback) { link -> collected.add(link) }
-                    if (bridged) {
-                        emitSorted(prefs, collected, callback)
-                        return true
+                    // 2) جسر Mosalsaly: بحث العنوان في mosalsaly.com (إن كان مفعّلًا)
+                    if (mosEnabled) {
+                        val bridge = OnShortMosalsalyBridge(prefs)
+                        val bridged = bridge.playViaMosalsaly(data, title, platform, subtitleCallback) { link -> collected.add(link) }
+                        if (bridged) {
+                            emitSorted(prefs, collected, callback)
+                            return true
+                        }
+                        logD("OnShort.loadLinks Mosalsaly bridge did not produce links")
                     }
-                    logD("OnShort.loadLinks Mosalsaly bridge did not produce links")
                 }
                 // لا جسر (معطّل) أو لم يجد نصًا — أبلغ بالسبب ونُرجع false
                 if (node == null) logD("OnShort.loadLinks fetchEpisode null -> false")

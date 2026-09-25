@@ -69,7 +69,9 @@ class OnShortSettingsBottomSheet(private val prefs: SharedPreferences) : BottomS
         const val KEY_QUALITY_ORDER = "os_quality_order"    // "default" | "asc" | "desc"
         const val KEY_SHOW_AUTO = "os_show_auto"           // Boolean — الافتراضي true
         const val KEY_MIN_HEIGHT = "os_min_height"         // "all" | "480" | "360"
-        const val KEY_BRIDGE_ENABLED = "os_bridge_enabled"  // Boolean — جسر Mosalsaly، الافتراضي true
+        const val KEY_BRIDGE_ENABLED = "os_bridge_enabled"        // Boolean — مفتاح سيد لكل الجسور، الافتراضي true
+        const val KEY_CROSSPOST_ENABLED = "os_crosspost_enabled"  // Boolean — جسر إعادة البحث، الافتراضي true
+        const val KEY_MOSALSALY_ENABLED = "os_mosalsaly_enabled"  // Boolean — جسر Mosalsaly، الافتراضي true
 
         fun show(fm: FragmentManager, prefs: SharedPreferences) {
             OnShortSettingsBottomSheet(prefs).show(fm, "os_settings")
@@ -140,15 +142,35 @@ class OnShortSettingsBottomSheet(private val prefs: SharedPreferences) : BottomS
             playbackCategory.addPreference(minHeightPref)
 
             // جسور التشغيل: عند رفض سيرفر OnShort تشغيل منصة نهائيًا — أو فشل مؤقت —
-            // نجرّب جسرين بالترتيب: إعادة البحث (منشور بديل على منصة قابلة للتشغيل ضمن
-            // OnShort) ثم Mosalsaly (بحث العنوان). المفتاح الرئيسي يفعّل/يعطّل السلسلة كلها.
+            // نجرّب جسرًا واحدًا أو أكثر بالترتيب: جسر «إعادة البحث» (منشور بديل على
+            // منصة قابلة للتشغيل ضمن OnShort نفسه) وجسر Mosalsaly (بحث العنوان).
+            // المفتاح الرئيسي أدناه يفعّل/يعطّل السلسلة كلها؛ والمفتاحان المستقلان يسمحان
+            // باختيار أي جسر يعمل (كلاهما افتراضي مفعّل).
             val bridgePref = SwitchPreferenceCompat(ctx).apply {
                 key = KEY_BRIDGE_ENABLED
                 title = "جسور تشغيل بديلة"
-                summary = "عند فشل التشغيل: إعادة البحث + Mosalsaly (بحث بالعنوان)"
+                summary = "عند فشل التشغيل تنتقل للجسور (إعادة البحث و/أو Mosalsaly)"
                 setDefaultValue(true)
             }
             playbackCategory.addPreference(bridgePref)
+
+            // جسر إعادة البحث (cross-post) — منشور بديل على منصة قابلة للتشغيل.
+            val crossPref = SwitchPreferenceCompat(ctx).apply {
+                key = KEY_CROSSPOST_ENABLED
+                title = "إعادة البحث (النشر المزدوج)"
+                summary = "يبحث عن نفس العنوان على منصة أخرى قابلة للتشغيل في OnShort"
+                setDefaultValue(true)
+            }
+            playbackCategory.addPreference(crossPref)
+
+            // جسر Mosalsaly — بحث العنوان في mosalsaly.com (الموقع الخارجي).
+            val mosPref = SwitchPreferenceCompat(ctx).apply {
+                key = KEY_MOSALSALY_ENABLED
+                title = "بحث Mosalsaly"
+                summary = "يبحث عن نفس العنوان في mosalsaly.com (بديل خارجي)"
+                setDefaultValue(true)
+            }
+            playbackCategory.addPreference(mosPref)
 
             val resetPref = Preference(ctx).apply {
                 key = "os_reset_prefs"
@@ -160,6 +182,8 @@ class OnShortSettingsBottomSheet(private val prefs: SharedPreferences) : BottomS
                         remove(KEY_SHOW_AUTO)
                         remove(KEY_MIN_HEIGHT)
                         remove(KEY_BRIDGE_ENABLED)
+                        remove(KEY_CROSSPOST_ENABLED)
+                        remove(KEY_MOSALSALY_ENABLED)
                     }.apply()
                     Toast.makeText(ctx, "تمت إعادة الضبط", Toast.LENGTH_SHORT).show()
                     true
