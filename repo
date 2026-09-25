@@ -1,8 +1,7 @@
 {
-  "name": "Arab Drama Videos",
-  "description": "مشاهدة الافلام والمسلسلات العربية والتركية",
+  "name": "عربي دراما",
+  "description": "مشاهدة الافلام والمسلسلات العربية والتركية تجربة خالية من الاعلانات",
+  "iconUrl": "https://raw.githubusercontent.com/hamedhani1998/Arab-Drama-Videos/refs/heads/main/icon.png",
   "manifestVersion": 1,
-  "pluginLists": [
-    "https://raw.githubusercontent.com/hamedhani1998/Arab-Drama-Videos/refs/heads/builds/plugins.json"
-  ]
+  "pluginLists": ["https://raw.githubusercontent.com/hamedhani1998/Arab-Drama-Videos/refs/heads/builds/plugins.json"]
 }
