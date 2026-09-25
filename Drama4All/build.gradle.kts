@@ -1,4 +1,4 @@
-version = 4
+version = 1
 
 cloudstream {
     description = "دراما للجميع - مسلسلات وأفلام مترجمة"

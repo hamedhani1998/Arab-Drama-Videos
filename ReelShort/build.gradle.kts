@@ -1,4 +1,4 @@
-version = 2
+version = 1
 
 cloudstream {
     description = "ReelShort - مسلسلات دراما قصيرة عمودية"

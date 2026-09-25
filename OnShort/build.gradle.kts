@@ -1,4 +1,4 @@
-version = 26
+version = 1
 
 cloudstream {
     description = "OnShort - مسلسلات دراما قصيرة (عربي/إنجليزي)"

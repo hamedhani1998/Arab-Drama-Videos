@@ -1,4 +1,4 @@
-version = 16
+version = 1
 
 cloudstream {
     description = "Deep Drama - مسلسلات دراما عربية مترجمة"

@@ -1,4 +1,4 @@
-version = 48
+version = 1
 
 cloudstream {
     description = "Narto Drama - مسلسلات دراما مترجمة"
