@@ -60,6 +60,22 @@ private fun cleanDecryptedUrl(u: String?): String? {
 // netshort يتأثر: sub auth يجلس أياماً قديماً بينما auth الفيديو طازج → الترجمة 403)،
 // نستبدل auth الترجمة بـ auth الفيديو الأساسي الطازج — auth_key على هذه الأقراص عام لكل
 // المسارات على نفس المضيف (تحقق: sub path + video auth → 200 WEBVTT).
+// يعيد الرابط عبر بروكسي موقع المرجع الأصلي (dizi1.dramadizilerim.com/) — نفس النمط
+// الذي يستخدمه mosalsaly لمشاهديه. النتائج (2026-09-25):
+//   - WebVTT للترجمة: 200 text/vtt حتى لـ auth منتهٍ.
+//   - mp4 للفيديو: 206/200 video/mp4 مع Accept-Ranges (Range محفوظ → السيك ينجح).
+// مطلوب لأن جلب اللاعب المباشر لـ ns-aws-cdn (CronetDataSource HTTP/2) يتلقّى
+// 403 على نفس الرابط الذي يرد 200 عبر HTTP/1.1 (urllib) — على الفيديو نفسه لا
+// الترجمة فقط. التوجيه عبر dizi1 يطابق الموقع ويمرّر الفيديو والترجمة معاً.
+private val DIZI1 = "https://dizi1.dramadizilerim.com/?url="
+private fun wrapDizi1(rawUrl: String): String =
+    DIZI1 + java.net.URLEncoder.encode(rawUrl, "UTF-8").replace("+", "%20")
+
+// هل المنصة تستخدم الجلب المباشر (لا مطلوب منه dizi1)؟ netshort فقط يحتاج التوجيه
+// لأن أقراص ns-aws-cdn ترفض جلب Cronet. البقية (بما فيها m3u8) تبقى مباشرة.
+private fun needsDizi1(platform: String, kind: ExtractorLinkType, url: String): Boolean =
+    platform == "netshort" && kind == ExtractorLinkType.VIDEO && !url.contains("dizi1")
+
 private fun refreshSubtitleAuth(subUrl: String, videoUrl: String?): String {
     if (videoUrl.isNullOrBlank()) return subUrl
     val subHost = Regex("https://([^/]+)").find(subUrl)?.groupValues?.get(1) ?: return subUrl
@@ -481,7 +497,8 @@ class MosalsalyProvider(
                     if (lnk.q.isNotBlank() && lnk.q != lnk.url) append(" · ${lnk.q}")
                 }
             }
-            collected.add(newExtractorLink(name, label, lnk.url, lnk.kind) {
+            val emitUrl = if (needsDizi1(platform, lnk.kind, lnk.url)) wrapDizi1(lnk.url) else lnk.url
+            collected.add(newExtractorLink(name, label, emitUrl, lnk.kind) {
                 this.headers = mapOf("User-Agent" to MOS_UA, "Referer" to mainUrl)
                 // شغّل حقل referer نفسه (وليس فقط headers) — CronetDataSource يبني الطلب
                 // من ExtractorLink.referer وليس headers، وCDNs (مثل netshort) ترفض 403
@@ -543,10 +560,8 @@ class MosalsalyProvider(
                     // تمرير الترجمة عبر dizi1.dramadizilerim.com/?url=<encoded> — البروكسي
                     // المركزي الذي يستخدمه mosalsaly لمشاهديه، ويعيد WebVTT كاملاً حتى لترجمة
                     // منتهية (تحقق: 200 text/vtt). لا يمس الفيديو إطلاقاً.
-                    val viaProxy = subUrlActive.contains("netshort.com")
-                    if (viaProxy) {
-                        val enc = java.net.URLEncoder.encode(subUrlActive, "UTF-8").replace("+", "%20")
-                        subUrlFixed = "https://dizi1.dramadizilerim.com/?url=$enc"
+                    if (subUrlActive.contains("netshort.com")) {
+                        subUrlFixed = wrapDizi1(subUrlActive)
                         Log.i(TAG, "netshort sub via dizi1 proxy")
                     }
                     subtitleCallback(newSubtitleFile(lang, subUrlFixed) {
