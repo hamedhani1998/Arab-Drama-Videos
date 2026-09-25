@@ -31,6 +31,8 @@ object MosSubServer {
         SUBTITLE("vtt", "text/vtt; charset=utf-8"),
     }
 
+    private const val DIZI1 = "https://dizi1.dramadizilerim.com/?url="
+
     private data class Job(
         val url: String,
         val headers: Map<String, String>,
@@ -112,35 +114,60 @@ object MosSubServer {
                 var upstream: Established? = null
                 var code = 502
                 var msg = "Bad Gateway"
-                try {
-                    val conn = URL(job.url).openConnection() as HttpURLConnection
-                    conn.requestMethod = "GET"
-                    conn.connectTimeout = 20000
-                    conn.readTimeout = 60000
-                    conn.instanceFollowRedirects = true
-                    conn.setRequestProperty("User-Agent", job.headers["User-Agent"]
-                        ?: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
-                    conn.setRequestProperty("Referer", job.headers["Referer"] ?: "https://mosalsaly.com/")
-                    conn.setRequestProperty("Accept", "*/*")
-                    if (range.isNotEmpty()) conn.setRequestProperty("Range", range)
-                    val rc = conn.responseCode
-                    val cLen = runCatching { conn.contentLengthLong }.getOrDefault(-1L)
-                    val cType = conn.contentType
-                    val cRange = conn.getHeaderField("Content-Range")
-                    val aRanges = conn.getHeaderField("Accept-Ranges")
-                    val isRange = rc == 206
-                    if (rc in 200..299) {
-                        code = if (isRange) 206 else 200
-                        msg = if (isRange) "Partial Content" else "OK"
-                        upstream = Established(conn.inputStream, cLen, cType, cRange, aRanges)
-                    } else {
-                        Log.w(TAG, "proxy fetch $rc for ${job.url.take(80)}")
+
+                // للمصدر المباشر (ns-aws): بعض الروابط تُرجع 403 من الجهاز حتى عبر HTTP/1.1
+                // رغم أن auth طازج وأن الخادم يعطي 200 (معضلة v19/الجهاز). الاحتياط: جرّب dizi1
+                // (بروكسي الموقع المركزي الذي يعطي 200 عبر HTTP/1.1) كمسار ثانٍ. محصور للترجمة
+                // (والفيديو 403 الناتج عن br قديم يُستبعد أصلاً في الإضافة قبل الوصول هنا).
+                val attempted = mutableListOf<String>()
+                // الإستراتيجية: جرّب المصدر المباشر (ns-aws) أولاً — إن نجح فهو الأفضل (لا طبقة وسيطة).
+                // عند الفشل (403/timeout من الجهاز عبر HTTP/1.1 رغم أن الخادم يرد 200)، نجرّب dizi1
+                // (بروكسي الموقع المركزي الذي يرد 200/206 عبر HTTP/1.1). ينطبق على الفيديو والترجمة
+                // netshort معاً؛ باقي المنصات لا تصل إلى هنا أصلاً (routeVideo netshort فقط).
+                val proxy = DIZI1 + java.net.URLEncoder.encode(job.url, "UTF-8").replace("+", "%20")
+                val attempts = listOf(job.url, proxy)
+
+                for (target in attempts) {
+                    if (upstream != null) break
+                    attempted.add(target.take(60))
+                    try {
+                        val conn = URL(target).openConnection() as HttpURLConnection
+                        conn.requestMethod = "GET"
+                        conn.connectTimeout = 20000
+                        conn.readTimeout = 60000
+                        conn.instanceFollowRedirects = true
+                        conn.setRequestProperty("User-Agent", job.headers["User-Agent"]
+                            ?: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+                        conn.setRequestProperty("Referer", job.headers["Referer"] ?: "https://mosalsaly.com/")
+                        conn.setRequestProperty("Accept", if (job.kind == Kind.SUBTITLE) "text/vtt, */*" else "*/*")
+                        // الترجمة: نرسل دائماً Range صغيراً (bytes=0-...) — ns-aws يعيد 403 أحياناً
+                        // لطلب GET كامل من هذا الـ IP/التوقيع رغم نجاح نفس الرابط مع Range-محدود
+                        // (v19: كل التركيبات 200 من الخادم، لكن من الجهاز MosSubServer فشل بلا Range).
+                        if (job.kind == Kind.SUBTITLE && range.isEmpty()) {
+                            conn.setRequestProperty("Range", "bytes=0-1048575")
+                        } else if (range.isNotEmpty()) {
+                            conn.setRequestProperty("Range", range)
+                        }
+                        val rc = conn.responseCode
+                        val cLen = runCatching { conn.contentLengthLong }.getOrDefault(-1L)
+                        val cType = conn.contentType
+                        val cRange = conn.getHeaderField("Content-Range")
+                        val aRanges = conn.getHeaderField("Accept-Ranges")
+                        val isRange = rc == 206
+                        if (rc in 200..299) {
+                            code = if (isRange) 206 else 200
+                            msg = if (isRange) "Partial Content" else "OK"
+                            upstream = Established(conn.inputStream, cLen, cType, cRange, aRanges)
+                        } else {
+                            Log.w(TAG, "proxy fetch $rc for ${target.take(160)}")
+                        }
+                    } catch (e: Exception) {
+                        Log.w(TAG, "proxy fetch err ${e.message}")
                     }
-                } catch (e: Exception) {
-                    Log.w(TAG, "proxy fetch err ${e.message}")
                 }
 
                 if (upstream == null) {
+                    Log.w(TAG, "all proxies failed $attempted")
                     respond(s, "HTTP/1.1 $code $msg", ByteArray(0))
                     return
                 }

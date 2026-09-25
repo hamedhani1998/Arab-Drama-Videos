@@ -409,12 +409,47 @@ class MosalsalyProvider(
     // بمضيف مختلف وبـ auth قديم → 403 دائماً. الأساس (ns-aws-cdn) موثوق. نجلب لجودة
     // بديلة رأساً صغيراً (Range) لنبقي الحيّ ونستبعد الميت دون تحميل جسم كامل (وسيلة
     // v13/v15: نحن مطمئنون لأن awscdn يرد 403 بلا body، وns-aws يرد 206 لنفس الطلب).
-    private suspend fun probeQualityUrl(url: String, declaredType: String?): ExtractorLinkType? {
-        val idU = url.lowercase()
+    // فحص جودة بديلة عبر HTTP/1.1 (java.net.HttpURLConnection) بدل Cronet HTTP/2 —
+    // فالـ app.get عبر Cronet يموت 403 على ns-aws لنفس الرابط الذي يرد 200/206 عبر
+    // HTTP/1.1 (درس v13/v24). الجودات الحيّة تُظهر، والميتة (awscdn 720 قديم) تُستبعد.
+    private fun probeQualityUrlHttp11(url: String): ExtractorLinkType? {
         if (isExplicitlyExpired(url)) {
             Log.w(TAG, "probeQuality expires-in-past skip $url")
             return null
         }
+        return try {
+            val conn = java.net.URL(url).openConnection() as java.net.HttpURLConnection
+            conn.requestMethod = "GET"
+            conn.connectTimeout = 8000
+            conn.readTimeout = 12000
+            conn.instanceFollowRedirects = true
+            conn.setRequestProperty("User-Agent", MOS_UA)
+            conn.setRequestProperty("Referer", mainUrl)
+            conn.setRequestProperty("Range", "bytes=0-65535")
+            val rc = conn.responseCode
+            if (rc in 200..299) {
+                val head = conn.inputStream.use { ins ->
+                        val buf = ByteArray(65536)
+                        val n = ins.read(buf)
+                        if (n > 0) String(buf, 0, n, Charsets.UTF_8) else ""
+                    }.trimStart()
+                if (head.startsWith("#EXTM3U")) ExtractorLinkType.M3U8
+                else ExtractorLinkType.VIDEO
+            } else {
+                Log.w(TAG, "probeQuality http11 $rc skip ${url.take(90)}")
+                null
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "probeQuality http11 skip ${url.take(90)} — ${e.message}")
+            null
+        }
+    }
+
+    /** فحص جودة بديلة — يفضل HTTP/1.1 (الموثوق) ثم Cronet كاحتياط. */
+    private suspend fun probeQualityUrl(url: String, declaredType: String?): ExtractorLinkType? {
+        val via11 = probeQualityUrlHttp11(url)
+        if (via11 != null) return via11
+        // احتياط: بعض المزوّدين قد يفضّلون Cronet (لا mp4 مباشر). الحفاظ على السلوك السابق.
         return try {
             val resp = app.get(url, headers = mapOf(
                 "User-Agent" to MOS_UA, "Referer" to mainUrl, "Range" to "bytes=0-65535"
