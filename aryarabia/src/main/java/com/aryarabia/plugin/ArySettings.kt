@@ -62,9 +62,12 @@ class ArySettingsBottomSheet(private val prefs: SharedPreferences) : BottomSheet
     }
 
     companion object {
+        // ★ اسم ملف التفضيلات — يطابق ما يمرّره AryArabiaPlugin للمصدر.
+        const val PREFS_NAME = "ARY"
         const val KEY_PLAYBACK_MODE = "ary_playback_mode"     // "newpipe" | "direct" | "extractor"
         const val KEY_MAX_QUALITY = "ary_max_quality"         // "all" | "high"
         const val KEY_REDIRECT = "ary_use_redirect"           // Boolean بديل النطاق
+        const val KEY_QUALITY_ORDER = "ary_quality_order"     // "default" | "asc" | "desc"
 
         fun show(fm: FragmentManager, prefs: SharedPreferences) {
             ArySettingsBottomSheet(prefs).show(fm, "ary_settings")
@@ -75,6 +78,12 @@ class ArySettingsBottomSheet(private val prefs: SharedPreferences) : BottomSheet
 
         override fun onCreatePreferences(savedInstanceState: Bundle?, rootKey: String?) {
             val ctx = requireContext()
+
+            // ★ اجعل الورقة تكتب في ملف التفضيلات نفسه الذي يقرأه AryProvider
+            // («ARY»). بدونه تذهب الاختيارات إلى ملف AndroidX الافتراضي الذي لا
+            // يقرأه المصدر — إعدادات تُحفظ بلا أي أثر.
+            preferenceManager.setSharedPreferencesName(PREFS_NAME)
+
             preferenceScreen = preferenceManager.createPreferenceScreen(ctx)
 
             val playbackCategory = PreferenceCategory(ctx)
@@ -107,6 +116,23 @@ class ArySettingsBottomSheet(private val prefs: SharedPreferences) : BottomSheet
             }
             playbackCategory.addPreference(qualityPref)
 
+            // ترتيب الجودات عند البث — الافتراضي = ترتيب اليوم تماماً؛
+            // التصاعدي/التنازلي يعيدان ترتيب روابط التشغيل فقط (بلا حذف/تكرار).
+            val orderPref = ListPreference(ctx).apply {
+                key = KEY_QUALITY_ORDER
+                title = "ترتيب الجودات"
+                summary = "افتراضي: نفس ترتيب روابط التشغيل كما هي"
+                summaryProvider = ListPreference.SimpleSummaryProvider.getInstance()
+                entryValues = arrayOf("default", "asc", "desc")
+                entries = arrayOf(
+                    "الافتراضي (كما هو)",
+                    "من الأقل إلى الأعلى",
+                    "من الأعلى إلى الأقل"
+                )
+                setDefaultValue("default")
+            }
+            playbackCategory.addPreference(orderPref)
+
             // النطاق البديل (redirector)
             val redirectPref = SwitchPreferenceCompat(ctx).apply {
                 key = KEY_REDIRECT
@@ -124,6 +150,7 @@ class ArySettingsBottomSheet(private val prefs: SharedPreferences) : BottomSheet
                 setOnPreferenceClickListener {
                     prefs.edit().apply {
                         remove(KEY_PLAYBACK_MODE); remove(KEY_MAX_QUALITY); remove(KEY_REDIRECT)
+                        remove(KEY_QUALITY_ORDER)
                     }.apply()
                     Toast.makeText(ctx, "تمت إعادة الضبط", Toast.LENGTH_SHORT).show()
                     true

@@ -1,5 +1,6 @@
 package com.onshort.plugin
 
+import android.content.SharedPreferences
 import com.fasterxml.jackson.databind.DeserializationFeature
 import com.fasterxml.jackson.databind.JsonNode
 import com.fasterxml.jackson.databind.ObjectMapper
@@ -40,7 +41,7 @@ private val detailTicketRe = Regex("""data-player-ticket="([^"]+)"""")
  * - data الحلقة = "postId|رقم" (صيغة قياسية، بلا روابط طويلة تتلف في التطبيق).
  * - التذكرة تُجلب في الخلفية أثناء load() وتُحفظ، وتُستعاد عند التشغيل.
  */
-class OnShortProvider : MainAPI() {
+class OnShortProvider(private val prefs: SharedPreferences? = null) : MainAPI() {
     override var name = "OnShort (عربي)"
     override var mainUrl = ONS_MAIN
     override var lang = "ar"
@@ -412,6 +413,21 @@ class OnShortProvider : MainAPI() {
         }
     }
 
+    /**
+     * بثّ روابط البث المجمّعة دفعة واحدة: «افتراضي» = نفس الترتيب تماماً كما كان،
+     * و«تصاعدي/تنازلي» يعيدان الترتيب فقط (فرز مستقر: الروابط متساوية الجودة
+     * تحتفظ بترتيبها النسبي، ولا إضافة ولا حذف ولا تكرار).
+     */
+    private fun emitSorted(prefs: SharedPreferences?, collected: List<ExtractorLink>, callback: (ExtractorLink) -> Unit) {
+        val order = prefs?.getString(OnShortSettingsBottomSheet.KEY_QUALITY_ORDER, "default")
+        val sorted = when (order) {
+            "asc" -> collected.sortedBy { it.quality }
+            "desc" -> collected.sortedByDescending { it.quality }
+            else -> collected
+        }
+        sorted.forEach { callback(it) }
+    }
+
     // ---------- روابط التشغيل (loadLinks) ----------
     override suspend fun loadLinks(
         data: String,
@@ -420,6 +436,9 @@ class OnShortProvider : MainAPI() {
         callback: (ExtractorLink) -> Unit
     ): Boolean {
         return try {
+            // نجمع روابط البث أولاً ثم نبثّها دفعة واحدة (بترتيب اختيار المستخدم)
+            // قبل كل return ناجح — فالإعدادات لا تُغيّر شيئاً افتراضياً.
+            val collected = mutableListOf<ExtractorLink>()
             logD("OnShort.loadLinks data='$data'")
             val parts = data.split("|")
             if (parts.size != 2) { logD("OnShort.loadLinks bad data size=${parts.size}"); return false }
@@ -441,7 +460,7 @@ class OnShortProvider : MainAPI() {
                 val running = prefetchThread
                 val deadline = System.currentTimeMillis() + 1200
                 while (running != null && running.isAlive && System.currentTimeMillis() < deadline) {
-                    cached?.let { if (it.postId == postId) return@run }
+                    cached?.let { if (it.postId == postId) { emitSorted(prefs, collected, callback); return@run } }
                     try { Thread.sleep(120) } catch (_: InterruptedException) { break }
                 }
             }
@@ -512,9 +531,12 @@ class OnShortProvider : MainAPI() {
                     // أساس: main (المُحسَّن) — نرسله دائمًا للمشغّل (HLS أو MP4).
                     // كان الشرط القديم (effIsHls || !effInCands) يمنع MP4 موجودة في candidates
                     // من الوصول للمشغّل → فيديو FlexTV/DramaBox لا يشتغل.
-                    callback(newExtractorLink(name, "Auto · OnShort", mainPlay, effIsHls.let { if (it) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO }) {
-                        this.headers = mapOf("User-Agent" to ONS_UA, "Referer" to mainUrl)
-                    })
+                    // (الافتراضي true = يُبثّ كما كان تماماً؛ إطفاؤه في الإعدادات يخفيه فقط.)
+                    if (prefs?.getBoolean(OnShortSettingsBottomSheet.KEY_SHOW_AUTO, true) != false) {
+                        collected.add(newExtractorLink(name, "Auto · OnShort", mainPlay, effIsHls.let { if (it) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO }) {
+                            this.headers = mapOf("User-Agent" to ONS_UA, "Referer" to mainUrl)
+                        })
+                    }
 
                     // مرشحات الجودة الصريحة (مختلفة عن main، بلا تكرار مسار).
                     // ترتيب العرض: الروابط الأعلى موثوقية ("nav"/"nav2" — الأساس الصالح) أولًا
@@ -529,15 +551,23 @@ class OnShortProvider : MainAPI() {
                         }
                     )
                     val seen = mutableSetOf<String>()
+                    // عتبة «أقل جودة معروضة» — "all" (الافتراضي) = بلا ترشيح إطلاقاً،
+                    // فيمرّ كل مرشّح كما كان. رابط Auto ليس مرشّحاً ولا يشمله هذا الترشيح.
+                    val minHeight = when (prefs?.getString(OnShortSettingsBottomSheet.KEY_MIN_HEIGHT, "all")) {
+                        "480" -> 480
+                        "360" -> 360
+                        else -> 0
+                    }
                     for (v in ranked) {
                         // تجاهل الرابط الأساسي (لا نكرّره)
                         if (v.uri == mainPlay) continue
                         // لا نعرض "Auto" مكررًا بلا معنى من candidate مجهول الجودة (height=0)
                         // يطابق أساسي الوظيفة — نحتفظ فقط بالجودات الصريحة (height>0).
                         if (v.height <= 0) continue
+                        if (minHeight > 0 && v.height < minHeight) continue
                         if (!seen.add(v.uri)) continue
                         val label = "${v.height}p"
-                        callback(newExtractorLink(name, "$label · OnShort", v.uri, linkType(v.uri)) {
+                        collected.add(newExtractorLink(name, "$label · OnShort", v.uri, linkType(v.uri)) {
                             this.quality = getQualityFromName("${v.height}p")
                             this.headers = mapOf("User-Agent" to ONS_UA, "Referer" to mainUrl)
                         })
@@ -545,9 +575,11 @@ class OnShortProvider : MainAPI() {
                 } else {
                     // لا يوجد candidates: main وحده. دلّ نوعه (m3u8 = HLS تكيفي كل الجودات،
                     // mp4 = مباشر). بلا جلب — يفتح فورًا.
-                    callback(newExtractorLink(name, "Auto · OnShort", mainPlay, linkType(mainPlay)) {
-                        this.headers = mapOf("User-Agent" to ONS_UA, "Referer" to mainUrl)
-                    })
+                    if (prefs?.getBoolean(OnShortSettingsBottomSheet.KEY_SHOW_AUTO, true) != false) {
+                        collected.add(newExtractorLink(name, "Auto · OnShort", mainPlay, linkType(mainPlay)) {
+                            this.headers = mapOf("User-Agent" to ONS_UA, "Referer" to mainUrl)
+                        })
+                    }
                 }
             }
 
@@ -563,6 +595,9 @@ class OnShortProvider : MainAPI() {
                     try { subtitleCallback(newSubtitleFile(lang, su)) } catch (_: Exception) {}
                 }
             }
+            // ★ بثّ الروابط المجمّعة قبل كل return ناجح — «افتراضي» = نفس الترتيب
+            // تماماً كما كان، و«تصاعدي/تنازلي» يعيدان الترتيب فقط (بلا حذف/تكرار).
+            emitSorted(prefs, collected, callback)
             true
         } catch (e: Exception) { false }
     }

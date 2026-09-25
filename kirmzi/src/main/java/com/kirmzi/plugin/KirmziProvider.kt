@@ -6,8 +6,9 @@ import kotlinx.coroutines.async
 import kotlinx.coroutines.coroutineScope
 import org.jsoup.nodes.Element
 import android.util.Log
+import android.content.SharedPreferences
 
-class KirmziProvider : MainAPI() {
+class KirmziProvider(private val prefs: SharedPreferences? = null) : MainAPI() {
     companion object {
         private const val TAG = "Kirmzi"
         private const val UA =
@@ -284,6 +285,9 @@ class KirmziProvider : MainAPI() {
         val headers = mapOf(
             "User-Agent" to UA
         )
+        // نجمع كل روابط السيرفرات أولاً (emitEmbed يرفعها إلى هنا)، ثم نبثّها دفعة
+        // واحدة عند المخرج الوحيد من loadLinks. الافتراضي = نفس ترتيبها تماماً.
+        val collected = mutableListOf<ExtractorLink>()
         try {
             // 1. Episode page -> anaplayer iframe (the albaplayer wrapper).
             val epDoc = app.get(data).document
@@ -325,9 +329,10 @@ class KirmziProvider : MainAPI() {
                     .filter { !it.contains("w.anaplayer") }
                 if (directEmbeds.isNotEmpty()) {
                     directEmbeds.forEach {
-                        emitEmbed(it, originOf(anaUrl), headers, callback, label = hostLabel(it))
+                        emitEmbed(it, originOf(anaUrl), headers, collected, label = hostLabel(it))
                     }
                 }
+                emitSorted(prefs, collected, callback)
                 return tabs.isEmpty()
             }
 
@@ -356,9 +361,10 @@ class KirmziProvider : MainAPI() {
                 }
                 val label = tabLabel.ifBlank { hostLabel(embedUrl) }
                 if (seen.add(embedUrl)) {
-                    emitEmbed(embedUrl, anaOrigin, headers, callback, label = label)
+                    emitEmbed(embedUrl, anaOrigin, headers, collected, label = label)
                 }
             }
+            emitSorted(prefs, collected, callback)
             return true
         } catch (e: Exception) {
             Log.e(TAG, "loadLinks error", e)
@@ -370,7 +376,7 @@ class KirmziProvider : MainAPI() {
         embedUrl: String,
         refererFromPrev: String,
         headersBase: Map<String, String>,
-        callback: (ExtractorLink) -> Unit,
+        collected: MutableList<ExtractorLink>,
         label: String = hostLabel(embedUrl)
     ) {
         val embedOrigin = originOf(embedUrl)
@@ -388,24 +394,28 @@ class KirmziProvider : MainAPI() {
             val allMedia = (direct + unpacked).distinct()
             if (allMedia.isEmpty()) {
                 Log.d(TAG, "[$label] no HLS/MP4 found — emit embed page as VIDEO fallback")
-                callback.invoke(
-                    newExtractorLink(
-                        source = "قرمزي TV",
-                        name = label,
-                        url = embedUrl,
-                        type = ExtractorLinkType.VIDEO
-                    ) {
-                        this.quality = Qualities.Unknown.value
-                        this.referer = embedOrigin
-                        this.headers = mapOf("User-Agent" to UA)
-                    }
-                )
+                // فرع «صفحة التضمين كـ VIDEO»: يُسقَط فقط إن عطّل المستخدم الخيار
+                // (الافتراضي مفعّل = سلوك اليوم حرفياً). لا يتأثر به أي رابط وسائط.
+                if (prefs?.getBoolean(KirmziSettingsBottomSheet.KEY_SHOW_RAW_LINK, true) != false) {
+                    collected.add(
+                        newExtractorLink(
+                            source = "قرمزي TV",
+                            name = label,
+                            url = embedUrl,
+                            type = ExtractorLinkType.VIDEO
+                        ) {
+                            this.quality = Qualities.Unknown.value
+                            this.referer = embedOrigin
+                            this.headers = mapOf("User-Agent" to UA)
+                        }
+                    )
+                }
                 return
             }
             allMedia.forEach { mediaUrl ->
                 val m3u8 = mediaUrl.contains(".m3u8")
                 Log.d(TAG, "[$label] emit ${if (m3u8) "HLS" else "MP4"}: $mediaUrl")
-                callback.invoke(
+                collected.add(
                     newExtractorLink(
                         source = "قرمزي TV",
                         name = label,
@@ -425,6 +435,21 @@ class KirmziProvider : MainAPI() {
         } catch (e: Exception) {
             Log.e(TAG, "[$label] embed GET/emit failed: $e")
         }
+    }
+
+    /**
+     * ★ بثّ الروابط بعد اكتمالها: «افتراضي» = نفس الترتيب والعدد تماماً،
+     * و«تصاعدي/تنازلي» يعيدان ترتيبها فقط (فرز مستقر: المتساوية تحتفظ بترتيبها،
+     * ولا حذف ولا تكرار).
+     */
+    private fun emitSorted(prefs: SharedPreferences?, collected: List<ExtractorLink>, callback: (ExtractorLink) -> Unit) {
+        val order = prefs?.getString(KirmziSettingsBottomSheet.KEY_QUALITY_ORDER, "default")
+        val sorted = when (order) {
+            "asc" -> collected.sortedBy { it.quality }
+            "desc" -> collected.sortedByDescending { it.quality }
+            else -> collected
+        }
+        sorted.forEach { callback(it) }
     }
 
     private fun hostLabel(u: String): String {

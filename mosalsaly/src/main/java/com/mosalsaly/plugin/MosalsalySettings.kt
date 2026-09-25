@@ -68,6 +68,8 @@ class MosalsalySettings(private val prefs: SharedPreferences) : BottomSheetDialo
         const val KEY_FORCE_REFRESH = "mos_force_refresh"            // Boolean الافتراضي false
         const val KEY_SHOW_EXTRA_SECTIONS = "mos_show_extra"         // Boolean الافتراضي true
         const val KEY_RAW_LINKS = "mos_raw_links"                    // Boolean الافتراضي false
+        const val KEY_QUALITY_ORDER = "mos_quality_order"            // "default" | "asc" | "desc"
+        const val PREFS_NAME = "Mosalsaly"                          // ★ يجب أن يطابق MosalsalyPlugin
 
         /** بادئة مفاتيح تفعيل المنصات — لكل منصة مفتاح مستقل. */
         const val KEY_PLATFORM_PREFIX = "mos_platform_"
@@ -109,6 +111,9 @@ class MosalsalySettings(private val prefs: SharedPreferences) : BottomSheetDialo
         fun showExtra(prefs: SharedPreferences?): Boolean =
             prefs?.getBoolean(KEY_SHOW_EXTRA_SECTIONS, true) ?: true
 
+        fun qualityOrder(prefs: SharedPreferences?): String =
+            prefs?.getString(KEY_QUALITY_ORDER, "default") ?: "default"
+
         fun rawLinks(prefs: SharedPreferences?): Boolean =
             prefs?.getBoolean(KEY_RAW_LINKS, false) ?: false
 
@@ -121,6 +126,12 @@ class MosalsalySettings(private val prefs: SharedPreferences) : BottomSheetDialo
 
         override fun onCreatePreferences(savedInstanceState: Bundle?, rootKey: String?) {
             val ctx = requireContext()
+
+            // ★ اجعل الورقة تكتب في ملف التفضيلات نفسه الذي يقرأه MosalsalyProvider.
+            // بدون هذا كانت الاختيارات تذهب إلى ملف AndroidX الافتراضي الذي لا
+            // يقرأه المصدر — أي إعدادات تظهر وتُحفظ بلا أي أثر على السلوك.
+            preferenceManager.setSharedPreferencesName(PREFS_NAME)
+
             preferenceScreen = preferenceManager.createPreferenceScreen(ctx)
 
             // ===== عام =====
@@ -142,6 +153,22 @@ class MosalsalySettings(private val prefs: SharedPreferences) : BottomSheetDialo
                 entryValues = arrayOf("all", "high")
                 entries = arrayOf("كل الجودات", "الأعلى فقط (أسرع)")
                 setDefaultValue("all")
+            })
+
+            // ترتيب الجودات عند التشغيل — الافتراضي = ترتيب روابط المنصة تماماً؛
+            // التصاعدي/التنازلي يعيدان ترتيب الروابط فقط (بلا حذف أو تكرار).
+            generalCategory.addPreference(ListPreference(ctx).apply {
+                key = KEY_QUALITY_ORDER
+                title = "ترتيب الجودات"
+                summary = "افتراضي: نفس ترتيب روابط التشغيل كما هي"
+                summaryProvider = ListPreference.SimpleSummaryProvider.getInstance()
+                entryValues = arrayOf("default", "asc", "desc")
+                entries = arrayOf(
+                    "الافتراضي (كما هو)",
+                    "من الأقل إلى الأعلى",
+                    "من الأعلى إلى الأقل"
+                )
+                setDefaultValue("default")
             })
 
             generalCategory.addPreference(SwitchPreferenceCompat(ctx).apply {
@@ -189,6 +216,7 @@ class MosalsalySettings(private val prefs: SharedPreferences) : BottomSheetDialo
                     prefs.edit().apply {
                         remove(KEY_SHOW_SUBTITLES)
                         remove(KEY_QUALITY_MODE)
+                        remove(KEY_QUALITY_ORDER)
                         remove(KEY_FORCE_REFRESH)
                         remove(KEY_SHOW_EXTRA_SECTIONS)
                         remove(KEY_RAW_LINKS)

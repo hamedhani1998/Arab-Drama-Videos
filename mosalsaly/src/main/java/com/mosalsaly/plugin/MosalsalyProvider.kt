@@ -443,6 +443,10 @@ class MosalsalyProvider(
 
         // الروابط السطحية (mp4) أولًا (أسرع استجابة)، ثم m3u8
         alive.sortBy { it.kind != ExtractorLinkType.VIDEO }
+        // نجمع الروابط ثم نبثّها دفعة واحدة: «الافتراضي» يبثّها بنفس ترتيبها
+        // تماماً كما كان، و«تصاعدي/تنازلي» يعيدان ترتيبها فقط
+        // (فرز مستقر — المتساوية تحتفظ بترتيبها، ولا حذف ولا تكرار).
+        val collected = mutableListOf<ExtractorLink>()
         for (lnk in alive) {
             val label = buildString {
                 if (MosalsalySettings.rawLinks(prefs)) {
@@ -453,7 +457,7 @@ class MosalsalyProvider(
                     if (lnk.q.isNotBlank() && lnk.q != lnk.url) append(" · ${lnk.q}")
                 }
             }
-            callback(newExtractorLink(name, label, lnk.url, lnk.kind) {
+            collected.add(newExtractorLink(name, label, lnk.url, lnk.kind) {
                 this.headers = mapOf("User-Agent" to MOS_UA, "Referer" to mainUrl)
                 // شغّل حقل referer نفسه (وليس فقط headers) — CronetDataSource يبني الطلب
                 // من ExtractorLink.referer وليس headers، وCDNs (مثل netshort) ترفض 403
@@ -461,8 +465,15 @@ class MosalsalyProvider(
                 this.referer = mainUrl
                 if (lnk.q.isNotBlank()) this.quality = getQualityFromName(lnk.q)
             })
-            emitted = true
         }
+        val order = MosalsalySettings.qualityOrder(prefs)
+        val sorted = when (order) {
+            "asc" -> collected.sortedBy { it.quality }
+            "desc" -> collected.sortedByDescending { it.quality }
+            else -> collected
+        }
+        sorted.forEach { callback(it) }
+        if (collected.isNotEmpty()) emitted = true
 
         // ترجمة (اختياري) — فك نفس المفتاح وأرسله كملف ترجمة.
         // إعداد «الترجمات» في الإعدادات يتحكم بإظهارها/إخفائها.
@@ -502,12 +513,17 @@ class MosalsalyProvider(
                     // (في حين فيديو المضيف نفسه يعمل). نمرّر الترجمة عبر خادم محلي يجلب الجسم
                     // بنفسه (HttpURLConnection HTTP/1.1) ويسلّمه للمشغّل من 127.0.0.1 بلا CDN
                     // في المسار — فيستحيل الـ 403 المتقطع. باقي المنصات تبقى مباشرة دون تغيير.
-                    val isNet = subUrlActive.contains("netshort.com")
-                    val proxyUrl = if (isNet) MosSubServer.register(subUrlActive, mapOf(
-                        "User-Agent" to MOS_UA, "Referer" to mainUrl)) else null
-                    if (proxyUrl != null) {
-                        subUrlFixed = proxyUrl
-                        Log.i(TAG, "netshort sub routed via local $proxyUrl")
+                    // NetsShort: جلب اللاعب المباشر لترجمة من ns-aws-cdn يموت على الجهاز حتى مع auth
+                    // طازج وكل تركيبات headers — في حين كل طرق تخزين ns-aws ذاته تعيد 200 خادمياً.
+                    // لا نثق بأن جلب اللاعب سيصله سلslide، لذلك نكرر نمط موقع المرجع نفسه:
+                    // تمرير الترجمة عبر dizi1.dramadizilerim.com/?url=<encoded> — البروكسي
+                    // المركزي الذي يستخدمه mosalsaly لمشاهديه، ويعيد WebVTT كاملاً حتى لترجمة
+                    // منتهية (تحقق: 200 text/vtt). لا يمس الفيديو إطلاقاً.
+                    val viaProxy = subUrlActive.contains("netshort.com")
+                    if (viaProxy) {
+                        val enc = java.net.URLEncoder.encode(subUrlActive, "UTF-8").replace("+", "%20")
+                        subUrlFixed = "https://dizi1.dramadizilerim.com/?url=$enc"
+                        Log.i(TAG, "netshort sub via dizi1 proxy")
                     }
                     subtitleCallback(newSubtitleFile(lang, subUrlFixed) {
                         this.headers = mapOf("User-Agent" to MOS_UA, "Referer" to mainUrl)

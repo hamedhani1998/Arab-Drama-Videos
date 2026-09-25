@@ -6,6 +6,7 @@ import com.fasterxml.jackson.databind.ObjectMapper
 import com.fasterxml.jackson.module.kotlin.registerKotlinModule
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
+import android.content.SharedPreferences
 
 private val mapper = ObjectMapper().registerKotlinModule()
     .configure(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES, false)
@@ -34,7 +35,7 @@ private data class SubtitleItem(
     val url: String? = null,
 )
 
-class Drama4AllProvider : MainAPI() {
+class Drama4AllProvider(private val prefs: SharedPreferences? = null) : MainAPI() {
     override var name = "دراما للجميع"
     override var mainUrl = "https://drama4all.com"
     override var lang = "ar"
@@ -256,6 +257,9 @@ class Drama4AllProvider : MainAPI() {
 
             val isMp4 = vUrl.lowercase().contains(".mp4") || vUrl.lowercase().contains(".m4v")
                 || vUrl.lowercase().contains("mime_type=video_mp4")
+            // ★ ترتيب الجودات هنا بلا أثر: الفروع الثلاثة أدناه متنافسة، وواحد فقط
+            //   منها ينفّذ في كل حلقة — فالمصدر يبث رابطاً واحداً لا غير، ولا شيء
+            //   يُخزَّن ولا يُعاد ترتيبه (البث كما هو حرفياً).
             if (isMp4) {
                 // nt_ family: ملف مباشر واحد (R2 .mp4) — الجودة هي الوحيدة المتوفرة من المصدر
                 val q = qualityFromPath(vUrl)

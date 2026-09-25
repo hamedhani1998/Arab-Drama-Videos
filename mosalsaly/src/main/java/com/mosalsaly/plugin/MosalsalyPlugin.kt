@@ -8,7 +8,7 @@ import com.lagradost.cloudstream3.plugins.Plugin
 @CloudstreamPlugin
 class MosalsalyPlugin : Plugin() {
     override fun load(context: Context) {
-        val prefs = context.getSharedPreferences("Mosalsaly", Context.MODE_PRIVATE)
+        val prefs = context.getSharedPreferences(MosalsalySettings.PREFS_NAME, Context.MODE_PRIVATE)
         registerMainAPI(MosalsalyProvider(prefs))
         openSettings = { ctx ->
             val activity = ctx as? AppCompatActivity

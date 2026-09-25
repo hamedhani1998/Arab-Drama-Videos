@@ -3,10 +3,19 @@ package com.reelshort.plugin
 import com.lagradost.cloudstream3.plugins.CloudstreamPlugin
 import com.lagradost.cloudstream3.plugins.Plugin
 import android.content.Context
+import androidx.appcompat.app.AppCompatActivity
 
 @CloudstreamPlugin
 class ReelShortPlugin : Plugin() {
     override fun load(context: Context) {
-        registerMainAPI(ReelShortProvider())
+        // إعدادات الوحدة في ملف SharedPreferences فريد («ReelShort») حتى لا
+        // تتصادم مفاتيحها مع أي وحدة أخرى داخل عملية التطبيق الواحدة.
+        // تتم قراءتها مباشرة (بلا تخزين مركزي) عند كل بث — تماماً كأسلوب DeepDrama/NetShort.
+        val prefs = context.getSharedPreferences(ReelShortSettingsBottomSheet.PREFS_NAME, Context.MODE_PRIVATE)
+        registerMainAPI(ReelShortProvider(prefs))
+        openSettings = { ctx ->
+            val activity = ctx as? AppCompatActivity
+            if (activity != null) ReelShortSettingsBottomSheet.show(activity.supportFragmentManager, prefs)
+        }
     }
 }

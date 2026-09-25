@@ -985,36 +985,53 @@ class AryProvider(
         val startMs = System.currentTimeMillis()
         var links = 0
 
+        // نجمع روابط كل المسارات في قائمة واحدة، ثم نبثّها في النهاية بعد الفرز.
+        // الترتيب الافتراضي يبثّها بنفس ترتيبها تماماً كما كان (بلا تغيير)،
+        // والتصاعدي/التنازلي يعيدان ترتيبها فقط بلا حذف أو تكرار.
+        // ★ ملاحظة: الدوال المساندة (resolveFromHtml/NewPipe) تُرجع عدد روابطها
+        //   بنفسها وتُصفّر `links` عبر +=، فلا نزيد عدّاداً هنا حتى لا يُحسب
+        //   الرابط مرتين (كان سيشوّه شروط الاحتياط links == 0).
+        val collected = mutableListOf<ExtractorLink>()
+        val sink: (ExtractorLink) -> Unit = { link -> collected.add(link); Unit }
+
         suspend fun runFirst() {
             when (orderedPrimary) {
                 1 -> {
                     loadExtractor(watchUrl, "https://www.youtube.com/", subtitleCallback) { link ->
-                        links++
-                        callback(link)
+                        sink(link); links++
                     }
                 }
                 2 -> {
-                    links += resolveFromHtml(vid, subtitleCallback, callback)
+                    links += resolveFromHtml(vid, subtitleCallback, sink)
                 }
                 else -> {
-                    links += resolveFromNewPipe(vid, subtitleCallback, callback)
+                    links += resolveFromNewPipe(vid, subtitleCallback, sink)
                 }
             }
         }
         runFirst()
 
         if (links == 0 && orderedPrimary != 0) {
-            links += resolveFromNewPipe(vid, subtitleCallback, callback)
+            links += resolveFromNewPipe(vid, subtitleCallback, sink)
         }
         if (links == 0 && orderedPrimary != 1) {
             loadExtractor(watchUrl, "https://www.youtube.com/", subtitleCallback) { link ->
-                links++
-                callback(link)
+                sink(link); links++
             }
         }
         if (links == 0 && orderedPrimary != 2) {
-            links += resolveFromHtml(vid, subtitleCallback, callback)
+            links += resolveFromHtml(vid, subtitleCallback, sink)
         }
+
+        // ★ البث النهائي: «default» = نفس ترتيب اليوم حرفياً؛ asc/desc يعيدان
+        //   الترتيب فقط (فرز مستقر: المتساوية تحتفظ بترتيبها، ولا حذف ولا تكرار).
+        val order = prefs?.getString(ArySettingsBottomSheet.KEY_QUALITY_ORDER, "default")
+        val sorted = when (order) {
+            "asc" -> collected.sortedBy { it.quality }
+            "desc" -> collected.sortedByDescending { it.quality }
+            else -> collected
+        }
+        sorted.forEach { callback(it) }
 
         val elapsed = System.currentTimeMillis() - startMs
         Log.d(TAG, "loadLinks $vid mode=$mode links=$links in ${elapsed}ms")

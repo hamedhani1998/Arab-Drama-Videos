@@ -1,4 +1,4 @@
-version = 5
+version = 6
 
 cloudstream {
     description = "قرمزي TV - مسلسلات تركية مترجمة ومدبلجة (kirmzi.tv)"

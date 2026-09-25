@@ -5,10 +5,11 @@ import com.fasterxml.jackson.databind.ObjectMapper
 import com.fasterxml.jackson.module.kotlin.registerKotlinModule
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
+import android.content.SharedPreferences
 
 private val mapper = ObjectMapper().registerKotlinModule()
 
-class StardustTVProvider : MainAPI() {
+class StardustTVProvider(private val prefs: SharedPreferences? = null) : MainAPI() {
     override var name = "StardustTV"
     override var mainUrl = "https://www.stardusttv.net"
     override var lang = "ar"
@@ -231,6 +232,8 @@ class StardustTVProvider : MainAPI() {
     ): Boolean {
         return try {
             val m3u8 = data
+            // رابط واحد فقط 720p — فترتيب الجودات هنا بلا أثر (لا تُخزَّن القائمة
+            // ولا يُعاد ترتيبها: البث كما هو حرفياً).
             callback(
                 newExtractorLink(name, "StardustTV 720p", m3u8, ExtractorLinkType.M3U8) {
                     referer = mainUrl

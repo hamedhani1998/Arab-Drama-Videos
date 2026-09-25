@@ -6,6 +6,7 @@ import com.fasterxml.jackson.databind.ObjectMapper
 import com.fasterxml.jackson.module.kotlin.registerKotlinModule
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
+import android.content.SharedPreferences
 import org.jsoup.nodes.Document
 import org.jsoup.nodes.Element
 
@@ -26,7 +27,7 @@ private val mapper = ObjectMapper().registerKotlinModule()
  *
  * القاعدة الأساسية = القسم العربي: https://minutedrama.com/ar
  */
-class MinuteDramaProvider : MainAPI() {
+class MinuteDramaProvider(private val prefs: SharedPreferences? = null) : MainAPI() {
     override var name = "MinuteDrama"
     override var mainUrl = "https://minutedrama.com/ar" // القاعدة: القسم العربي
     override var lang = "ar"
@@ -280,12 +281,18 @@ class MinuteDramaProvider : MainAPI() {
                 })
             }
 
-            // مصدر احتياطي — CDN4
-            backupUrl?.let {
-                callback(newExtractorLink(name, "الحلقة $epNum (احتياطي)", it, ExtractorLinkType.VIDEO) {
-                    referer = "$mainUrl/"
-                    quality = getQualityFromName("720p")
-                })
+            // ★ ترتيب الجودات هنا بلا أثر: الرابطان 720p متساويان، فلا يوجد ما
+            //   يُرتَّب فعلياً (لا حذف ولا تكرار) — البث كما هو حرفياً.
+            // مصدر احتياطي — CDN4.
+            // إظهار الرابط الاحتياطي — الافتراضي true = سلوك اليوم حرفياً؛
+            // إطفاؤه يتخطى هذا البث فقط (نسخة CDN4)، ولا يمسّ الرابط الأساسي.
+            if (prefs?.getBoolean(MinuteDramaSettingsBottomSheet.KEY_SHOW_BACKUP, true) != false) {
+                backupUrl?.let {
+                    callback(newExtractorLink(name, "الحلقة $epNum (احتياطي)", it, ExtractorLinkType.VIDEO) {
+                        referer = "$mainUrl/"
+                        quality = getQualityFromName("720p")
+                    })
+                }
             }
 
             // الترجمات — نعرض كل اللغات المتوفرة في الموقع.

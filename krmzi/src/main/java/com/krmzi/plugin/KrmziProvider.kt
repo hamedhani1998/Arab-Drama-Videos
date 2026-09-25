@@ -6,8 +6,9 @@ import com.lagradost.cloudstream3.utils.*
 import okhttp3.Request
 import org.jsoup.nodes.Element
 import android.util.Log
+import android.content.SharedPreferences
 
-class KrmziProvider : MainAPI() {
+class KrmziProvider(private val prefs: SharedPreferences? = null) : MainAPI() {
     companion object {
         private const val TAG = "Krmzi.org"
         private const val UA =
@@ -290,6 +291,9 @@ class KrmziProvider : MainAPI() {
         callback: (ExtractorLink) -> Unit
     ): Boolean {
         Log.d(TAG, "loadLinks START for: $data")
+        // نجمع كل روابط السيرفرات أولاً (emitter يرفعها إلى هنا)، ثم نبثّها دفعة
+        // واحدة عند المخرج الوحيد من loadLinks. الافتراضي = نفس ترتيبها تماماً.
+        val collected = mutableListOf<ExtractorLink>()
         try {
             // krmzi.org no longer embeds the server list in the DOM. Each episode
             // page carries a single link `qesen.net/krmzi?post=<base64url JSON>`
@@ -348,7 +352,10 @@ class KrmziProvider : MainAPI() {
                 try {
                     if (name == "express") {
                         // cloud.mail.ru is a direct video page; emit it as VIDEO (playable via WebView)
-                        if (emitted.add(id)) emitter(callback, name, id, ExtractorLinkType.VIDEO, mainUrl)
+                        // صفحة خام: تُسقَط فقط إن عطّل المستخدم الخيار (الافتراضي مفعّل).
+                        if (prefs?.getBoolean(KrmziSettingsBottomSheet.KEY_SHOW_RAW_LINK, true) != false) {
+                            if (emitted.add(id)) emitter(collected, name, id, ExtractorLinkType.VIDEO, mainUrl)
+                        }
                         return@forEach
                     }
                     val ref = when (name) {
@@ -370,19 +377,24 @@ class KrmziProvider : MainAPI() {
                     val allMedia = (direct + sourcesFile).distinct()
                     if (allMedia.isEmpty()) {
                         Log.d(TAG, "[$name] no media inside → emit embed page as VIDEO fallback")
-                        if (emitted.add(embedUrl)) emitter(callback, name, embedUrl, ExtractorLinkType.VIDEO, originOf(embedUrl))
+                        // فرع «صفحة التضمين كـ VIDEO»: يُسقَط فقط إن عطّل المستخدم الخيار
+                        // (الافتراضي مفعّل = سلوك اليوم حرفياً). لا يتأثر به أي رابط وسائط.
+                        if (prefs?.getBoolean(KrmziSettingsBottomSheet.KEY_SHOW_RAW_LINK, true) != false) {
+                            if (emitted.add(embedUrl)) emitter(collected, name, embedUrl, ExtractorLinkType.VIDEO, originOf(embedUrl))
+                        }
                         return@forEach
                     }
                     allMedia.forEach { mediaUrl ->
                         if (emitted.add(mediaUrl)) {
                             val m3u8 = mediaUrl.contains(".m3u8")
-                            emitter(callback, name, mediaUrl, if (m3u8) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO, ref)
+                            emitter(collected, name, mediaUrl, if (m3u8) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO, ref)
                         }
                     }
                 } catch (e: Exception) {
                     Log.e(TAG, "[$name] embed GET/emit failed: $e")
                 }
             }
+            emitSorted(prefs, collected, callback)
             return emitted.isNotEmpty()
         } catch (e: Exception) {
             Log.e(TAG, "loadLinks error", e)
@@ -391,13 +403,13 @@ class KrmziProvider : MainAPI() {
     }
 
     private suspend fun emitter(
-        callback: (ExtractorLink) -> Unit,
+        collected: MutableList<ExtractorLink>,
         label: String,
         url: String,
         type: ExtractorLinkType,
         referer: String
     ) {
-        callback.invoke(
+        collected.add(
             newExtractorLink(
                 source = "قرمزي ORG",
                 name = label,
@@ -413,6 +425,21 @@ class KrmziProvider : MainAPI() {
                 )
             }
         )
+    }
+
+    /**
+     * ★ بثّ الروابط بعد اكتمالها: «افتراضي» = نفس الترتيب والعدد تماماً،
+     * و«تصاعدي/تنازلي» يعيدان ترتيبها فقط (فرز مستقر: المتساوية تحتفظ بترتيبها،
+     * ولا حذف ولا تكرار).
+     */
+    private fun emitSorted(prefs: SharedPreferences?, collected: List<ExtractorLink>, callback: (ExtractorLink) -> Unit) {
+        val order = prefs?.getString(KrmziSettingsBottomSheet.KEY_QUALITY_ORDER, "default")
+        val sorted = when (order) {
+            "asc" -> collected.sortedBy { it.quality }
+            "desc" -> collected.sortedByDescending { it.quality }
+            else -> collected
+        }
+        sorted.forEach { callback(it) }
     }
 
     private fun hostLabel(u: String): String {

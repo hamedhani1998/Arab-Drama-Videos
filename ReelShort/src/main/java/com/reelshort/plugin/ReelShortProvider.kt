@@ -6,13 +6,14 @@ import com.fasterxml.jackson.databind.ObjectMapper
 import com.fasterxml.jackson.module.kotlin.registerKotlinModule
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
+import android.content.SharedPreferences
 
 private val mapper = ObjectMapper().registerKotlinModule()
     .configure(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES, false)
 
 private const val UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
 
-class ReelShortProvider : MainAPI() {
+class ReelShortProvider(private val prefs: SharedPreferences? = null) : MainAPI() {
     override var name = "ReelShort"
     override var mainUrl = "https://www.reelshort.com"
     override var lang = "ar"
@@ -321,6 +322,23 @@ class ReelShortProvider : MainAPI() {
         return null
     }
 
+    // ★ بثّ روابط الحلقة بعد اكتمالها: «افتراضي» = نفس الترتيب تماماً، و«تصاعدي/
+    // تنازلي» يعيدان ترتيبها فقط (فرز مستقر: المتساوية تحتفظ بترتيبها، ولا حذف
+    // ولا تكرار ولا تغيير في المحتوى).
+    private fun emitSorted(
+        prefs: SharedPreferences?,
+        collected: List<ExtractorLink>,
+        callback: (ExtractorLink) -> Unit
+    ) {
+        val order = prefs?.getString(ReelShortSettingsBottomSheet.KEY_QUALITY_ORDER, "default")
+        val sorted = when (order) {
+            "asc" -> collected.sortedBy { it.quality }
+            "desc" -> collected.sortedByDescending { it.quality }
+            else -> collected
+        }
+        sorted.forEach { callback(it) }
+    }
+
     override suspend fun loadLinks(
         data: String,
         isCasting: Boolean,
@@ -337,6 +355,10 @@ class ReelShortProvider : MainAPI() {
         val serialNumber = parts[2]
         val trailer = if (parts.size >= 4) parts[3] else ""
 
+        // نجمع روابط الحلقة أولاً ثم نبثّها دفعة واحدة (بترتيب اختيار المستخدم).
+        // الافتراضي = نفس الترتيب تماماً، بلا حذف ولا تكرار.
+        val collected = mutableListOf<ExtractorLink>()
+
         // العروض القديمة: كل حلقة لها صفحة تحمل فيديو الحلقة الفعلي (video_url)
         if (family == "1") {
             if (payload.isNotBlank()) {
@@ -347,24 +369,30 @@ class ReelShortProvider : MainAPI() {
                     val d = root?.get("props")?.get("pageProps")?.get("data")
                     val videoUrl = d?.get("video_url")?.takeIf { it.isTextual && it.asText().startsWith("http") }?.asText()
                     if (!videoUrl.isNullOrBlank()) {
-                        callback(
+                        collected.add(
                             newExtractorLink(name, "ReelShort $serialNumber", videoUrl, ExtractorLinkType.M3U8) {
                                 referer = mainUrl
                                 quality = getQualityFromName("1080p")
                             }
                         )
+                        emitSorted(prefs, collected, callback)
                         return true
                     }
                 } catch (e: Exception) {}
             }
             // احتياطي: عند فشل صفحة الحلقة نعرض المقدمة إن وجدت
-            if (trailer.isNotBlank()) {
-                callback(
+            // إظهار رابط المقدمة — الافتراضي true = سلوك اليوم حرفياً؛ إطفاؤه يتخطى
+            // هذا الموقع فقط (فلا رابط إطلاقاً بدل عرض مقطع تشويقي)، ولا يمسّ
+            // روابط الحلقات الأخرى.
+            if (prefs?.getBoolean(ReelShortSettingsBottomSheet.KEY_SHOW_TRAILER, true) != false
+                && trailer.isNotBlank()) {
+                collected.add(
                     newExtractorLink(name, "ReelShort $serialNumber (مقدمة)", trailer, ExtractorLinkType.M3U8) {
                         referer = mainUrl
                         quality = getQualityFromName("1080p")
                     }
                 )
+                emitSorted(prefs, collected, callback)
                 return true
             }
             return false
@@ -393,7 +421,7 @@ class ReelShortProvider : MainAPI() {
                             else -> "1080p"
                         }
                         val uri = if (next.startsWith("http")) next else master.substringBeforeLast("/") + "/" + next
-                        callback(newExtractorLink(name, "ReelShort $serialNumber ($qLabel)", uri, ExtractorLinkType.M3U8) {
+                        collected.add(newExtractorLink(name, "ReelShort $serialNumber ($qLabel)", uri, ExtractorLinkType.M3U8) {
                             referer = mainUrl
                             quality = getQualityFromName(qLabel)
                         })
@@ -413,13 +441,15 @@ class ReelShortProvider : MainAPI() {
                         }
                         try { subtitleCallback(newSubtitleFile(cleanLang, subUrl)) } catch (_: Exception) {}
                     }
+                    emitSorted(prefs, collected, callback)
                     return true
                 }
                 // احتياطي: إرجاع الماستر نفسه إن لم تُحلل الجودات
-                callback(newExtractorLink(name, "ReelShort $serialNumber", master, ExtractorLinkType.M3U8) {
+                collected.add(newExtractorLink(name, "ReelShort $serialNumber", master, ExtractorLinkType.M3U8) {
                     referer = mainUrl
                     quality = getQualityFromName("1080p")
                 })
+                emitSorted(prefs, collected, callback)
                 true
             } catch (e: Exception) { false }
         }

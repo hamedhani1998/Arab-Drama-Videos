@@ -5,6 +5,7 @@ import com.fasterxml.jackson.databind.ObjectMapper
 import com.fasterxml.jackson.module.kotlin.registerKotlinModule
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
+import android.content.SharedPreferences
 import java.net.URL
 import java.security.KeyFactory
 import java.security.spec.PKCS8EncodedKeySpec
@@ -138,7 +139,7 @@ private fun cleanCoverUrl(url: String?): String? {
     return cleaned.ifBlank { null }
 }
 
-class NetShortProvider : MainAPI() {
+class NetShortProvider(private val prefs: SharedPreferences? = null) : MainAPI() {
     override var name = "NetShort"
     override var mainUrl = "https://netshort.com"
     override var lang = "ar"
@@ -476,14 +477,20 @@ class NetShortProvider : MainAPI() {
             val ep = parts[1].toIntOrNull() ?: return false
             val res = fetchEpisode(playId, ep) ?: return false
             val url = res.playVoucher ?: return false
+            // رابط واحد فقط 720p — فترتيب الجودات هنا بلا أثر (لا تُخزَّن القائمة
+            // ولا يُعاد ترتيبها: البث كما هو حرفياً).
             callback(newExtractorLink(name, "NetShort 720p", url, ExtractorLinkType.M3U8) {
                 referer = mainUrl
                 quality = getQualityFromName("720p")
             })
-            res.subtitleList?.forEach { sub ->
-                val subUrl = sub.url ?: return@forEach
-                if (subUrl.isBlank()) return@forEach
-                try { subtitleCallback(newSubtitleFile(sub.language ?: "ar", subUrl)) } catch (_: Exception) {}
+            // إظهار الترجمة — الافتراضي true = سلوك اليوم حرفياً؛ إطفاؤه يتخطى
+            // حلقة الترجمة فقط، ولا يمسّ رابط الفيديو إطلاقاً.
+            if (prefs?.getBoolean(NetShortSettingsBottomSheet.KEY_SHOW_SUBTITLES, true) != false) {
+                res.subtitleList?.forEach { sub ->
+                    val subUrl = sub.url ?: return@forEach
+                    if (subUrl.isBlank()) return@forEach
+                    try { subtitleCallback(newSubtitleFile(sub.language ?: "ar", subUrl)) } catch (_: Exception) {}
+                }
             }
             true
         } catch (e: Exception) { false }

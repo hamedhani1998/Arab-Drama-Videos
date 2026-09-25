@@ -1,5 +1,6 @@
 package com.nartoedge.plugin
 
+import android.content.SharedPreferences
 import com.fasterxml.jackson.annotation.JsonProperty
 import com.fasterxml.jackson.databind.DeserializationFeature
 import com.fasterxml.jackson.databind.ObjectMapper
@@ -66,7 +67,7 @@ private data class EdgeSub(
 // Minimal fake JWT the edge accepts (claims are not verified, slug/ep read from path).
 private val fakeRsCtx = "eyJhbGciOiJub25lIn0.eyJ2IjoiMSJ9."
 
-class EdgeNartoProvider : MainAPI() {
+class EdgeNartoProvider(private val prefs: SharedPreferences? = null) : MainAPI() {
     override var name = "Edge Narto Drama"
     override var mainUrl = EDGE_HOST
     override var lang = "ar"
@@ -323,12 +324,29 @@ class EdgeNartoProvider : MainAPI() {
         return null
     }
 
+    /**
+     * ★ بثّ روابط الحلقة بعد اكتمال تجميعها: «افتراضي» = نفس الترتيب تماماً كما
+     * كان (لا إعادة ترتيب إطلاقاً)، و«تصاعدي/تنازلي» يعيدان الترتيب فقط — فرز
+     * مستقر فالمتساوية تحتفظ بترتيبها، ولا حذف ولا تكرار ولا تغيير في العدد.
+     * تُستدعى مرة واحدة عند المخرج الوحيد من loadLinks.
+     */
+    private fun emitSorted(prefs: SharedPreferences?, collected: List<ExtractorLink>, callback: (ExtractorLink) -> Unit) {
+        val order = prefs?.getString(EdgeNartoSettingsBottomSheet.KEY_QUALITY_ORDER, "default")
+        val sorted = when (order) { "asc" -> collected.sortedBy { it.quality }; "desc" -> collected.sortedByDescending { it.quality }; else -> collected }
+        sorted.forEach { callback(it) }
+    }
+
     override suspend fun loadLinks(
         data: String,
         isCasting: Boolean,
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
+        // ★ روابط الحلقة تُجمَّع هنا أولاً ثم تُبثّ دفعةً واحدة عند المخرج، ليصل
+        // ترتيبها إلى الـ callback كما اختار المستخدم (افتراضياً: كما هي تماماً).
+        // تُعرَّف قبل الـ try كي يتمكّن مسار catch من بثّ ما جُمع قبل الخطأ أيضاً
+        // (سلوك اليوم: الروابط التي بُثّت قبل الاستثناء لا تضيع).
+        val collected = mutableListOf<ExtractorLink>()
         return try {
             val m = Regex("""/detail/watch/([^/?]+)/(\d+)""").find(data) ?: return false
             val ep = m.groupValues[2]
@@ -436,7 +454,9 @@ class EdgeNartoProvider : MainAPI() {
                     return
                 }
                 val type = inferStreamType(u)
-                callback(
+                // ★ نُضيف إلى قائمة التجميع بدل البثّ المباشر؛ البثّ يتم دفعةً واحدة
+                //   في emitSorted عند المخرج (نفس newExtractorLink تماماً).
+                collected.add(
                     newExtractorLink(source = name, name = label, url = u, type = type) {
                         referer = nartoOrigin
                         quality = getQualityFromName(q)
@@ -496,7 +516,10 @@ class EdgeNartoProvider : MainAPI() {
             // ...) — emitting that host directly avoids the nested-relative-proxy infinite spin.
             suspend fun emitFromProxy(proxyUrl: String) {
                 val src = jwtSrc(proxyUrl) ?: return
-                if (!src.contains("/e/m/")) {
+                // ★ «إظهار رابط كامل» = مفعّل افتراضياً، أي سلوك اليوم حرفياً. فقط حين
+                //   يُطفئه المستخدم نتخطّى بثّ رابط «كامل» — ولا نلمس روابط الجودات.
+                val showFull = prefs?.getBoolean(EdgeNartoSettingsBottomSheet.KEY_SHOW_FULL, true) != false
+                if (!src.contains("/e/m/") && showFull) {
                     // If the proxy resolves to an akamai shorttv master, its segments are
                     // `main/segment-N.ts` WITHOUT the auth_key → the raw master 403s mid-play.
                     // The stream-e1 proxy re-wraps each segment as /e/s/{jwt} (with auth), so for
@@ -543,7 +566,11 @@ class EdgeNartoProvider : MainAPI() {
 
             var directEmitted = 0
             var directOk = 0
-            for (u in directs) {
+            // ★ «إظهار رابط كامل» — يُقرأ مرّة واحدة هنا: عند الإطفاء نتخطّى
+            //   استخدام الروابط المباشرة (لأن موضع بثّها موسوم «كامل»)؛
+            //   الافتراضي true = نفس حلقة اليوم حرفياً.
+            val showFull = prefs?.getBoolean(EdgeNartoSettingsBottomSheet.KEY_SHOW_FULL, true) != false
+            for (u in if (showFull) directs else emptyList()) {
                 if (directEmitted >= 2) break
                 // v43: on slow CDNs (shortmax-stream) a 1080 master's 1.7MB segments drain the
                 // buffer as fast as it fills ("plays a bit then spins"). Prefer the 480 token
@@ -592,9 +619,16 @@ class EdgeNartoProvider : MainAPI() {
             }
 
             android.util.Log.e("EdgeNarto", "loadLinks DONE slug=$slug ep=$ep links=${emitted.size} subs=${subTracks.size} deadSkipped=$skippedDead any=$any")
+            // ★ المخرج الوحيد بعد نجاح المسار: بثّ كل ما جُمع (مرتَّباً كما اختار
+            //   المستخدم) قبل العودة. كل `return false` أعلاه يحدث قبل أي emit
+            //   فـ collected فارغ ولا بثّ مطلوب هناك إطلاقاً.
+            emitSorted(prefs, collected, callback)
             any
         } catch (e: Exception) {
             android.util.Log.e("EdgeNarto", "loadLinks FATAL", e)
+            // ★ حتى عند الخطأ: ما جُمع قبله يُبثّ (سلوك اليوم: الروابط التي سبقت
+            //   الاستثناء كانت قد بُثّت أصلاً، فلا تضيع).
+            emitSorted(prefs, collected, callback)
             false
         }
     }

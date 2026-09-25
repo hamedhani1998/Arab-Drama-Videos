@@ -6,8 +6,9 @@ import kotlinx.coroutines.async
 import kotlinx.coroutines.coroutineScope
 import org.jsoup.nodes.Element
 import android.util.Log
+import android.content.SharedPreferences
 
-class ThreeSk : MainAPI() {
+class ThreeSk(private val prefs: SharedPreferences? = null) : MainAPI() {
     companion object {
         private const val TAG = "ThreeSk"
         private const val UA =
@@ -548,6 +549,11 @@ class ThreeSk : MainAPI() {
                 return false
             }
 
+            // نجمع روابط كل الخوادم أولاً، ثم نبثّها دفعة واحدة بعد فرزها حسب
+            // اختيار المستخدم. الافتراضي (default) يبثّها بنفس ترتيبها تماماً
+            // كما كان — بلا أي تغيير.
+            val collected = mutableListOf<ExtractorLink>()
+
             for ((link, serverSet) in foundAllMediaLinks) {
                 // Name each link by the actual CDN/provider brand so the user can see
                 // which server the stream comes from (e.g. "ukrcdn 1"). Derived from
@@ -569,7 +575,7 @@ class ThreeSk : MainAPI() {
                     provider.ifBlank { this.name }
                 }
                 val hlsReferer = linkReferer[link] ?: link.substringBeforeLast('/')
-                callback.invoke(
+                collected.add(
                     newExtractorLink(
                         source = serverLabel,
                         name = serverLabel,
@@ -593,11 +599,30 @@ class ThreeSk : MainAPI() {
                     }
                 )
             }
+
+            // ★ بثّ الروابط بعد اكتمالها: «افتراضي» = نفس الترتيب والعدد تماماً،
+            // و«تصاعدي/تنازلي» يعيدان ترتيبها فقط (فرز مستقر: المتساوية تحتفظ
+            // بترتيبها، ولا حذف ولا تكرار).
+            emitSorted(prefs, collected, callback)
             return true
 
         } catch (e: Exception) {
             Log.e(TAG, "loadLinks error", e)
             return false
         }
+    }
+
+    private fun emitSorted(prefs: SharedPreferences?, collected: List<ExtractorLink>, callback: (ExtractorLink) -> Unit) {
+        val order = prefs?.getString(ThreeSkSettingsBottomSheet.KEY_QUALITY_ORDER, "default")
+        val limited = when (val max = prefs?.getString(ThreeSkSettingsBottomSheet.KEY_MAX_SERVERS, "all")) {
+            null, "all" -> collected
+            else -> collected.take(max.toIntOrNull()?.coerceAtLeast(1) ?: collected.size)
+        }
+        val sorted = when (order) {
+            "asc" -> limited.sortedBy { it.quality }
+            "desc" -> limited.sortedByDescending { it.quality }
+            else -> limited
+        }
+        sorted.forEach { callback(it) }
     }
 }

@@ -7,8 +7,9 @@ import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
 import org.jsoup.nodes.Document
 import android.util.Log
+import android.content.SharedPreferences
 
-class LodyProvider : MainAPI() {
+class LodyProvider(private val prefs: SharedPreferences? = null) : MainAPI() {
     companion object {
         private const val TAG = "LodyNet"
         private const val UA =
@@ -831,11 +832,32 @@ class LodyProvider : MainAPI() {
             }
 
             var any = false
+            // نجمع روابط كل الخوادم بالترتيب نفسه الذي تُبَثّ به اليوم، ثم نفرزها
+            // حسب اختيار المستخدم قبل البث. الافتراضي = نفس الترتيب تماماً.
+            val collected = mutableListOf<ExtractorLink>()
             for ((_, subs, links) in results) {
                 subs.forEach { subtitleCallback.invoke(it) }
-                links.forEach { callback.invoke(it); any = true }
+                collected.addAll(links)
             }
-            Log.d(TAG, "loadLinks done: $any (${results.sumOf { it.third.size }} links)")
+
+            // ★ سقف اختياري لعدد الخوادم المعروضة (الافتراضي = كل الخوادم، كما هو).
+            val cap = prefs?.getString(LodySettingsBottomSheet.KEY_MAX_SERVERS, "all")
+            val limited = when (cap) {
+                "3" -> collected.take(3)
+                "5" -> collected.take(5)
+                else -> collected
+            }
+
+            val order = prefs?.getString(LodySettingsBottomSheet.KEY_QUALITY_ORDER, "default")
+            val sorted = when (order) {
+                "asc" -> limited.sortedBy { it.quality }
+                "desc" -> limited.sortedByDescending { it.quality }
+                else -> limited
+            }
+            sorted.forEach { callback.invoke(it) }
+            any = sorted.isNotEmpty()
+
+            Log.d(TAG, "loadLinks done: $any (${sorted.size}/${collected.size} links)")
             return any
         } catch (e: Exception) {
             Log.e(TAG, "loadLinks error", e)

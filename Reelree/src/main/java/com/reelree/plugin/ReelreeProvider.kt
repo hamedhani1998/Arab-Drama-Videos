@@ -5,6 +5,7 @@ import com.fasterxml.jackson.databind.ObjectMapper
 import com.fasterxml.jackson.module.kotlin.registerKotlinModule
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
+import android.content.SharedPreferences
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.GlobalScope
 import kotlinx.coroutines.launch
@@ -31,7 +32,7 @@ private const val UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/53
  *  1) "الحلقات"        ← عبر data-media / %EP% (الحلقة المستقلة)
  *  2) "السيرفر الكامل" ← عبر data-rr-server2.direct (الملف المدمج بكل الجودات/الترجمات/الأصوات)
  */
-class ReelreeProvider : MainAPI() {
+class ReelreeProvider(private val prefs: SharedPreferences? = null) : MainAPI() {
     override var name = "Reelree"
     override var mainUrl = "https://reelree.com"
     override var lang = "ar"
@@ -330,6 +331,9 @@ class ReelreeProvider : MainAPI() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
+        // لا تخزين/فرز هنا عمداً: المصدر يبث رابطاً واحداً 720p للحلقة (ورابط
+        // «الحلقة كاملة» 1080p أو أكثر عند السيرفر الكامل) — فترتيب الجودات بلا
+        // أثر عملي، والبث يبقى حرفياً بلا تغيير (لا تُخزَّن القائمة ولا يُعاد ترتيبها).
         // ===== المسار 1: "الحلقة كاملة" — السيرفر الكامل فقط (ملف merged بجودات + ترجمات + أصوات) =====
         // البيانات تبدأ بعنوان http للعلامة (حتى لا يهشّل CloudStream حقل data)،
         // والسيرفر الكامل يأتي بعد أول "|".
@@ -358,12 +362,20 @@ class ReelreeProvider : MainAPI() {
                 for (t in extractTracks(masterText, fullMaster)) {
                     try {
                         if (t.kind == "SUBTITLES") {
-                            subtitleCallback(newSubtitleFile(t.lang, t.uri))
+                            // إظهار الترجمة — الافتراضي true = سلوك اليوم حرفياً؛ إطفاؤه
+                            // يتخطى ملف الترجمة فقط، ولا يمسّ رابط الفيديو إطلاقاً.
+                            if (prefs?.getBoolean(ReelreeSettingsBottomSheet.KEY_SHOW_SUBTITLES, true) != false) {
+                                subtitleCallback(newSubtitleFile(t.lang, t.uri))
+                            }
                         } else if (t.kind == "AUDIO") {
-                            callback(newExtractorLink(name, "صوت: ${t.lang}", t.uri, ExtractorLinkType.M3U8) {
-                                referer = mainUrl
-                                quality = getQualityFromName("720p")
-                            })
+                            // إظهار روابط الصوت المنفصلة — الافتراضي true = سلوك اليوم
+                            // حرفياً؛ إطفاؤه يتخطى مسارات الصوت فقط، ولا يمسّ رابط الحلقة.
+                            if (prefs?.getBoolean(ReelreeSettingsBottomSheet.KEY_SHOW_AUDIO_TRACKS, true) != false) {
+                                callback(newExtractorLink(name, "صوت: ${t.lang}", t.uri, ExtractorLinkType.M3U8) {
+                                    referer = mainUrl
+                                    quality = getQualityFromName("720p")
+                                })
+                            }
                         }
                     } catch (_: Exception) {}
                 }
