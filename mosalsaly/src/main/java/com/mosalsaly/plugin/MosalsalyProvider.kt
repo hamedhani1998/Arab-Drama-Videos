@@ -60,21 +60,23 @@ private fun cleanDecryptedUrl(u: String?): String? {
 // netshort يتأثر: sub auth يجلس أياماً قديماً بينما auth الفيديو طازج → الترجمة 403)،
 // نستبدل auth الترجمة بـ auth الفيديو الأساسي الطازج — auth_key على هذه الأقراص عام لكل
 // المسارات على نفس المضيف (تحقق: sub path + video auth → 200 WEBVTT).
-// يعيد الرابط عبر بروكسي موقع المرجع الأصلي (dizi1.dramadizilerim.com/) — نفس النمط
-// الذي يستخدمه mosalsaly لمشاهديه. النتائج (2026-09-25):
-//   - WebVTT للترجمة: 200 text/vtt حتى لـ auth منتهٍ.
-//   - mp4 للفيديو: 206/200 video/mp4 مع Accept-Ranges (Range محفوظ → السيك ينجح).
-// مطلوب لأن جلب اللاعب المباشر لـ ns-aws-cdn (CronetDataSource HTTP/2) يتلقّى
-// 403 على نفس الرابط الذي يرد 200 عبر HTTP/1.1 (urllib) — على الفيديو نفسه لا
-// الترجمة فقط. التوجيه عبر dizi1 يطابق الموقع ويمرّر الفيديو والترجمة معاً.
-private val DIZI1 = "https://dizi1.dramadizilerim.com/?url="
-private fun wrapDizi1(rawUrl: String): String =
-    DIZI1 + java.net.URLEncoder.encode(rawUrl, "UTF-8").replace("+", "%20")
-
-// هل المنصة تستخدم الجلب المباشر (لا مطلوب منه dizi1)؟ netshort فقط يحتاج التوجيه
-// لأن أقراص ns-aws-cdn ترفض جلب Cronet. البقية (بما فيها m3u8) تبقى مباشرة.
-private fun needsDizi1(platform: String, kind: ExtractorLinkType, url: String): Boolean =
-    platform == "netshort" && kind == ExtractorLinkType.VIDEO && !url.contains("dizi1")
+// NetsShort: جلب اللاعب المباشر لروابط ns-aws-cdn / dizi1 يموت على الجهاز عبر Cronet (HTTP/2)
+// لنفس الرابط الذي يرد 200/206 عبر HTTP/1.1 — نمرّر عبر خادم محلي (MosSubServer) يجلب الجسم
+// من المصدر بـ HttpURLConnection (HTTP/1.1 + Range) ويقدّمه من 127.0.0.1 بلا أي CDN في مسار
+// اللاعب، فيستحيل الـ 403/timeout الذي كان مع Cronet. محصور في netshort فقط — البقية مباشرة.
+//
+// دفع ملاحظة: في v23 جرّبنا بروكسي الموقع الأصلي dizi1.dramadizilerim.com/?url= للفيديو
+// والترجمة — خادمياً كان يرد 200 (WebVTT/206 mp4)، لكن جلب اللاعب له عبر Cronet يموت أيضاً
+// ('Source error') والترجمة تصل بنوع MIME خاطئ (حيث يحدد Minecraft MIME من نهاية الرابط الذي
+// فيه ?url=... بلا امتداد → يُحسب SRT رغم أن الخادم يرسل WebVTT) — فلا الترتيب يعمل ولا الترجمة.
+// لذلك نستبدله كلياً بالخادم المحلي الذي يقدّم mp4/vtt من 127.0.0.1$id.(mp4|vtt) مع MIME صحيح.
+private fun routeVideo(platform: String, kind: ExtractorLinkType, url: String, headers: Map<String, String>): String {
+    if (platform != "netshort" || kind != ExtractorLinkType.VIDEO) return url
+    val local = MosSubServer.registerVideo(url, headers)
+    if (local != null) Log.i(TAG, "netshort video via local server")
+    else Log.w(TAG, "netshort local server unavailable, keeping direct $url")
+    return local ?: url
+}
 
 private fun refreshSubtitleAuth(subUrl: String, videoUrl: String?): String {
     if (videoUrl.isNullOrBlank()) return subUrl
@@ -497,7 +499,8 @@ class MosalsalyProvider(
                     if (lnk.q.isNotBlank() && lnk.q != lnk.url) append(" · ${lnk.q}")
                 }
             }
-            val emitUrl = if (needsDizi1(platform, lnk.kind, lnk.url)) wrapDizi1(lnk.url) else lnk.url
+            val emitUrl = routeVideo(platform, lnk.kind, lnk.url,
+                mapOf("User-Agent" to MOS_UA, "Referer" to mainUrl))
             collected.add(newExtractorLink(name, label, emitUrl, lnk.kind) {
                 this.headers = mapOf("User-Agent" to MOS_UA, "Referer" to mainUrl)
                 // شغّل حقل referer نفسه (وليس فقط headers) — CronetDataSource يبني الطلب
@@ -550,19 +553,23 @@ class MosalsalyProvider(
                         else ->
                             if (subUrlActive.contains("?")) "$subUrlActive&.vtt" else "$subUrlActive.vtt"
                     }
-                    // NetsShort: جلب اللاعب للترجمة الخارجية يفشل 403 على الجهاز لنفس الرابط
-                    // (في حين فيديو المضيف نفسه يعمل). نمرّر الترجمة عبر خادم محلي يجلب الجسم
-                    // بنفسه (HttpURLConnection HTTP/1.1) ويسلّمه للمشغّل من 127.0.0.1 بلا CDN
-                    // في المسار — فيستحيل الـ 403 المتقطع. باقي المنصات تبقى مباشرة دون تغيير.
-                    // NetsShort: جلب اللاعب المباشر لترجمة من ns-aws-cdn يموت على الجهاز حتى مع auth
-                    // طازج وكل تركيبات headers — في حين كل طرق تخزين ns-aws ذاته تعيد 200 خادمياً.
-                    // لا نثق بأن جلب اللاعب سيصله سلslide، لذلك نكرر نمط موقع المرجع نفسه:
-                    // تمرير الترجمة عبر dizi1.dramadizilerim.com/?url=<encoded> — البروكسي
-                    // المركزي الذي يستخدمه mosalsaly لمشاهديه، ويعيد WebVTT كاملاً حتى لترجمة
-                    // منتهية (تحقق: 200 text/vtt). لا يمس الفيديو إطلاقاً.
+                    // NetsShort: جلب اللاعب للترجمة من ns-aws-cdn / dizi1 يموت على الجهاز (403/
+                    // Source error عبر Cronet) لنفس الرابط الذي يرد 200 خادمياً عبر HTTP/1.1.
+                    // نمرّر الترجمة عبر الخادم المحلي (HttpURLConnection — HTTP/1.1) الذي يسلّم
+                    // WebVTT من 127.0.0.1 بلا أي CDN في المسار → مستحيل 403، ونوع MIME صحيح
+                    // (الرابط ينتهي .vtt فيميته ExoPlayer على أنه text/vtt لا subrip).
+                    // باقي المنصات تبقى مباشرة دون تغيير.
                     if (subUrlActive.contains("netshort.com")) {
-                        subUrlFixed = wrapDizi1(subUrlActive)
-                        Log.i(TAG, "netshort sub via dizi1 proxy")
+                        val local = MosSubServer.registerSubtitle(
+                            subUrlActive,
+                            mapOf("User-Agent" to MOS_UA, "Referer" to mainUrl)
+                        )
+                        if (local != null) {
+                            subUrlFixed = local
+                            Log.i(TAG, "netshort sub via local server")
+                        } else {
+                            Log.w(TAG, "netshort local server unavailable for sub, keeping fixed")
+                        }
                     }
                     subtitleCallback(newSubtitleFile(lang, subUrlFixed) {
                         this.headers = mapOf("User-Agent" to MOS_UA, "Referer" to mainUrl)

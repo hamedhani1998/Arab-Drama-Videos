@@ -2,6 +2,7 @@ package com.mosalsaly.plugin
 
 import android.util.Log
 import java.io.BufferedReader
+import java.io.InputStream
 import java.io.InputStreamReader
 import java.net.HttpURLConnection
 import java.net.ServerSocket
@@ -11,21 +12,38 @@ import java.util.concurrent.ConcurrentHashMap
 import kotlin.concurrent.thread
 
 /**
- * خادم ترجمة محلي (نمط AryDashServer المُثبت في aryarabia).
+ * خادم محلي داخل الإضافة (نمط AryDashServer المُثبت في aryarabia) يجلب المحتوى من مصادر
+ * NetsShort عبر java.net.HttpURLConnection (مكدس HTTP/1.1) بدل CronetDataSource الذي يستخدمه
+ * اللاعب (HTTP/2). جلب اللاعب المباشر لروابط ns-aws-cdn / dizi1 يموت على الجهاز
+ * (InvalidResponseCode 403 / Source error) لنفس الرابط الذي يرد 200/206 عبر HTTP/1.1.
  *
- * على الجهاز، كان جلب اللاعب للترجمة الخارجية (CronetDataSource عبر SingleSampleMediaPeriod)
- * ينتهي 403 لنفس الرابط الذي يرد 200 على الخادم بهواه — بينما فيديو نفس المضيف يعمل.
- * السبب الجذري لم يُحسم، لكن تمرير الترجمة عبر هذا الخادم يجعله يحسم:
- *   1) يجلب الجسم من الجهاز نفسه بنفس الـ IP لكن عبر java.net HttpURLConnection (HTTP/1.1)
- *      بدل Cronet HTTP/2 — أي توقيع TLS/إطار مختلف عن جلب اللاعب الفاشل.
- *   2) يسلّم اللاعب جسماً WebVTT كاملاً من 127.0.0.1:port — بلا CDN في مسار جلب اللاعب إطلاقاً،
- *      فالـ 403 المتقطع يصبح مستحيلاً، ومصدر MIME صحيحاً لأنه .vtt.
+ * يسجّل الإضافة وسيطاً (URL + MIME + isVideo) ويعيد رابط 127.0.0.1 يسلّمه اللاعب.
+ * الخادم يدعم طلبات Range (مع Content-Range/Accept-Ranges) فيتجاوب سيّارة الفيديو في الكاميرا
+ * والخاصية المنبثقة والسيك — أي أن مقطع mp4 كبير يتدفق بشكل صحيح بدل تسليم دفعة واحدة.
  *
- * يُفعَّل فقط لترجمات NetsShort (التي يُجدَّد auth لها) — باقي المنصات تمرّ مباشرة دون تغيير.
+ * يُفعَّل فقط لنطاق NetsShort — باقي المنصات تمرر روابطها المباشرة سليمة تماماً.
  */
 object MosSubServer {
     private const val TAG = "MosSubServer"
-    private data class Job(val url: String, val headers: Map<String, String>)
+
+    private enum class Kind(val ext: String, val mime: String) {
+        VIDEO("mp4", "video/mp4"),
+        SUBTITLE("vtt", "text/vtt; charset=utf-8"),
+    }
+
+    private data class Job(
+        val url: String,
+        val headers: Map<String, String>,
+        val kind: Kind,
+    )
+    private data class Established(
+        val body: InputStream?,
+        val contentLength: Long,
+        val contentType: String?,
+        val contentRange: String?,
+        val acceptRanges: String?,
+    )
+
     private val jobs = ConcurrentHashMap<String, Job>()
     private var server: ServerSocket? = null
     @Volatile private var port = 0
@@ -53,66 +71,113 @@ object MosSubServer {
         }
     }
 
-    /** يسجّل الترجمة ويعيد رابط 127.0.0.1 يُسلَّم للمشغّل ليجلبه محلياً. */
-    fun register(url: String, headers: Map<String, String>): String? {
+    /** يسجّل فيديو/ترجمة ويعيد رابط 127.0.0.1 يُسلَّم للمشغّل. */
+    fun registerVideo(url: String, headers: Map<String, String>): String? =
+        register(url, headers, Kind.VIDEO)
+
+    fun registerSubtitle(url: String, headers: Map<String, String>): String? =
+        register(url, headers, Kind.SUBTITLE)
+
+    private fun register(url: String, headers: Map<String, String>, kind: Kind): String? {
         ensureStarted()
         if (port == 0) return null
         val id = UUID.randomUUID().toString()
-        jobs[id] = Job(url, headers)
-        return "http://127.0.0.1:$port/$id.vtt"
+        jobs[id] = Job(url, headers, kind)
+        return "http://127.0.0.1:$port/$id.${kind.ext}"
     }
 
     private fun handle(client: java.net.Socket) {
         try {
             client.use { s ->
                 val reader = BufferedReader(InputStreamReader(s.getInputStream()))
-                val line = reader.readLine() ?: return
-                if (!line.startsWith("GET ")) return
-                val raw = line.split(' ').getOrNull(1) ?: return
-                val id = raw.trimStart('/').removeSuffix(".vtt")
+                val requestLine = reader.readLine() ?: return
+                if (!requestLine.startsWith("GET ")) return
+                val rawPath = requestLine.split(' ').getOrNull(1) ?: return
+                val path = rawPath.substringBefore('?')
+                val id = path.trimStart('/').removeSuffix(".mp4").removeSuffix(".vtt")
                 val job = jobs[id]
                 if (job == null) {
                     respond(s, "HTTP/1.1 404 Not Found", ByteArray(0))
                     return
                 }
+
+                // قراءة رأس Range (إن وُجد) ونقلها للمصدر.
+                var range = ""
+                while (true) {
+                    val h = reader.readLine() ?: break
+                    if (h.isEmpty()) break
+                    if (h.startsWith("Range:", true)) range = h.substringAfter(':').trim()
+                }
+
+                var upstream: Established? = null
                 var code = 502
-                var body = ByteArray(0)
+                var msg = "Bad Gateway"
                 try {
                     val conn = URL(job.url).openConnection() as HttpURLConnection
                     conn.requestMethod = "GET"
                     conn.connectTimeout = 20000
-                    conn.readTimeout = 40000
+                    conn.readTimeout = 60000
                     conn.instanceFollowRedirects = true
                     conn.setRequestProperty("User-Agent", job.headers["User-Agent"]
                         ?: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
                     conn.setRequestProperty("Referer", job.headers["Referer"] ?: "https://mosalsaly.com/")
-                    conn.setRequestProperty("Accept", "text/vtt, */*")
+                    conn.setRequestProperty("Accept", "*/*")
+                    if (range.isNotEmpty()) conn.setRequestProperty("Range", range)
                     val rc = conn.responseCode
+                    val cLen = runCatching { conn.contentLengthLong }.getOrDefault(-1L)
+                    val cType = conn.contentType
+                    val cRange = conn.getHeaderField("Content-Range")
+                    val aRanges = conn.getHeaderField("Accept-Ranges")
+                    val isRange = rc == 206
                     if (rc in 200..299) {
-                        code = 200
-                        body = conn.inputStream.use { it.readBytes() }
+                        code = if (isRange) 206 else 200
+                        msg = if (isRange) "Partial Content" else "OK"
+                        upstream = Established(conn.inputStream, cLen, cType, cRange, aRanges)
                     } else {
                         Log.w(TAG, "proxy fetch $rc for ${job.url.take(80)}")
                     }
                 } catch (e: Exception) {
                     Log.w(TAG, "proxy fetch err ${e.message}")
                 }
-                val header = buildString {
-                    append("HTTP/1.1 $code ")
-                    append(if (code == 200) "OK" else "Bad Gateway")
-                    append("\r\nContent-Type: text/vtt; charset=utf-8\r\n")
-                    append("Content-Length: ${body.size}\r\n")
-                    append("Connection: close\r\n")
-                    append("Access-Control-Allow-Origin: *\r\n")
-                    append("\r\n")
+
+                if (upstream == null) {
+                    respond(s, "HTTP/1.1 $code $msg", ByteArray(0))
+                    return
                 }
-                val out = s.getOutputStream()
-                out.write(header.toByteArray(Charsets.ISO_8859_1))
-                out.write(body)
-                out.flush()
+                streamOut(s, upstream, job.kind)
             }
         } catch (e: Exception) {
             // عميل أُغلق — يتجاهل
+        }
+    }
+
+    private fun streamOut(s: java.net.Socket, est: Established, kind: Kind) {
+        try {
+            val body = est.body ?: return
+            val status = if (est.contentRange != null) "HTTP/1.1 206 Partial Content" else "HTTP/1.1 200 OK"
+            val head = buildString {
+                append("$status\r\n")
+                append("Content-Type: ${kind.mime}\r\n")
+                if (est.contentLength >= 0) append("Content-Length: ${est.contentLength}\r\n")
+                append("Accept-Ranges: ${est.acceptRanges ?: "bytes"}\r\n")
+                if (est.contentRange != null) append("Content-Range: ${est.contentRange}\r\n")
+                append("Cache-Control: no-store\r\n")
+                append("Connection: close\r\n")
+                append("\r\n")
+            }
+            val out = s.getOutputStream()
+            out.write(head.toByteArray(Charsets.ISO_8859_1))
+            out.flush()
+            val buf = ByteArray(64 * 1024)
+            while (true) {
+                val n = body.read(buf)
+                if (n < 0) break
+                out.write(buf, 0, n)
+                out.flush()
+            }
+            body.close()
+        } catch (e: Exception) {
+            // عميل أُغلق mid-stream — طبيعي عند السيك
         }
     }
 
