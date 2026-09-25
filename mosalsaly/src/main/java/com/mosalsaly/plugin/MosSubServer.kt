@@ -125,7 +125,10 @@ object MosSubServer {
                 // (بروكسي الموقع المركزي الذي يرد 200/206 عبر HTTP/1.1). ينطبق على الفيديو والترجمة
                 // netshort معاً؛ باقي المنصات لا تصل إلى هنا أصلاً (routeVideo netshort فقط).
                 val proxy = DIZI1 + java.net.URLEncoder.encode(job.url, "UTF-8").replace("+", "%20")
-                val attempts = listOf(job.url, proxy)
+                // الترجمة: dizi1 أولاً (بروكسي مركزي يسلّم WebVTT 200 لرابط مباشر قد يموت 000/403
+                // من الجهاز)، ثم المباشر كاحتياط. الفيديو: المباشر أولاً ثم dizi1 كما كان.
+                val attempts = if (job.kind == Kind.SUBTITLE) listOf(proxy, job.url)
+                    else listOf(job.url, proxy)
 
                 for (target in attempts) {
                     if (upstream != null) break
@@ -140,12 +143,11 @@ object MosSubServer {
                             ?: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
                         conn.setRequestProperty("Referer", job.headers["Referer"] ?: "https://mosalsaly.com/")
                         conn.setRequestProperty("Accept", if (job.kind == Kind.SUBTITLE) "text/vtt, */*" else "*/*")
-                        // الترجمة: نرسل دائماً Range صغيراً (bytes=0-...) — ns-aws يعيد 403 أحياناً
-                        // لطلب GET كامل من هذا الـ IP/التوقيع رغم نجاح نفس الرابط مع Range-محدود
-                        // (v19: كل التركيبات 200 من الخادم، لكن من الجهاز MosSubServer فشل بلا Range).
-                        if (job.kind == Kind.SUBTITLE && range.isEmpty()) {
-                            conn.setRequestProperty("Range", "bytes=0-1048575")
-                        } else if (range.isNotEmpty()) {
+                        // الترجمة: لا نفرض Range إجبارياً — v19 أضاف bytes=0-1048575 كعلاج لكنه
+                        // يكسّر dizi1 (يرد 403 Upstream Proxy للطلب المُقسّط) بينما نفس الرابط
+                        // بلا Range يرد 200 WebVTT. نمرّر فقط Range إن أرسله اللاعب نفسه؛
+                        // وحين لا يُرسل، نجلب كاملاً (200) — الترجمة صغيرة (كيلوبايتات) فلا مشكلة.
+                        if (range.isNotEmpty()) {
                             conn.setRequestProperty("Range", range)
                         }
                         val rc = conn.responseCode
