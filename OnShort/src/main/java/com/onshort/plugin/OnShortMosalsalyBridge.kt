@@ -6,7 +6,7 @@ import com.fasterxml.jackson.databind.node.ArrayNode
 import com.fasterxml.jackson.databind.node.ObjectNode
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
-import java.util.Base64
+import android.util.Base64
 import javax.crypto.Cipher
 import javax.crypto.spec.GCMParameterSpec
 import javax.crypto.spec.SecretKeySpec
@@ -33,7 +33,7 @@ class OnShortMosalsalyBridge(private val prefs: android.content.SharedPreference
         .configure(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES, false)
 
     private val MOS_EP_KEY: ByteArray by lazy {
-        try { Base64.getDecoder().decode(MOS_EP_KEY_B64) } catch (e: Exception) { MOS_EP_KEY_B64.toByteArray() }
+        try { Base64.decode(MOS_EP_KEY_B64, Base64.DEFAULT) } catch (e: Exception) { MOS_EP_KEY_B64.toByteArray() }
     }
 
     private fun logD(msg: String) { try { android.util.Log.d(TAG, msg) } catch (_: Exception) {} }
@@ -58,7 +58,7 @@ class OnShortMosalsalyBridge(private val prefs: android.content.SharedPreference
 
     private fun decryptMosEnc(enc: String): String? {
         return try {
-            val raw = Base64.getDecoder().decode(enc)
+            val raw = Base64.decode(enc, Base64.DEFAULT)
             if (raw.size <= 12) return null
             val iv = raw.copyOfRange(0, 12)
             val ct = raw.copyOfRange(12, raw.size)

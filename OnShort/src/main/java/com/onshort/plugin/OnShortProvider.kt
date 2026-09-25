@@ -21,6 +21,12 @@ private const val ONS_MAIN = "https://onshort.net/ar"
 private const val ONS_API = "https://onshort.net/wp-json/onshort-theme/v1"
 private const val ONS_PLAY_API = "https://onshort.net/wp-json/onshort-player/v1/episode"
 
+// منصات يرفضها سيرفر OnShort نفسه نهائيًا ("REST bridge"/"not handled").
+// عند فشل التشغيل يتجاهلها جسر إعادة البحث (لا يعتمد عليها كمنشور بديل).
+private val REJECTED_PLATFORMS = setOf(
+    "netshort", "shortmax", "dramabite", "storyreel", "vibeshort-goodbos"
+)
+
 // بطاقة مسلسل على الصفحة الرئيسية (يُحلَّل من HTML الخاص بـ listing)
 private val cardRe = Regex(
     """<article class="series-card"[^>]*data-series-card="(\d+)"[^>]*>\s*<a class="series-card__link" href="([^"]+)"[^>]*>.*?<img[^>]*src="([^"]+)"[^>]*alt="([^"]*)"[^>]*>.*?<span class="episode-pill">(\d+)\s*<small""",
@@ -132,6 +138,10 @@ class OnShortProvider(private val prefs: SharedPreferences? = null) : MainAPI() 
     }
 
     private data class Meta(val id: String, val total: Int, val title: String, val poster: String?, val platform: String?)
+
+    // نتيجة بحث خام تحتفظ بمنصة النشر (platform.slug) — يستخدمها جسر إعادة البحث
+    // لاختيار منشور بديل بمنصة قابلة للتشغيل (SearchResponse لا ينقل platform).
+    private data class SearchRaw(val id: String, val url: String, val title: String, val platform: String?, val total: Int)
 
     private fun parseMeta(url: String): Meta? {
         val i = url.indexOf("?cs=")
@@ -250,6 +260,87 @@ class OnShortProvider(private val prefs: SharedPreferences? = null) : MainAPI() 
         } catch (_: Exception) {}
         return null
     }
+
+    // بحث خام يحتفظ بمنصة النشر (platform.slug) لصالح جسر إعادة البحث.
+    // يُستخدم نفس واجهة البحث لكن بلا ذاكرة التخزين المؤقت (نريد نتيجة طازجة
+    // عند الفشل، وقد يُنشر العمل على عدة منصات نختار بينها). يعيد قائمة نتائج
+    // مفرَّغة من التكرار حسب المعرف والمثبّتة في منصتها.
+    private suspend fun searchRaw(query: String): List<SearchRaw> {
+        try {
+            val q = URLEncoder.encode(query, "UTF-8")
+            val url = "$ONS_API/search?q=$q&limit=24&lang=ar"
+            val text = timeFirstSearch(url) ?: return emptyList()
+            val node = mapper.readTree(text)
+            val arr = node.get("results") ?: return emptyList()
+            val out = mutableListOf<SearchRaw>()
+            val seen = java.util.HashSet<String>()
+            for (it in arr) {
+                val id = it.get("id")?.asText() ?: continue
+                val url2 = it.get("url")?.asText() ?: continue
+                val title = it.get("title")?.asText()?.takeIf { x -> x.isNotBlank() }
+                    ?: it.get("base_title")?.asText() ?: continue
+                if (!seen.add(id)) continue
+                val platform = it.get("platform")?.get("slug")?.asText()?.takeIf { p -> p.isNotBlank() }
+                out.add(SearchRaw(id, url2, title, platform, it.get("total")?.asInt() ?: 1))
+            }
+            return out
+        } catch (e: Exception) { return emptyList() }
+    }
+
+    // جسر «إعادة البحث» (cross-post): حين يرفض سيرفر OnShort تشغيل المنشور الحالي
+    // نهائيًا (أو يفشل مؤقتًا)، نبحث العنوان نفسه في OnShort ونختار منشورًا بديلًا
+    // على منصة قابلة للتشغيل، ثم نشغّله عبر fetchEpisode مباشرة (لا loadLinks —
+    // فلا تكرار). يعيد true إذا بُثّ رابط حيّ واحد على الأقل.
+    private suspend fun playViaCrossPost(
+        title: String,
+        ep: Int,
+        platform: String,
+        currentPostId: String,
+        collected: MutableList<ExtractorLink>,
+        subtitleCallback: (SubtitleFile) -> Unit,
+    ): Boolean {
+        if (title.isBlank()) return false
+        logD("OnShort.playViaCrossPost title='$title' ep=$ep platform='$platform' current=$currentPostId")
+        return try {
+            val results = searchRaw(title).filter { it.id != currentPostId }
+            if (results.isEmpty()) {
+                logD("OnShort.playViaCrossPost no alternate posts")
+                return false
+            }
+            // نُفضِّل النشر المزدوج بنفس العنوان، ثم منصةً قابلة للتشغيل
+            // (خارج القائمة المرفوضة)، بترتيب أفضل النتائج حسب العنوان.
+            val normTarget = normalizeSearchTitle(title)
+            val ranked = results
+                .filter { (it.platform ?: "").lowercase() !in REJECTED_PLATFORMS }
+                .sortedWith(
+                    compareByDescending<SearchRaw> { normalizeSearchTitle(it.title) == normTarget }
+                        .thenByDescending { (it.platform ?: "").lowercase() in setOf("dramabox", "reelshort", "dotdrama", "stardusttv", "moborels") }
+                )
+            var tried = 0
+            for (cand in ranked) {
+                if (tried >= 4) break
+                tried++
+                logD("OnShort.playViaCrossPost try cand id=${cand.id} platform=${cand.platform} title='${cand.title}'")
+                val node = fetchEpisode(cand.id, ep, null)
+                if (node != null && (node.get("ok")?.asBoolean() ?: true)) {
+                    val main = node.get("url")?.asText()
+                    if (main.isNullOrBlank()) continue
+                    emitNode(node, "OnShort · عبر النشر المزدوج", collected, subtitleCallback)
+                    logD("OnShort.playViaCrossPost SUCCESS via post ${cand.id} platform=${cand.platform}")
+                    return true
+                }
+            }
+            logD("OnShort.playViaCrossPost no playable alternate")
+            false
+        } catch (e: Exception) {
+            logE("OnShort.playViaCrossPost exception ${e.message}")
+            false
+        }
+    }
+
+    // يطبّع نصًا للمقارنة (أحرف صغيرة + بلا علامات/مسافات) — لتطابق عناوين البحث.
+    private fun normalizeSearchTitle(t: String): String =
+        t.lowercase().replace(Regex("""[^a-z0-9_-؀-ۿ]"""), "")
 
     // ---------- التفاصيل (load) ----------
     override suspend fun load(url: String): LoadResponse? {
@@ -427,6 +518,138 @@ class OnShortProvider(private val prefs: SharedPreferences? = null) : MainAPI() 
     }
 
     /**
+     * يبثّ روابط عقدة تشغيل OnShort (main + candidates + subtitles) إلى القائمة
+     * المجمّعة [collected]. يُستخدم للمسار الأصلي (native) ولجسر إعادة البحث —
+     * نفس المنطق تمامًا بلا تكرار. لا يبثّ [emitSorted] هنا؛ المتصل يفعلها مرة
+     * واحدة عند النجاح (فالإعدادات لا تُغيّر شيئًا قبل النجاح). [labelSource]
+     * يوسم الرابط («OnShort» أو «عبر النشر المزدوج») لتمييز مصدره.
+     */
+    private suspend fun emitNode(
+        node: JsonNode,
+        labelSource: String,
+        collected: MutableList<ExtractorLink>,
+        subtitleCallback: (SubtitleFile) -> Unit,
+    ) {
+        // الصوت (مهم): HLS الخاص بـ OnShort يستخدم صوتًا مستقلاً (independent audio) —
+        // الفيديو في نسخ منفصلة والصوت في مجموعة #EXT-X-MEDIA:TYPE=AUDIO منفصلة.
+        // لذلك نُسلّم master URL كاملًا للمشغّل فيُحلّ مجموعةَ الصوت تلقائيًا (صوتٌ مُختار
+        // افتراضيًا + قابل للتبديل + جودة متكيّفة). لا نُخرج candidates[] إطلاقًا:
+        // فبعضها (مثل microdrama / reeltv) نسخُ فيديو منفصلة (MP4 بدون مسار صوت) —
+        // تشغيلُها يؤدي إلى صمتٍ تام (لا يوجد صوت). master فقط هو المضمون السليم صوتيًا.
+        val main = node.get("url")?.asText()
+        if (!main.isNullOrBlank()) {
+            // candidates[] يحمل كل جودة برابطها المستقل. kind يكون "media" (MP4 مباشر)
+            // أو "hls" (playlist HLS) — كلا النوعين روابط فيديو صالحة يجب عرضها.
+            // (كان فلتر kind=="media" فقط يحذف جودات iDrama/ReelShort/Stardust ذات kind=hls
+            //  فيُظهر مزوّد "Auto" واحد بدل كل الجودات المتوفرة — أصلحته.)
+            val candidates = mutableListOf<HlsVariant>()
+            val candArr = node.get("candidates")
+            if (candArr != null && candArr.isArray) {
+                for (c in candArr) {
+                    val cu = c.get("url")?.asText() ?: continue
+                    if (cu.isBlank()) continue
+                    val h = Regex("""\d+""").find(c.get("quality")?.asText() ?: "")?.value?.toIntOrNull() ?: 0
+                    candidates.add(HlsVariant(h, cu))
+                }
+            }
+            val mainLen = main.length
+            val candLens = candidates.map { it.uri.length }.joinToString(",")
+            val candHasAuth = candidates.any { it.uri.contains("auth_key") }
+            logD("OnShort.emitNode($labelSource) mainLen=$mainLen candLens=[$candLens] mainAuth=${main.contains("auth_key")} candAuth=$candHasAuth")
+
+            // الاستراتيجية السريعة والآمنة (بلا أي سحب شبكة في مسار التشغيل):
+            // ExoPlayer/CloudStream يحلّل master HLS بنفسه تلقائيًا ويعطي كل الجودات
+            // والأصوات فورًا (يختار الجودة تلقائيًا). لذلك لا نحتاج جلب master مسبقًا
+            // (كان هذا الجلب هو سبب تأخير عرض الفيديو والجودات).
+            var mainPlay = main
+            if (candidates.isNotEmpty()) {
+                val mainIsHls = linkType(main) == ExtractorLinkType.M3U8
+                val mainInCandidates = candidates.any { it.uri == main }
+                // إصلاح الخوادم التي ترسل main ناقصًا (MP4 بلا auth_key) بينما المرشحات
+                // تحمل توقيعًا: نختار أفضل مرشح موقّع كأساس التشغيل (flextv/dramaboxdb).
+                val mainHasAuth = main.contains("auth_key")
+                val best = if (!mainIsHls && !mainHasAuth) {
+                    candidates.filter { it.uri.contains("auth_key") }.maxByOrNull { it.height }
+                        ?: candidates.firstOrNull()
+                } else null
+                if (best != null) {
+                    logD("OnShort.emitNode REPLACE main(bare) -> cand h=${best.height} (${main.take(55)}... => ${best.uri.take(55)}...)")
+                    mainPlay = best.uri
+                }
+                val effIsHls = linkType(mainPlay) == ExtractorLinkType.M3U8
+                val effInCands = candidates.any { it.uri == mainPlay }
+                logD("OnShort.emitNode candidates=${candidates.size} mainHls=$effIsHls inCands=$effInCands mainWasHls=$mainIsHls")
+
+                // أساس: main (المُحسَّن) — نرسله دائمًا للمشغّل (HLS أو MP4).
+                // كان الشرط القديم (effIsHls || !effInCands) يمنع MP4 موجودة في candidates
+                // من الوصول للمشغّل → فيديو FlexTV/DramaBox لا يشتغل.
+                // (الافتراضي true = يُبثّ كما كان تماماً؛ إطفاؤه في الإعدادات يخفيه فقط.)
+                if (prefs?.getBoolean(OnShortSettingsBottomSheet.KEY_SHOW_AUTO, true) != false) {
+                    collected.add(newExtractorLink(name, "Auto · $labelSource", mainPlay, effIsHls.let { if (it) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO }) {
+                        this.headers = mapOf("User-Agent" to ONS_UA, "Referer" to mainUrl)
+                    })
+                }
+
+                // مرشحات الجودة الصريحة (مختلفة عن main، بلا تكرار مسار).
+                // ترتيب العرض: الروابط الأعلى موثوقية ("nav"/"nav2" — الأساس الصالح) أولًا
+                // تنازليًا حسب الدقة، ثم روابط "narrow" (الأقل استقرارًا على بعض الخوادم مثل
+                // dramaboxdb) في النهاية. نُبقي كل الروابط — لا حذف — لكن نُبرز الصالح أولًا.
+                val ranked = candidates.sortedWith(
+                    Comparator { a, b ->
+                        val ca = if (a.uri.contains("narrow")) 1 else 0
+                        val cb = if (b.uri.contains("narrow")) 1 else 0
+                        if (ca != cb) ca - cb
+                        else b.height - a.height
+                    }
+                )
+                val seen = mutableSetOf<String>()
+                // عتبة «أقل جودة معروضة» — "all" (الافتراضي) = بلا ترشيح إطلاقاً،
+                // فيمرّ كل مرشّح كما كان. رابط Auto ليس مرشّحاً ولا يشمله هذا الترشيح.
+                val minHeight = when (prefs?.getString(OnShortSettingsBottomSheet.KEY_MIN_HEIGHT, "all")) {
+                    "480" -> 480
+                    "360" -> 360
+                    else -> 0
+                }
+                for (v in ranked) {
+                    // تجاهل الرابط الأساسي (لا نكرّره)
+                    if (v.uri == mainPlay) continue
+                    // لا نعرض "Auto" مكررًا بلا معنى من candidate مجهول الجودة (height=0)
+                    // يطابق أساسي الوظيفة — نحتفظ فقط بالجودات الصريحة (height>0).
+                    if (v.height <= 0) continue
+                    if (minHeight > 0 && v.height < minHeight) continue
+                    if (!seen.add(v.uri)) continue
+                    val label = "${v.height}p"
+                    collected.add(newExtractorLink(name, "$label · $labelSource", v.uri, linkType(v.uri)) {
+                        this.quality = getQualityFromName("${v.height}p")
+                        this.headers = mapOf("User-Agent" to ONS_UA, "Referer" to mainUrl)
+                    })
+                }
+            } else {
+                // لا يوجد candidates: main وحده. دلّ نوعه (m3u8 = HLS تكيفي كل الجودات،
+                // mp4 = مباشر). بلا جلب — يفتح فورًا.
+                if (prefs?.getBoolean(OnShortSettingsBottomSheet.KEY_SHOW_AUTO, true) != false) {
+                    collected.add(newExtractorLink(name, "Auto · $labelSource", mainPlay, linkType(mainPlay)) {
+                        this.headers = mapOf("User-Agent" to ONS_UA, "Referer" to mainUrl)
+                    })
+                }
+            }
+        }
+
+        val subs = node.get("subtitles")
+        if (subs != null && subs.isArray) {
+            val seen = mutableSetOf<String>()
+            for (s in subs) {
+                val su = s.get("url")?.asText() ?: continue
+                if (su.isBlank()) continue
+                if (!seen.add(su)) continue
+                val langRaw = s.get("lang")?.asText() ?: s.get("label")?.asText() ?: "ar"
+                val lang = normalizeLang(langRaw)
+                try { subtitleCallback(newSubtitleFile(lang, su)) } catch (_: Exception) {}
+            }
+        }
+    }
+
+    /**
      * بثّ روابط البث المجمّعة دفعة واحدة: «افتراضي» = نفس الترتيب تماماً كما كان،
      * و«تصاعدي/تنازلي» يعيدان الترتيب فقط (فرز مستقر: الروابط متساوية الجودة
      * تحتفظ بترتيبها النسبي، ولا إضافة ولا حذف ولا تكرار).
@@ -488,15 +711,24 @@ class OnShortProvider(private val prefs: SharedPreferences? = null) : MainAPI() 
 
             val node = fetchEpisode(postId, ep, effectiveTicket)
 
-            // جسر Mosalsaly: حين يرفض سيرفر OnShort المنصة نهائيًا — أو تفشل كل محاولات
-            // OnShort — نعتمد على Mosalsaly (نفس المحتوى على الأغلب) عبر البحث بالعنوان.
-            // لا نقيّد على المنصة: بحث العنوان + منصة صفحة Mosalsaly يحدّدان النجاح
-            // تلقائيًا (العمل قد يكون منشورًا على منصة مختلفة عند Mosalsaly).
+            // سلسلة الجسور لكل مصدر: حين يرفض سيرفر OnShort تشغيل المنشور الحالي
+            // (أو يفشل مؤقتًا) نجرّب جسرَي تشغيل بالترتيب — جسر إعادة البحث ثم جسر
+            // Mosalsaly — وأول مصدر يُصدر رابطًا حيًا يربح. العمل نفسه قد يكون منشورًا
+            // على منصة أخرى قابلة للتشغيل عند OnShort (cross-post) أو على mosalsaly.com
+            // (بحث بالعنوان)؛ لا نقيّد على المنصة — بحث العنوان يحدد النجاح تلقائيًا.
             if (node == null || !(node.get("ok")?.asBoolean() ?: true)) {
                 val reason = if (node == null) "null" else rejectReason(node)
                 val bridgeEnabled = prefs?.getBoolean(OnShortSettingsBottomSheet.KEY_BRIDGE_ENABLED, true) ?: true
                 logD("OnShort.loadLinks OnShort failed (reason='$reason') bridge=$bridgeEnabled titleLen=${title.length}")
                 if (bridgeEnabled && title.isNotBlank()) {
+                    // 1) جسر إعادة البحث: منشور بديل على منصة قابلة للتشغيل
+                    val cross = playViaCrossPost(title, ep, platform, postId, collected, subtitleCallback)
+                    if (cross) {
+                        emitSorted(prefs, collected, callback)
+                        return true
+                    }
+                    logD("OnShort.loadLinks cross-post bridge did not produce links")
+                    // 2) جسر Mosalsaly: بحث العنوان في mosalsaly.com
                     val bridge = OnShortMosalsalyBridge(prefs)
                     val bridged = bridge.playViaMosalsaly(data, title, platform, subtitleCallback) { link -> collected.add(link) }
                     if (bridged) {
@@ -511,123 +743,10 @@ class OnShortProvider(private val prefs: SharedPreferences? = null) : MainAPI() 
                 return false
             }
 
-            // الصوت (مهم): HLS الخاص بـ OnShort يستخدم صوتًا مستقلاً (independent audio) —
-            // الفيديو في نسخ منفصلة والصوت في مجموعة #EXT-X-MEDIA:TYPE=AUDIO منفصلة.
-            // لذلك نُسلّم master URL كاملًا للمشغّل فيُحلّ مجموعةَ الصوت تلقائيًا (صوتٌ مُختار
-            // افتراضيًا + قابل للتبديل + جودة متكيّفة). لا نُخرج candidates[] إطلاقًا:
-            // فبعضها (مثل microdrama / reeltv) نسخُ فيديو منفصلة (MP4 بدون مسار صوت) —
-            // تشغيلُها يؤدي إلى صمتٍ تام (لا يوجد صوت). master فقط هو المضمون السليم صوتيًا.
+            // بثّ روابط التشغيل من العقدة الناجحة (main + candidates + ترجمات).
+            // المنطق مُشارك مع جسر إعادة البحث (emitNode) — هنا بوسم «OnShort».
             val main = node.get("url")?.asText()
-            if (!main.isNullOrBlank()) {
-                // candidates[] يحمل كل جودة برابطها المستقل. kind يكون "media" (MP4 مباشر)
-                // أو "hls" (playlist HLS) — كلا النوعين روابط فيديو صالحة يجب عرضها.
-                // (كان فلتر kind=="media" فقط يحذف جودات iDrama/ReelShort/Stardust ذات kind=hls
-                //  فيُظهر مزوّد "Auto" واحد بدل كل الجودات المتوفرة — أصلحته.)
-                val candidates = mutableListOf<HlsVariant>()
-                val candArr = node.get("candidates")
-                if (candArr != null && candArr.isArray) {
-                    for (c in candArr) {
-                        val cu = c.get("url")?.asText() ?: continue
-                        if (cu.isBlank()) continue
-                        val h = Regex("""\d+""").find(c.get("quality")?.asText() ?: "")?.value?.toIntOrNull() ?: 0
-                        candidates.add(HlsVariant(h, cu))
-                    }
-                }
-                val mainLen = main.length
-                val candLens = candidates.map { it.uri.length }.joinToString(",")
-                val candHasAuth = candidates.any { it.uri.contains("auth_key") }
-                logD("OnShort.loadLinks mainLen=$mainLen candLens=[$candLens] mainAuth=${main.contains("auth_key")} candAuth=$candHasAuth")
-
-                // الاستراتيجية السريعة والآمنة (بلا أي سحب شبكة في مسار التشغيل):
-                // ExoPlayer/CloudStream يحلّل master HLS بنفسه تلقائيًا ويعطي كل الجودات
-                // والأصوات فورًا (يختار الجودة تلقائيًا). لذلك لا نحتاج جلب master مسبقًا
-                // (كان هذا الجلب هو سبب تأخير عرض الفيديو والجودات).
-                var mainPlay = main
-                if (candidates.isNotEmpty()) {
-                    val mainIsHls = linkType(main) == ExtractorLinkType.M3U8
-                    val mainInCandidates = candidates.any { it.uri == main }
-                    // إصلاح الخوادم التي ترسل main ناقصًا (MP4 بلا auth_key) بينما المرشحات
-                    // تحمل توقيعًا: نختار أفضل مرشح موقّع كأساس التشغيل (flextv/dramaboxdb).
-                    val mainHasAuth = main.contains("auth_key")
-                    val best = if (!mainIsHls && !mainHasAuth) {
-                        candidates.filter { it.uri.contains("auth_key") }.maxByOrNull { it.height }
-                            ?: candidates.firstOrNull()
-                    } else null
-                    if (best != null) {
-                        logD("OnShort.loadLinks REPLACE main(bare) -> cand h=${best.height} (${main.take(55)}... => ${best.uri.take(55)}...)")
-                        mainPlay = best.uri
-                    }
-                    val effIsHls = linkType(mainPlay) == ExtractorLinkType.M3U8
-                    val effInCands = candidates.any { it.uri == mainPlay }
-                    logD("OnShort.loadLinks candidates=${candidates.size} mainHls=$effIsHls inCands=$effInCands mainWasHls=$mainIsHls")
-
-                    // أساس: main (المُحسَّن) — نرسله دائمًا للمشغّل (HLS أو MP4).
-                    // كان الشرط القديم (effIsHls || !effInCands) يمنع MP4 موجودة في candidates
-                    // من الوصول للمشغّل → فيديو FlexTV/DramaBox لا يشتغل.
-                    // (الافتراضي true = يُبثّ كما كان تماماً؛ إطفاؤه في الإعدادات يخفيه فقط.)
-                    if (prefs?.getBoolean(OnShortSettingsBottomSheet.KEY_SHOW_AUTO, true) != false) {
-                        collected.add(newExtractorLink(name, "Auto · OnShort", mainPlay, effIsHls.let { if (it) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO }) {
-                            this.headers = mapOf("User-Agent" to ONS_UA, "Referer" to mainUrl)
-                        })
-                    }
-
-                    // مرشحات الجودة الصريحة (مختلفة عن main، بلا تكرار مسار).
-                    // ترتيب العرض: الروابط الأعلى موثوقية ("nav"/"nav2" — الأساس الصالح) أولًا
-                    // تنازليًا حسب الدقة، ثم روابط "narrow" (الأقل استقرارًا على بعض الخوادم مثل
-                    // dramaboxdb) في النهاية. نُبقي كل الروابط — لا حذف — لكن نُبرز الصالح أولًا.
-                    val ranked = candidates.sortedWith(
-                        Comparator { a, b ->
-                            val ca = if (a.uri.contains("narrow")) 1 else 0
-                            val cb = if (b.uri.contains("narrow")) 1 else 0
-                            if (ca != cb) ca - cb
-                            else b.height - a.height
-                        }
-                    )
-                    val seen = mutableSetOf<String>()
-                    // عتبة «أقل جودة معروضة» — "all" (الافتراضي) = بلا ترشيح إطلاقاً،
-                    // فيمرّ كل مرشّح كما كان. رابط Auto ليس مرشّحاً ولا يشمله هذا الترشيح.
-                    val minHeight = when (prefs?.getString(OnShortSettingsBottomSheet.KEY_MIN_HEIGHT, "all")) {
-                        "480" -> 480
-                        "360" -> 360
-                        else -> 0
-                    }
-                    for (v in ranked) {
-                        // تجاهل الرابط الأساسي (لا نكرّره)
-                        if (v.uri == mainPlay) continue
-                        // لا نعرض "Auto" مكررًا بلا معنى من candidate مجهول الجودة (height=0)
-                        // يطابق أساسي الوظيفة — نحتفظ فقط بالجودات الصريحة (height>0).
-                        if (v.height <= 0) continue
-                        if (minHeight > 0 && v.height < minHeight) continue
-                        if (!seen.add(v.uri)) continue
-                        val label = "${v.height}p"
-                        collected.add(newExtractorLink(name, "$label · OnShort", v.uri, linkType(v.uri)) {
-                            this.quality = getQualityFromName("${v.height}p")
-                            this.headers = mapOf("User-Agent" to ONS_UA, "Referer" to mainUrl)
-                        })
-                    }
-                } else {
-                    // لا يوجد candidates: main وحده. دلّ نوعه (m3u8 = HLS تكيفي كل الجودات،
-                    // mp4 = مباشر). بلا جلب — يفتح فورًا.
-                    if (prefs?.getBoolean(OnShortSettingsBottomSheet.KEY_SHOW_AUTO, true) != false) {
-                        collected.add(newExtractorLink(name, "Auto · OnShort", mainPlay, linkType(mainPlay)) {
-                            this.headers = mapOf("User-Agent" to ONS_UA, "Referer" to mainUrl)
-                        })
-                    }
-                }
-            }
-
-            val subs = node.get("subtitles")
-            if (subs != null && subs.isArray) {
-                val seen = mutableSetOf<String>()
-                for (s in subs) {
-                    val su = s.get("url")?.asText() ?: continue
-                    if (su.isBlank()) continue
-                    if (!seen.add(su)) continue
-                    val langRaw = s.get("lang")?.asText() ?: s.get("label")?.asText() ?: "ar"
-                    val lang = normalizeLang(langRaw)
-                    try { subtitleCallback(newSubtitleFile(lang, su)) } catch (_: Exception) {}
-                }
-            }
+            if (!main.isNullOrBlank()) emitNode(node, "OnShort", collected, subtitleCallback)
             // ★ بثّ الروابط المجمّعة قبل كل return ناجح — «افتراضي» = نفس الترتيب
             // تماماً كما كان، و«تصاعدي/تنازلي» يعيدان الترتيب فقط (بلا حذف/تكرار).
             emitSorted(prefs, collected, callback)

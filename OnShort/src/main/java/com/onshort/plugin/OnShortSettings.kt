@@ -139,13 +139,13 @@ class OnShortSettingsBottomSheet(private val prefs: SharedPreferences) : BottomS
             }
             playbackCategory.addPreference(minHeightPref)
 
-            // جسر Mosalsaly: عند رفض سيرفر OnShort تشغيل منصة نهائيًا
-            // (NetShort/ShortMax/GoodShort/DramaBite/StoryReel/VibeShort) يبحث
-            // جسرٌ تلقائي بالعنوان في mosalsaly.com ليوفّر روابط التشغيل.
+            // جسور التشغيل: عند رفض سيرفر OnShort تشغيل منصة نهائيًا — أو فشل مؤقت —
+            // نجرّب جسرين بالترتيب: إعادة البحث (منشور بديل على منصة قابلة للتشغيل ضمن
+            // OnShort) ثم Mosalsaly (بحث العنوان). المفتاح الرئيسي يفعّل/يعطّل السلسلة كلها.
             val bridgePref = SwitchPreferenceCompat(ctx).apply {
                 key = KEY_BRIDGE_ENABLED
-                title = "جسر تشغيل Mosalsaly"
-                summary = "تشغيل المنصات المرفوضة من OnShort عبر Mosalsaly (بحث بالعنوان)"
+                title = "جسور تشغيل بديلة"
+                summary = "عند فشل التشغيل: إعادة البحث + Mosalsaly (بحث بالعنوان)"
                 setDefaultValue(true)
             }
             playbackCategory.addPreference(bridgePref)
