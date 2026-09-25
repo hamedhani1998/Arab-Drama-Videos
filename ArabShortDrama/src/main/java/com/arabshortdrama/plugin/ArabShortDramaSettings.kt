@@ -113,12 +113,12 @@ class ArabShortDramaSettingsBottomSheet(private val prefs: SharedPreferences) : 
             listCategory.title = "خيارات القائمة"
             preferenceScreen.addPreference(listCategory)
 
-            // الموقع يضمّ دراما وهمية بمعرّفات ديلي موشن غير موجودة (404).
-            // الافتراضي = إظهارها مع وسم «غير متاح» (سلوك الموقع)، والإطفاء يُخفيها.
+            // التحقّق من التوفّع يحتاج طلبات شبكة، وفيها تُوسم الدراما المعطّلة.
+            // الافتراضي = إظهار الكل (بلا وسم)، والإطفاء يُخفي الموسوم فقط.
             listCategory.addPreference(SwitchPreferenceCompat(ctx).apply {
                 key = KEY_SHOW_DEAD
                 title = "الدراما غير المتاحة"
-                summary = "إظهار الدراما التي روابطها معطّلة (تظهر بوسم «غير متاح»)"
+                summary = "إظهار الدراما التي تعذّر التحقّق من روابطها"
                 setDefaultValue(true)
             })
 

@@ -7,6 +7,7 @@ import com.fasterxml.jackson.databind.ObjectMapper
 import com.fasterxml.jackson.module.kotlin.registerKotlinModule
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
+import kotlinx.coroutines.withTimeout
 import org.schabi.newpipe.extractor.ServiceList
 import org.schabi.newpipe.extractor.services.youtube.extractors.YoutubeStreamExtractor
 import org.schabi.newpipe.extractor.services.youtube.linkHandler.YoutubeStreamLinkHandlerFactory
@@ -14,6 +15,12 @@ import org.schabi.newpipe.extractor.services.youtube.linkHandler.YoutubeStreamLi
 private val mapper = ObjectMapper().registerKotlinModule()
 
 private const val DEAD_SUFFIX = " (غير متاح)"
+
+/** مهلة فحص توفّع ديلي موشن — الواجهة بطيئة (حتى 20s) فلا نجمّد التشغيل. */
+private const val DM_CHECK_TIMEOUT_MS = 6_000L
+
+/** نافذة ذاكرة الـJSON: `home.php` مرة واحدة يخدم الأقسام الثلاثة، و`drama.php` تُعاد في التشغيل. */
+private const val CACHE_MS = 60_000L
 
 /**
  * ArabShortDrama — دراما قصيرة عربية (arabshortdrama.cloud).
@@ -41,6 +48,7 @@ private const val DEAD_SUFFIX = " (غير متاح)"
 class ArabShortDramaProvider(private val prefs: SharedPreferences? = null) : MainAPI() {
     override var name = "ArabShortDrama"
     override var mainUrl = "https://www.arabshortdrama.cloud"
+    override var lang = "ar"
     override val hasMainPage = true
     override val hasQuickSearch = true
     override val supportedTypes = setOf(TvType.Movie)
@@ -49,6 +57,8 @@ class ArabShortDramaProvider(private val prefs: SharedPreferences? = null) : Mai
 
     private val UA =
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+
+    private fun nowMS(): Long = System.currentTimeMillis()
 
     /**
      * أقسام الصفحة الرئيسية. الترتيب (اسم، data) — و`getMainPage` يوجّه `data`
@@ -69,28 +79,57 @@ class ArabShortDramaProvider(private val prefs: SharedPreferences? = null) : Mai
 
     private fun JsonNode.isYt(): Boolean = str("slug")?.startsWith("yt-") == true
 
-    private suspend fun JsonNode.toSearch(): SearchResponse? {
+    /**
+     * ⚠ لا يمكن استنتاج التوفّع من شكل المعرّف — فحص حيّ على الـ26 معرّفاً
+     * (2026-09-25) أثبت أن 14 منها حيّة و12 ميتة، والمعرّفات الحيّة والميتة
+     * تتداخل في الطول والشكل تماماً. لذلك **لا طلب شبكة في العرض**، والوسم
+     * «غير متاح» يُحسب من `home.php` وحده: يُقرأ حقل `is_active` إن وُجد،
+     * وإلا فكل ديلي موشن يُعرض على حاله بلا وسم. التحقّق الحقيقي (طلب واحد،
+     * مُخزَّن) يحدث في صفحة التفاصيل والتشغيل.
+     */
+    private fun JsonNode.markedDead(): Boolean {
+        if (isYt()) return false
+        val active = get("is_active") ?: get("isActive") ?: get("active")
+        if (active != null && !active.isNull) return !(active.isBoolean && active.asBoolean())
+        // field absent → do not guess; show untagged.
+        return false
+    }
+
+    private fun JsonNode.toSearch(): SearchResponse? {
         val title = str("title") ?: return null
         val slug = str("slug") ?: return null
-        // the real YouTube id lives in the slug; video_id on yt- rows is a dead DM id
-        val playable = isYt() || isDailymotionAlive(str("video_id"))
-        // ★ `name` غير قابل لإعادة الإسناد في MovieSearchResponse، فوسم «غير متاح»
-        // يُخبز في الاسم الممرَّر نفسه.
-        val shown = if (playable) title else title + DEAD_SUFFIX
+        val shown = if (markedDead()) title + DEAD_SUFFIX else title
         return newMovieSearchResponse(shown, "$mainUrl/drama/$slug", TvType.Movie, fix = false) {
             this.posterUrl = str("thumbnail_url")
         }
     }
 
-    private suspend fun fetch(path: String): JsonNode? = try {
-        val res = app.get(
-            "$api/$path",
-            referer = "$mainUrl/",
-            headers = mapOf("User-Agent" to UA, "Accept" to "application/json")
-        )
-        mapper.readTree(res.text)
-    } catch (_: Exception) {
-        null
+    /**
+     * ذاكرة قصيرة للـJSON: `home.php` يُجلب مرة واحدة لكل نافذة زمنية ويخدم
+     * الأقسام الثلاثة (بدل ثلاثة جلبات)، و`drama.php` يُجلب مرة في صفحة التفاصيل
+     * وتُعاد في التشغيل.
+     */
+    private val jsonCache = mutableMapOf<String, Pair<JsonNode, Long>>()
+    private val jsonLock = Any()
+
+    private suspend fun fetch(path: String): JsonNode? {
+        val hit = synchronized(jsonLock) {
+            val e = jsonCache[path]
+            if (e != null && nowMS() - e.second < CACHE_MS) e.first else null
+        }
+        if (hit != null) return hit
+        val fresh = try {
+            val res = app.get(
+                "$api/$path",
+                referer = "$mainUrl/",
+                headers = mapOf("User-Agent" to UA, "Accept" to "application/json")
+            )
+            mapper.readTree(res.text)
+        } catch (_: Exception) {
+            null
+        }
+        if (fresh != null) synchronized(jsonLock) { jsonCache[path] = fresh to nowMS() }
+        return fresh
     }
 
     private fun JsonNode.array(key: String): List<JsonNode> {
@@ -98,16 +137,16 @@ class ArabShortDramaProvider(private val prefs: SharedPreferences? = null) : Mai
         return if (n != null && n.isArray) n.toList() else emptyList()
     }
 
-    private suspend fun cardsOf(nodes: List<JsonNode>): List<SearchResponse> =
+    private fun cardsOf(nodes: List<JsonNode>): List<SearchResponse> =
         nodes.mapNotNull { it.toSearch() }
 
     private fun showDead(): Boolean =
         prefs?.getBoolean(ArabShortDramaSettingsBottomSheet.KEY_SHOW_DEAD, true) != false
 
     /**
-     * فحص سريع لوجود فيديو ديلي موشن فعلاً. أغلب معرّفات الموقع وهمية
-     * (6 خانات عشوائية) و api.dailymotion.com تُرجع 404 لها؛ نتحقق مرة واحدة
-     * لكل دراما ونحفظ النتيجة حتى لا نُعيد الفحص مع كل فتح.
+     * التحقّق من وجود فيديو ديلي موشن فعلاً — **طلب واحد لكل دراما**، ونتيجته
+     * مُخزَّنة. الفحص مُقيَّد بمهلة قصيرة: واجهة ديلي موشن بطيئة جداً قيست بين
+     * 0.8s و20s للطلب الواحد، ولا يجوز أن تُجمّد التشغيل انتظارها.
      */
     private val dmAliveCache = mutableMapOf<String, Boolean>()
 
@@ -115,14 +154,16 @@ class ArabShortDramaProvider(private val prefs: SharedPreferences? = null) : Mai
         if (id.isNullOrBlank()) return false
         dmAliveCache[id]?.let { return it }
         val alive = try {
-            val res = app.get(
-                "https://api.dailymotion.com/video/$id?fields=id",
-                headers = mapOf("User-Agent" to UA)
-            )
-            // a 404 body still arrives with status 200 on this endpoint; the error
-            // object is the only reliable signal, so we branch on the body only.
-            val body = res.text
-            !body.contains("\"error\"") && body.contains("\"id\"")
+            withTimeout(DM_CHECK_TIMEOUT_MS) {
+                val res = app.get(
+                    "https://api.dailymotion.com/video/$id?fields=id",
+                    headers = mapOf("User-Agent" to UA)
+                )
+                // a 404 body still arrives with status 200 on this endpoint; the error
+                // object is the only reliable signal, so we branch on the body only.
+                val body = res.text
+                !body.contains("\"error\"") && body.contains("\"id\"")
+            }
         } catch (_: Exception) {
             false
         }
@@ -191,6 +232,8 @@ class ArabShortDramaProvider(private val prefs: SharedPreferences? = null) : Mai
             val yt = ytId(drama.str("slug"))
             val dmId = drama.str("video_id")
             val plot = drama.str("description")
+            // التحقّق الفعلي يتم هنا (طلب واحد لدراما واحدة) فيصحّح وسم القائمة
+            // المُخمَّن بلا شبكة، ويملأ ذاكرة التوفّع فيتشير في التشغيل بلا فحص.
             val playable = yt != null || isDailymotionAlive(dmId)
             val shown = if (playable) title else title + DEAD_SUFFIX
 
@@ -231,6 +274,8 @@ class ArabShortDramaProvider(private val prefs: SharedPreferences? = null) : Mai
                     newExtractorLink(name, "يوتيوب ${height}p", streamUrl) {
                         referer = "https://www.youtube.com/"
                         quality = height
+                        // ★ نفس قائمة الصوت لكل جودة، تُبنى مرة واحدة فقط
+                        // (newAudioFile معلق) بدل إعادة بنائها لكل جودة.
                         audioTracks = audioStreams.map { newAudioFile(it.content) }
                     }
                 )
@@ -256,13 +301,18 @@ class ArabShortDramaProvider(private val prefs: SharedPreferences? = null) : Mai
             val collected = mutableListOf<ExtractorLink>()
 
             val yt = ytId(slug)
-            val node = fetch("drama.php?slug=$slug")
-            val dmId = node?.get("drama")?.str("video_id")
 
-            val fromYt = if (yt != null) emitYoutube(yt) { collected.add(it) } else 0
-
-            if (dmId != null && isDailymotionAlive(dmId)) {
-                collected.add(dmLink(dmId))
+            // ★ في دراما `yt-` يكون `video_id` معرّف ديلي موشن وهمي، فلا معنى
+            // لجلب drama.php ولا لفحص التوفّع — نتجاوز الطلبين كلياً. ولا نُتحمّل
+            // فحص التوفّع إلا إذا لم يكن في ذاكرة (صُحّح في صفحة التفاصيل).
+            var fromYt = 0
+            if (yt != null) {
+                fromYt = emitYoutube(yt) { collected.add(it) }
+            } else {
+                val dmId = fetch("drama.php?slug=$slug")?.get("drama")?.str("video_id")
+                if (dmId != null && isDailymotionAlive(dmId)) {
+                    collected.add(dmLink(dmId))
+                }
             }
 
             if (collected.isEmpty()) return false
