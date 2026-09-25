@@ -125,10 +125,12 @@ object MosSubServer {
                 // (بروكسي الموقع المركزي الذي يرد 200/206 عبر HTTP/1.1). ينطبق على الفيديو والترجمة
                 // netshort معاً؛ باقي المنصات لا تصل إلى هنا أصلاً (routeVideo netshort فقط).
                 val proxy = DIZI1 + java.net.URLEncoder.encode(job.url, "UTF-8").replace("+", "%20")
-                // الترجمة: dizi1 أولاً (بروكسي مركزي يسلّم WebVTT 200 لرابط مباشر قد يموت 000/403
-                // من الجهاز)، ثم المباشر كاحتياط. الفيديو: المباشر أولاً ثم dizi1 كما كان.
-                val attempts = if (job.kind == Kind.SUBTITLE) listOf(proxy, job.url)
-                    else listOf(job.url, proxy)
+                // الترجمة: المباشر أولاً (ns-aws عبر HTTP/1.1 بترويسات UA/Referer/Accept الدنيا يرد
+                // 200 WebVTT على كل الحلقات الحية — تحقق سيرفر-سايد 2026-09-25، الحلقات 1/2/3/4/7/8
+                // مباشر=200 في كل الحالات بينما dizi1 يرد 403 على 3/4/7/8 رغم أن الترجمة حية).
+                // v28 جعل dizi1 أولاً فقتل الحية — تصحيح: المباشر أولاً، وdizi1 احتياط فقط للروابط
+                // التي يموت المباشر من الجهاز. الفيديو (netshort): المباشر أولاً كما كان.
+                val attempts = listOf(job.url, proxy)
 
                 for (target in attempts) {
                     if (upstream != null) break
