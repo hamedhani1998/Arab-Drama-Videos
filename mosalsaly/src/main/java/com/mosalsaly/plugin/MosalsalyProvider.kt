@@ -387,6 +387,30 @@ class MosalsalyProvider(
         }
     }
 
+    // فحص جودة بديلة (غير الأساس): netshort يعطي الجودات (720) على awscdn.netshort.com
+    // بمضيف مختلف وبـ auth قديم → 403 دائماً. الأساس (ns-aws-cdn) موثوق. نجلب لجودة
+    // بديلة رأساً صغيراً (Range) لنبقي الحيّ ونستبعد الميت دون تحميل جسم كامل (وسيلة
+    // v13/v15: نحن مطمئنون لأن awscdn يرد 403 بلا body، وns-aws يرد 206 لنفس الطلب).
+    private suspend fun probeQualityUrl(url: String, declaredType: String?): ExtractorLinkType? {
+        val idU = url.lowercase()
+        if (isExplicitlyExpired(url)) {
+            Log.w(TAG, "probeQuality expires-in-past skip $url")
+            return null
+        }
+        return try {
+            val resp = app.get(url, headers = mapOf(
+                "User-Agent" to MOS_UA, "Referer" to mainUrl, "Range" to "bytes=0-65535"
+            ), referer = mainUrl)
+            val text = resp.text
+            if (text.isNotBlank() && text.trimStart().startsWith("#EXTM3U")) ExtractorLinkType.M3U8
+            else if (text.isNotBlank()) ExtractorLinkType.VIDEO
+            else null
+        } catch (e: Exception) {
+            Log.w(TAG, "probeQuality skip $url — ${e.message}")
+            null
+        }
+    }
+
     private suspend fun emitDescriptorLinks(
         descriptor: ObjectNode,
         platform: String,
@@ -432,7 +456,7 @@ class MosalsalyProvider(
                     continue
                 }
 
-                val kind = probeMedia(url, type)
+                val kind = if (q.isNotBlank()) probeQualityUrl(url, type) else probeMedia(url, type)
                 if (kind == null) {
                     Log.w(TAG, "skip dead/mismatched $platform url=${url.take(80)}")
                     continue
