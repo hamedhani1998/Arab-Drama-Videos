@@ -4,6 +4,9 @@ import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
 import org.jsoup.nodes.Document
 import org.jsoup.nodes.Element
+import org.schabi.newpipe.extractor.ServiceList
+import org.schabi.newpipe.extractor.services.youtube.extractors.YoutubeStreamExtractor
+import org.schabi.newpipe.extractor.services.youtube.linkHandler.YoutubeStreamLinkHandlerFactory
 import android.content.SharedPreferences
 import android.util.Log
 
@@ -128,6 +131,123 @@ class PakistaniliveProvider(private val prefs: SharedPreferences? = null) : Main
         }
     }
 
+    /**
+     * ● نيوبايب + DASH محلي (المسار «الأساسي» — نفس أسلوب aryarabia).
+     *   `YoutubeStreamExtractor.fetchPage()` يعطي روابط googlevideo مفكوكة مع
+     *   نطاقات Initialization/Index لكل جودة، ونبني منها مانيفست DASH على
+     *   `127.0.0.1` يعرض كل جودة مع أفضل صوت — فيتلقى يوتيوب طلبات Range
+     *   رسمية. ينجح حيث فشل `loadExtractor` في بعض الشبكات.
+     */
+    private suspend fun resolveFromNewPipe(
+        vid: String,
+        subtitleCallback: (SubtitleFile) -> Unit,
+        callback: (ExtractorLink) -> Unit
+    ): Int {
+        var produced = 0
+        val watchUrl = "https://www.youtube.com/watch?v=$vid"
+        try {
+            val link = YoutubeStreamLinkHandlerFactory.getInstance().fromUrl(watchUrl)
+            val s = object : YoutubeStreamExtractor(ServiceList.YouTube, link) {}
+            s.fetchPage()
+
+            val dur = runCatching { s.length }.getOrNull() ?: 0
+            val durationSeconds = if (dur > 0) dur else 3600L
+
+            val seenUrls = mutableSetOf<String>()
+
+            // جودات الفيديو (video-only): وفّقها مع أفضل صوت
+            val videoOnlyList = (s.videoOnlyStreams ?: emptyList()).mapNotNull { vs ->
+                try {
+                    val streamUrl = vs.content ?: return@mapNotNull null
+                    if (!seenUrls.add(streamUrl)) return@mapNotNull null
+                    val height = runCatching { vs.height ?: 0 }.getOrNull() ?: 0
+                    val label = if (height > 0) height.toString() else "video"
+                    var mime = vs.format?.mimeType
+                    if (mime.isNullOrEmpty()) mime = PakiDashServer.mimeFromUrl(streamUrl, false)
+
+                    val initR = if (vs.initStart != null && vs.initEnd != null) "${vs.initStart}-${vs.initEnd}" else null
+                    val indexR = if (vs.indexStart != null && vs.indexEnd != null) "${vs.indexStart}-${vs.indexEnd}" else null
+
+                    PakiStreamInfo(streamUrl, mime ?: "video/mp4", height, label, initR, indexR)
+                } catch (e: Exception) { null }
+            }.distinctBy { it.height }
+
+            val audioInfoList = (s.audioStreams ?: emptyList()).mapNotNull { asr ->
+                try {
+                    val aUrl = asr.content ?: return@mapNotNull null
+                    val bitrate = runCatching { asr.bitrate ?: 128000 }.getOrNull() ?: 128000
+                    var mime = runCatching { asr.format?.mimeType }.getOrNull()
+                    if (mime.isNullOrEmpty()) mime = PakiDashServer.mimeFromUrl(aUrl, true)
+
+                    val initR = if (asr.initStart != null && asr.initEnd != null) "${asr.initStart}-${asr.initEnd}" else null
+                    val indexR = if (asr.indexStart != null && asr.indexEnd != null) "${asr.indexStart}-${asr.indexEnd}" else null
+                    var rawLang = runCatching { asr.audioTrackId ?: "Default" }.getOrNull() ?: "Default"
+                    if (rawLang.contains(".")) rawLang = rawLang.substringBefore(".")
+
+                    PakiAudioInfo(aUrl, mime ?: "audio/mp4", bitrate, initR, indexR, rawLang.uppercase())
+                } catch (e: Exception) { null }
+            }.distinctBy { it.url }
+            val audiosByLanguage = audioInfoList.groupBy { it.language }
+
+            PakiDashServer.ensureStarted()
+
+            if (audiosByLanguage.isNotEmpty()) {
+                for (video in videoOnlyList) {
+                    for ((lang, audios) in audiosByLanguage) {
+                        val bestAudioForLang = if (video.mimeType.contains("webm")) {
+                            audios.sortedWith(compareByDescending<PakiAudioInfo> { it.mimeType.contains("webm") }.thenByDescending { it.bitrate }).firstOrNull()
+                        } else {
+                            audios.sortedWith(compareByDescending<PakiAudioInfo> { it.mimeType.contains("mp4") }.thenByDescending { it.bitrate }).firstOrNull()
+                        }
+                        if (bestAudioForLang != null) {
+                            val localLink = PakiDashServer.buildAndRegister(
+                                video, listOf(bestAudioForLang), durationSeconds
+                            )
+                            if (localLink != null) {
+                                callback(
+                                    newExtractorLink(
+                                        "Pakistanilive",
+                                        "${video.label} (${bestAudioForLang.language})",
+                                        localLink,
+                                        type = ExtractorLinkType.DASH
+                                    ) {
+                                        this.referer = mainUrl
+                                        this.quality = video.height
+                                    }
+                                )
+                                produced++
+                            }
+                        }
+                    }
+                }
+            }
+
+            // مقاطع مدمجة (muxed) كاحتياط إضافي — روابط مباشرة
+            val muxedList = (s.videoStreams ?: emptyList()).mapNotNull { vs ->
+                try {
+                    val mUrl = vs.content ?: return@mapNotNull null
+                    if (!seenUrls.add(mUrl)) return@mapNotNull null
+                    val height = runCatching { vs.height ?: 0 }.getOrNull() ?: 0
+                    Triple(mUrl, if (height > 0) height.toString() else "video", height)
+                } catch (e: Exception) { null }
+            }
+            muxedList.forEach { (mUrl, mLabel, mHeight) ->
+                callback(
+                    newExtractorLink("Pakistanilive", "$mLabel (Legacy)", mUrl, type = INFER_TYPE) {
+                        this.referer = mainUrl
+                        this.quality = mHeight
+                    }
+                )
+                produced++
+            }
+
+            Log.d(TAG, "$vid NewPipe DASH links=$produced qualities=${videoOnlyList.size}")
+        } catch (e: Exception) {
+            Log.w(TAG, "$vid NewPipe resolve failed: ${e.message}")
+        }
+        return produced
+    }
+
     override suspend fun loadLinks(
         data: String,
         isCasting: Boolean,
@@ -135,34 +255,36 @@ class PakistaniliveProvider(private val prefs: SharedPreferences? = null) : Main
         callback: (ExtractorLink) -> Unit
     ): Boolean {
         val collected = mutableListOf<ExtractorLink>()
-        try {
+        val m = try {
             val html = app.get(data, headers = mapOf("User-Agent" to UA)).text
-            val m = Regex("""initCustomPlayer\("video1","([^"]+)",`(.*?)`\s*\)""", RegexOption.DOT_MATCHES_ALL)
+            Regex("""initCustomPlayer\("video1","([^"]+)",`(.*?)`\s*\)""", RegexOption.DOT_MATCHES_ALL)
                 .find(html)
-                ?: return false
-
-            val ytId = m.groupValues[1]
-            val srtText = m.groupValues[2]
-
-            // الترجمة المطمورة — استضافة محلية (VTT عبر PakiSrtServer).
-            if (srtText.isNotBlank() &&
-                prefs?.getBoolean(PakistaniliveSettingsBottomSheet.KEY_SHOW_SUBS, true) != false
-            ) {
-                PakiSrtServer.register(srtText)?.let { url ->
-                    runCatching { subtitleCallback(newSubtitleFile("العربية", url)) }
-                }
-            }
-
-            // الفيديو يوتيوب — نحوّله لمستخرج يوتيوب المدمج في CloudStream
-            // (loadExtractor) كي يحصل المشغّل على روابط قابلة للتشغيل فعلاً.
-            // نُمرّر `https://www.youtube.com/` كـ referer (لا سلسلة فارغة):
-            // المستخرج المدمج يتطلّب مصدر يوتيوب ليعمل — نفس أسلوب aryarabia.
-            loadExtractor("https://www.youtube.com/watch?v=$ytId", "https://www.youtube.com/", subtitleCallback) { link ->
-                collected.add(link)
-            }
         } catch (e: Exception) {
-            Log.e(TAG, "loadLinks error: ${e.message}")
-            return false
+            Log.e(TAG, "loadLinks fetch error: ${e.message}")
+            null
+        } ?: return false
+
+        val ytId = m.groupValues[1]
+        val srtText = m.groupValues[2]
+
+        // الترجمة المطمورة — استضافة محلية (VTT عبر PakiSrtServer).
+        if (srtText.isNotBlank() &&
+            prefs?.getBoolean(PakistaniliveSettingsBottomSheet.KEY_SHOW_SUBS, true) != false
+        ) {
+            PakiSrtServer.register(srtText)?.let { url ->
+                runCatching { subtitleCallback(newSubtitleFile("العربية", url)) }
+            }
+        }
+
+        // المسار الأساسي: NewPipe + DASH محلي (يعمل حيث يفشل loadExtractor).
+        // خلافاً للأصل نُبقي loadExtractor احتياطاً (لا تحلّ محل الإعدادات).
+        val sink: (ExtractorLink) -> Unit = { link -> collected.add(link); Unit }
+        var links = resolveFromNewPipe(ytId, subtitleCallback, sink)
+
+        if (links == 0) {
+            loadExtractor("https://www.youtube.com/watch?v=$ytId", "https://www.youtube.com/", subtitleCallback) { link ->
+                sink(link); links++
+            }
         }
 
         if (collected.isEmpty()) return false

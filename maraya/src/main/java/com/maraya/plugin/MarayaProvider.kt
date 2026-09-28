@@ -6,6 +6,7 @@ import org.json.JSONArray
 import org.json.JSONObject
 import android.content.SharedPreferences
 import android.util.Log
+import org.json.JSONTokener
 
 /**
  * مصدر «مرايا» (maraya.sba.net.ae) — قناة إماراتية تُبثّ مسلسلات وأفلاماً
@@ -45,6 +46,27 @@ class MarayaProvider(private val prefs: SharedPreferences? = null) : MainAPI() {
 
     private fun jstr(o: JSONObject?, key: String): String? =
         o?.optString(key)?.takeIf { it.isNotBlank() }
+
+    /**
+     * ★ يجلب نص JSON الخام ويبنيه `org.json.JSONObject` يدوياً — وليس
+     * `app.get(...).parsed<JSONObject>()`.
+     *
+     * لماذا؟ تطبيق CloudStream يحلّ `.parsed<T>` عبر محوّل Jackson
+     * (`jsonResponseParser`) مخصّص لأنواع `@Serializable` kotlinx — ولا يحتوي
+     * مساراً لـ `org.json.JSONObject` (دليل: `MainActivityKt` بلا أي إشارة لـ
+     * org.json). النتيجة وقت التشغيل: كائن فارغ/null تُظهر «لا شيء» رغم نجاح
+     * API. المصادر العاملة في هذا المستودع (aryarabia/krmzi/lodynet) تبني JSON
+     * بذاتها من `.text` — نفعل نفس الشيء هنا.
+     */
+    private suspend fun fetchJson(url: String): JSONObject {
+        val text = app.get(
+            url,
+            headers = mapOf("User-Agent" to UA, "Accept" to "application/json")
+        ).text.trim().removePrefix("﻿")
+        // بعض الردود تُبقي ثغرة (مسافة/سطر) قبل { أو ثغرة في النهاية؛
+        // JSONTokener يتساهل مع المسافة البيضاء المحيطة.
+        return JSONObject(JSONTokener(text))
+    }
 
     private fun posterOf(item: JSONObject): String? {
         jstr(item, "image")?.let { return it }
@@ -94,7 +116,7 @@ class MarayaProvider(private val prefs: SharedPreferences? = null) : MainAPI() {
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
         val rows = ArrayList<HomePageList>()
         try {
-            val doc = app.get("$API/home", headers = mapOf("User-Agent" to UA, "Accept" to "application/json")).parsed<JSONObject>()
+            val doc = fetchJson("$API/home")
             val blocks = doc.optJSONArray("blocks") ?: JSONArray()
             for (i in 0 until blocks.length()) {
                 // كل بلوك يُبنى بنفسه في try — عطل بلوك واحد (شبكة/بنية شاذة)
@@ -125,7 +147,7 @@ class MarayaProvider(private val prefs: SharedPreferences? = null) : MainAPI() {
     override suspend fun search(query: String): List<SearchResponse> {
         return try {
             val q = java.net.URLEncoder.encode(query.trim(), "UTF-8")
-            val doc = app.get("$API/search?q=$q", headers = mapOf("User-Agent" to UA, "Accept" to "application/json")).parsed<JSONObject>()
+            val doc = fetchJson("$API/search?q=$q")
             val list = doc.optJSONArray("list") ?: return emptyList()
             val out = ArrayList<SearchResponse>()
             for (i in 0 until list.length()) {
@@ -157,7 +179,7 @@ class MarayaProvider(private val prefs: SharedPreferences? = null) : MainAPI() {
             val id = Regex("""/(?:title|project|video)/(\d+)""").find(url)?.groupValues?.get(1)
                 ?: Regex("""(\d+)""").find(url.substringAfterLast('/'))?.groupValues?.get(1)
                 ?: return null
-            val doc = app.get("$API/project/$id", headers = mapOf("User-Agent" to UA, "Accept" to "application/json")).parsed<JSONObject>()
+            val doc = fetchJson("$API/project/$id")
             val blocks = doc.optJSONArray("blocks") ?: return null
             var project: JSONObject? = null
             for (i in 0 until blocks.length()) {
@@ -172,7 +194,7 @@ class MarayaProvider(private val prefs: SharedPreferences? = null) : MainAPI() {
 
             // الحلقات
             val epsDoc = try {
-                app.get("$API/video?program=$id&ipp=100", headers = mapOf("User-Agent" to UA, "Accept" to "application/json")).parsed<JSONObject>()
+                fetchJson("$API/video?program=$id&ipp=100")
             } catch (e: Exception) { null }
 
             // جميع الحلقات (regular) من كل البلوكات — تُستخدم للمسلسلات أيضاً
@@ -259,9 +281,7 @@ class MarayaProvider(private val prefs: SharedPreferences? = null) : MainAPI() {
         // جلب عدّادات السيرفر — 401/شبكة/تنسيق تُسقطنا إلى `null` (لا ترمي خارجاً).
         val settings = try {
             if (videoId == null) null
-            else app.get("$API/video/$videoId/player", headers = mapOf("User-Agent" to UA, "Accept" to "application/json"))
-                .parsed<JSONObject>()
-                .optJSONObject("settings")
+            else fetchJson("$API/video/$videoId/player").optJSONObject("settings")
         } catch (e: Exception) {
             Log.e(TAG, "loadLinks player ($videoId): ${e.message}")
             null

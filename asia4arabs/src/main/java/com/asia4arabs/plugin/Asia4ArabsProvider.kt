@@ -195,6 +195,24 @@ class Asia4ArabsProvider(private val prefs: SharedPreferences? = null) : MainAPI
             String(out, Charsets.UTF_8)
         } catch (_: Exception) { null }
 
+    /**
+     * ★ يعيد كتابة عناوين Photon (`i0.wp.com/asia4arabs.com/wp-content/...?fit=..&ssl=1`)
+     * إلى أصل مباشر (`asia4arabs.com/wp-content/...`) — «لا تظهر الصور» كانت
+     * لأن مضيف Photon لا يُحلّ على شبكات كثيرة (فحص الميدان: i0.wp.com فشل DNS
+     * بينما النطاق الأصلي يخدم 200 image/jpeg). نستخرج مسار wp-content من
+     * العنوان ونعيد بناءه على النطاق الأصلي؛ إن كان العنوان أصلاً مباشراً يبقى.
+     */
+    private fun dePhoton(u: String): String {
+        if (!u.contains("i0.wp.com")) return u
+        val m = Regex("""i0\.wp\.com/([^/?]+)/wp-content/([^?]+)""").find(u)
+        if (m == null) return u
+        val host = m.groupValues[1]              // asia4arabs.com
+        val path = m.groupValues[2]              // uploads/YEAR/MONTH/....jpg-scaled.jpg
+        val raw = "https://$host/wp-content/$path"
+        // «-scaled» نسخة أصغر صنعها WP؛ الأصل بلا اللاحقة أوضح وأكمل إن وُجد.
+        return raw.removeSuffix("-scaled").ifBlank { raw } ?: raw
+    }
+
     // ---------- Card parsing ----------
     private fun Element.searchCard(): SearchResponse? {
         val href = this.attr("href")
@@ -211,11 +229,11 @@ class Asia4ArabsProvider(private val prefs: SharedPreferences? = null) : MainAPI
         // Poster: various card styles — background-image, img src, data-src.
         val styleHolder = this.selectFirst("[style*='background-image']")
         val img = this.selectFirst("img")
-        val poster = styleHolder?.attr("style")?.let {
+        val poster = (styleHolder?.attr("style")?.let {
             Regex("""url\(['"]?([^'")]+)['"]?\)""").find(it)?.groupValues?.get(1)
         }?.ifBlank { null }
             ?: img?.attr("data-src")?.ifBlank { null }
-            ?: img?.attr("src")
+            ?: img?.attr("src"))?.let { dePhoton(it) }
 
         if (href.isBlank() || title.isBlank()) return null
         return if (href.contains("/series/") || href.contains("/movies/"))
@@ -260,11 +278,11 @@ class Asia4ArabsProvider(private val prefs: SharedPreferences? = null) : MainAPI
         val doc = app.get(url).document
 
         val title = doc.selectFirst("h1")?.text()?.trim() ?: return null
-        val poster = doc.selectFirst("img[src*=/wp-content/uploads/]")?.attr("src")
+        val poster = (doc.selectFirst("img[src*=/wp-content/uploads/]")?.attr("src")
             ?.ifBlank { null }
             ?: doc.selectFirst("img")?.attr("data-src")
             ?.ifBlank { null }
-            ?: doc.selectFirst("img")?.attr("src")
+            ?: doc.selectFirst("img")?.attr("src"))?.let { dePhoton(it) }
         val description = doc.selectFirst("h2.section-heading, .entry-content p, .storyline p, .description p")?.text()
 
         // Series with episodes.
@@ -308,9 +326,10 @@ class Asia4ArabsProvider(private val prefs: SharedPreferences? = null) : MainAPI
         Log.d(TAG, "loadLinks START for: $data")
         val collected = mutableListOf<ExtractorLink>()
         try {
-            // For series episode URLs ( ?episode=N ) fetch the page again to get
-            // the matching server buttons for that episode.
-            val pageForServers = if (data.contains("episode=")) {
+            // ★ نجلب صفحة HTML دائماً (أفلاماً ومسلسلات) — قبل هذا الإصلاح كان
+            //   الفيلم يمرّر `data` (رابط نصي) فلم يجد أزرار السيرفر أبداً لأن
+            //   jsoup يُحلّ النص كصفحة بلا أزرار → «لا روابط تشغيل للأفلام».
+            val pageForServers = if (data.startsWith("http")) {
                 app.get(data, headers = mapOf("User-Agent" to UA)).text
             } else data
             val serverButtons = org.jsoup.Jsoup.parse(pageForServers)

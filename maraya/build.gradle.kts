@@ -1,4 +1,4 @@
-version = 1
+version = 2
 
 cloudstream {
     description = "Maraya — قنوات ومسلسلات وأفلام (maraya.sba.net.ae)"
