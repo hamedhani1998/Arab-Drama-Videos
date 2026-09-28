@@ -198,7 +198,15 @@ class Asia4ArabsProvider(private val prefs: SharedPreferences? = null) : MainAPI
     // ---------- Card parsing ----------
     private fun Element.searchCard(): SearchResponse? {
         val href = this.attr("href")
-        val title = this.attr("title").ifBlank { this.selectFirst(".title")?.text().orEmpty() }
+        // العنوان: card البطاقات الحديثة في الموقع تضع العنوان في
+        // `h3.episode-title` (الرئيسية) أو `h3.card-title` (البحث)، وليس صفة
+        // `title` ولا `<span class="title">` — لذا نكمل السلسلة حتى لا تُسقَط
+        // كل البطاقات (كانت الرئيسية فارغة).
+        val title = this.attr("title").ifBlank {
+            this.selectFirst(".episode-title")?.text().orEmpty()
+                .ifBlank { this.selectFirst(".card-title")?.text().orEmpty() }
+                .ifBlank { this.selectFirst(".title")?.text().orEmpty() }
+        }
 
         // Poster: various card styles — background-image, img src, data-src.
         val styleHolder = this.selectFirst("[style*='background-image']")

@@ -92,27 +92,33 @@ class MarayaProvider(private val prefs: SharedPreferences? = null) : MainAPI() {
 
     // ---------- الصفحة الرئيسية ----------
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
-        return try {
+        val rows = ArrayList<HomePageList>()
+        try {
             val doc = app.get("$API/home", headers = mapOf("User-Agent" to UA, "Accept" to "application/json")).parsed<JSONObject>()
             val blocks = doc.optJSONArray("blocks") ?: JSONArray()
-            val rows = ArrayList<HomePageList>()
             for (i in 0 until blocks.length()) {
-                val b = blocks.optJSONObject(i) ?: continue
-                if (b.optString("block_type") == "horizontal_channel_list") continue
-                val title = jstr(b, "title") ?: continue
-                val projects = b.optJSONArray("projects") ?: continue
-                val cards = ArrayList<SearchResponse>()
-                for (j in 0 until projects.length()) {
-                    val p = projects.optJSONObject(j) ?: continue
-                    projectCard(p)?.let { cards.add(it) }
+                // كل بلوك يُبنى بنفسه في try — عطل بلوك واحد (شبكة/بنية شاذة)
+                // لا يُسقط الصفحة كلها: بقية الصفوف تظهر والصف المعطوب يُتخطّى.
+                try {
+                    val b = blocks.optJSONObject(i) ?: continue
+                    if (b.optString("block_type") == "horizontal_channel_list") continue
+                    val title = jstr(b, "title") ?: continue
+                    val projects = b.optJSONArray("projects") ?: continue
+                    val cards = ArrayList<SearchResponse>()
+                    for (j in 0 until projects.length()) {
+                        val p = projects.optJSONObject(j) ?: continue
+                        projectCard(p)?.let { cards.add(it) }
+                    }
+                    if (cards.isNotEmpty()) rows.add(HomePageList(title, cards))
+                } catch (e: Exception) {
+                    Log.e(TAG, "getMainPage block[$i]: ${e.message}")
                 }
-                if (cards.isNotEmpty()) rows.add(HomePageList(title, cards))
             }
-            newHomePageResponse(rows)
         } catch (e: Exception) {
+            // فشل الطلب نفسه فقط هو الذي يُفرغ الصفحة (لا مشكلة في البيانات).
             Log.e(TAG, "getMainPage: ${e.message}")
-            newHomePageResponse(emptyList())
         }
+        return newHomePageResponse(rows)
     }
 
     // ---------- البحث ----------

@@ -155,7 +155,9 @@ class PakistaniliveProvider(private val prefs: SharedPreferences? = null) : Main
 
             // الفيديو يوتيوب — نحوّله لمستخرج يوتيوب المدمج في CloudStream
             // (loadExtractor) كي يحصل المشغّل على روابط قابلة للتشغيل فعلاً.
-            loadExtractor("https://www.youtube.com/watch?v=$ytId", "", subtitleCallback) { link ->
+            // نُمرّر `https://www.youtube.com/` كـ referer (لا سلسلة فارغة):
+            // المستخرج المدمج يتطلّب مصدر يوتيوب ليعمل — نفس أسلوب aryarabia.
+            loadExtractor("https://www.youtube.com/watch?v=$ytId", "https://www.youtube.com/", subtitleCallback) { link ->
                 collected.add(link)
             }
         } catch (e: Exception) {
