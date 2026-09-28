@@ -19,7 +19,7 @@ import com.google.android.material.bottomsheet.BottomSheetDialog
 import com.google.android.material.bottomsheet.BottomSheetDialogFragment
 
 /**
- * إعدادات مصدر «دراما للجميع». تُعرض من زر الإعدادات في CloudStream.
+ * إعدادات مصدر «Drama4All». تُعرض من زر الإعدادات في CloudStream.
  *
  * كل خيار يُخزَّن في ملف التفضيلات نفسه الذي يقرأه [Drama4AllProvider] مباشرة
  * عند كل بث — بلا تخزين مركزي. الربط عبر `preferenceManager

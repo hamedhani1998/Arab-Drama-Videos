@@ -40,7 +40,7 @@ private data class SubtitleItem(
 )
 
 class Drama4AllProvider(private val prefs: SharedPreferences? = null) : MainAPI() {
-    override var name = "دراما للجميع"
+    override var name = "Drama4All"
     override var mainUrl = "https://drama4all.com"
     override var lang = "ar"
     override val hasMainPage = true
