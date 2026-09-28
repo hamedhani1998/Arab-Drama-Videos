@@ -32,6 +32,33 @@ private val CARD_RE =
 /** `aria-label="العنوان"` — تسبق صورة الغلاف داخل رابط البطاقة. */
 private val TITLE_RE = Regex("""aria-label="([^"]*)"""")
 
+/** المعرّف رقمٌ مجرّد — لا نصّ ولا رابط. */
+private val ID_RE = Regex("""\d+""")
+
+/**
+ * ★★ كان `Episode.url` رابطاً كاملاً (`https://…/ar/detail/168001/|ep|2`)،
+ * فمرّره `loadLinks` كما هو فبنينا عليه طلباً مزدوجاً:
+ *
+ *     https://huangguodrama.ai/ar/detail/https://huangguodrama.ai/ar/detail/168001/
+ *
+ * وهو 404. والأخطر أن `app.get(...).text` **لا يرمي استثناءً** على 404، بل
+ * يُعطي صفحة الخطأ نصاً (٦٠٩١ حرفاً) فقبلناها محتوىً صالحاً، ثم لم نجد
+ * `"drama":` فيها فبدت «لا روابط» — والسبب الحقيقي طلب خاطئ من الأصل.
+ *
+ * فصار المعرّف يُنظَّف عند الاستخراج ([cleanId]) وعند القراءة ([idOf])، فلا
+ * يبني أي مسار رابطاً أبداً من معرّف غير نظيف، ولو slipped من مكان ما.
+ */
+private fun cleanId(raw: String): String {
+    val t = raw.trim()
+    if (t.isEmpty()) return ""
+    // ★ نقبل أيّاً كان أوّل رقم في النص، لا الأخير: فـ`…/detail/168001/|ep|2`
+    //   أوّل رقم فيه هو المعرّف (168001) وآخره رقم الحلقة (2)، فأخذ الأخير
+    //   كان سيعطي دراما غير التي يطلبها المستخدم. وفي رابط مزدوج
+    //   `…/detail/…/detail/168001/` المعرّف الصحيح هو الأخير وحده، وفي
+    //   الرابط السليم يظهر مرّتين فقط فنفس الرقم — فالمرّر المزدوج مغطّى.
+    return ID_RE.find(t)?.value ?: ""
+}
+
 /** `<a class="hg-tag" …>Chinese</a>` — تسمية التصنيف كما يعرضها الموقع. */
 private val TAG_RE = Regex("""class="hg-tag"[^>]*>([^<]+)<""")
 
@@ -187,7 +214,17 @@ class HuangguoDramaProvider(
             }
         }
         val fresh = try {
-            app.get("$mainUrl$path", referer = "$mainUrl/ar/", headers = mapOf("User-Agent" to UA)).text
+            val r = app.get("$mainUrl$path", referer = "$mainUrl/ar/", headers = mapOf("User-Agent" to UA))
+            // ★★ `app.get` لا يرمي على 404/500 — يُعيد صفحة الخطأ نصاً عادياً
+            // (حُقّقت: ٦٠٩١ حرفاً لصفحة 404، فيها لا flight بالمعنى المفيد).
+            // فبلا هذا الفحص كنّا نخزّن صفحة الخطأ ثم نقرأ منها «لا روابط».
+            val body = r.text
+            if (r.isSuccessful) {
+                body
+            } else {
+                Log.e("HuangguoDrama", "fetchPage HTTP error for $path (${body.length} chars) — not caching")
+                null
+            }
         } catch (e: Exception) {
             Log.e("HuangguoDrama", "fetchPage FAILED $path : ${e.javaClass.simpleName}: ${e.message}")
             null
@@ -195,7 +232,7 @@ class HuangguoDramaProvider(
         if (fresh != null) {
             synchronized(htmlLock) {
                 // حدّ أعلى للذاكرة: الدراما الواحدة تحتفظ بصفحتها فقط، ومع
-                // تصفّح المكتبة (١٦ دراما) يتجاوز العدد ذلك لولا هذا القصّ.
+                // تصفّح المكتبة (٢٤ دراما) يتجاوز العدد ذلك لولا هذا القصّ.
                 if (htmlCache.size >= MAX_CACHED) {
                     val oldest = htmlCache.minByOrNull { it.value.second }?.key
                     if (oldest != null) htmlCache.remove(oldest)
@@ -377,7 +414,7 @@ class HuangguoDramaProvider(
 
     override suspend fun load(url: String): LoadResponse? {
         return try {
-            val id = url.substringAfter("/ar/detail/").substringBefore("/").trim()
+            val id = cleanId(url.substringAfter("/ar/detail/").substringBefore("|"))
             if (id.isEmpty()) return null
             val html = fetchPage("/ar/detail/$id/") ?: return null
             val flight = flightOf(html)
@@ -409,7 +446,7 @@ class HuangguoDramaProvider(
 
         val episodes = eps.applyListOptions(episodeLimit())
             .map { (n, label) ->
-                newEpisode("$mainUrl/ar/detail/$id/|ep|$n") {
+                newEpisode("$id|ep|$n") {
                     this.episode = n
                     this.name = label ?: "الحلقة $n"
                 }
@@ -461,7 +498,7 @@ class HuangguoDramaProvider(
 
         val episodes = eps.applyListOptions(episodeLimit())
             .map { (n, label, kind) ->
-                newEpisode("$mainUrl/ar/detail/$id/|$kind|$n") {
+                newEpisode("$id|$kind|$n") {
                     this.episode = n
                     this.name = label
                 }
@@ -529,11 +566,11 @@ class HuangguoDramaProvider(
                 Log.e("HuangguoDrama", "loadLinks BAD data (parts=${p.size})")
                 return false
             }
-            val id = p[0].trim()
+            val id = cleanId(p[0])
             val kind = p[1].trim()
             val n = p[2].trim().toIntOrNull()
             if (id.isEmpty() || n == null) {
-                Log.e("HuangguoDrama", "loadLinks BAD id/n id=[$id] n=[${p[2]}]")
+                Log.e("HuangguoDrama", "loadLinks BAD id/n raw=[${p[0]}] id=[$id] n=[${p[2]}]")
                 return false
             }
 
@@ -545,10 +582,23 @@ class HuangguoDramaProvider(
             val flight = flightOf(html)
             Log.d("HuangguoDrama", "loadLinks id=$id kind=$kind n=$n htmlLen=${html.length} flightLen=${flight.length}")
 
+            // ★ الحارس الأخير: صفحة تفاصيل سليمة تحمل أحد المرسوتين دائماً. فإن
+            //   غابتا معاً فالصفحة ليست صفحة دراما (404، أو مسار خاطئ)، ولا
+            //   معنى أن نبحث عن `n` في لا شيء ثم نقول للمستخدم «لا روابط».
+            val dramaAt = flight.indexOf("\"drama\":")
+            val trailerAt = flight.indexOf(TRAILER_ANCHOR)
+            if (dramaAt < 0 && trailerAt < 0) {
+                Log.e(
+                    "HuangguoDrama",
+                    "loadLinks PAGE HAS NO DRAMA id=$id kind=$kind n=$n " +
+                        "htmlLen=${html.length} flightLen=${flight.length} url=$mainUrl/ar/detail/$id/"
+                )
+                return false
+            }
+
             val video: String? = when (kind) {
                 "ep" -> {
-                    val at = flight.indexOf("\"drama\":")
-                    val drama = if (at >= 0) firstObject(flight, at) else null
+                    val drama = if (dramaAt >= 0) firstObject(flight, dramaAt) else null
                     drama?.array("episodeList")?.firstOrNull { (it.int("n") ?: -1) == n }?.str("video")
                 }
 
@@ -563,7 +613,7 @@ class HuangguoDramaProvider(
             if (video.isNullOrBlank()) {
                 Log.e(
                     "HuangguoDrama",
-                    "loadLinks NO VIDEO id=$id kind=$kind n=$n (dramaAt=${flight.indexOf("\"drama\":")} trailerAt=${flight.indexOf(TRAILER_ANCHOR)})"
+                    "loadLinks NO VIDEO id=$id kind=$kind n=$n (dramaAt=$dramaAt trailerAt=$trailerAt)"
                 )
                 return false
             }

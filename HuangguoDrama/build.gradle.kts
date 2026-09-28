@@ -1,4 +1,4 @@
-﻿version = 2
+﻿version = 3
 
 cloudstream {
     description = "إضافة HuangguoDrama - دراما قصيرة عربية بالذكاء الاصطناعي (حلقات كاملة MP4)"
