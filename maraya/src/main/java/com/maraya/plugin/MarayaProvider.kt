@@ -38,7 +38,7 @@ class MarayaProvider(private val prefs: SharedPreferences? = null) : MainAPI() {
     }
 
     override var mainUrl = "https://maraya.sba.net.ae"
-    override var name = "مرايا"
+    override var name = "Maraya"
     override val supportedTypes = setOf(TvType.TvSeries, TvType.Movie)
     override var lang = "ar"
     override val hasMainPage = true
@@ -169,31 +169,35 @@ class MarayaProvider(private val prefs: SharedPreferences? = null) : MainAPI() {
                 app.get("$API/video?program=$id&ipp=100", headers = mapOf("User-Agent" to UA, "Accept" to "application/json")).parsed<JSONObject>()
             } catch (e: Exception) { null }
 
-            val episodes = ArrayList<Episode>()
-            if (type == "series" && epsDoc != null) {
-                fun collectFromBlocks(blocksArr: JSONArray) {
-                    for (i in 0 until blocksArr.length()) {
-                        val b = blocksArr.optJSONObject(i) ?: continue
-                        val projs = b.optJSONArray("projects") ?: continue
-                        for (j in 0 until projs.length()) {
-                            val v = projs.optJSONObject(j) ?: continue
-                            if (v.optString("type", "regular") != "regular") continue
-                            val vId = jstr(v, "id") ?: continue
-                            val ep = v.optInt("episode", 0).takeIf { it > 0 }
-                            val seasonNum = v.optInt("season_number", 0).takeIf { it > 0 }
-                            episodes.add(newEpisode("$mainUrl/video/$vId") {
-                                name = jstr(v, "title") ?: "الحلقة ${ep ?: ""}"
-                                episode = ep
-                                season = seasonNum
-                                posterUrl = abs(posterOf(v)) ?: poster
-                            })
-                        }
+            // جميع الحلقات (regular) من كل البلوكات — تُستخدم للمسلسلات أيضاً
+            // ولإيجاد مقطع الفيلم الحقيقي عند غياب lastvideos.regular.
+            val regularVideos = ArrayList<JSONObject>()
+            if (epsDoc != null) {
+                val blocksArr = epsDoc.optJSONArray("blocks") ?: JSONArray()
+                for (i in 0 until blocksArr.length()) {
+                    val b = blocksArr.optJSONObject(i) ?: continue
+                    val projs = b.optJSONArray("projects") ?: continue
+                    for (j in 0 until projs.length()) {
+                        val v = projs.optJSONObject(j) ?: continue
+                        if (v.optString("type", "regular") != "regular") continue
+                        if (jstr(v, "id") != null) regularVideos.add(v)
                     }
                 }
-                collectFromBlocks(epsDoc.optJSONArray("blocks") ?: JSONArray())
             }
 
+            val episodes = ArrayList<Episode>()
             if (type == "series") {
+                for (v in regularVideos) {
+                    val vId = jstr(v, "id") ?: continue
+                    val ep = v.optInt("episode", 0).takeIf { it > 0 }
+                    val seasonNum = v.optInt("season_number", 0).takeIf { it > 0 }
+                    episodes.add(newEpisode("$mainUrl/video/$vId") {
+                        name = jstr(v, "title") ?: "الحلقة ${ep ?: ""}"
+                        episode = ep
+                        season = seasonNum
+                        posterUrl = abs(posterOf(v)) ?: poster
+                    })
+                }
                 // مسلسل — حتى لو لم تجمع الحلقات (اشتراك) نعيده مسلسلاً بلا حلقات،
                 // لا فيلماً، كي لا يُسيَّج Type.
                 return runCatching {
@@ -204,11 +208,15 @@ class MarayaProvider(private val prefs: SharedPreferences? = null) : MainAPI() {
                 }.getOrNull()
             }
 
-            // فيلم: الحلقة الوحيدة عبر lastvideos.regular (أو، عند فشلها، id المشروع)
+            // فيلم: الحلقة الوحيدة عبر lastvideos.regular؛ فإن غابت، نأخذ أول
+            // مقطع regular من قائمة حلقات البرنامج (الصحيح لا معرّف المشروع الذي
+            // يجلب settings:null في /player).
             val movieVideoId = p.optJSONObject("lastvideos")?.optString("regular").orEmpty()
                 .takeIf { it.isNotBlank() }
+                ?: regularVideos.firstOrNull()?.let { jstr(it, "id") }
                 ?: id
-            return newMovieLoadResponse(title, "$mainUrl/video/${if (movieVideoId.isBlank()) id else movieVideoId}", TvType.Movie, "$mainUrl/video/${if (movieVideoId.isBlank()) id else movieVideoId}") {
+            val watchUrl = "$mainUrl/video/$movieVideoId"
+            return newMovieLoadResponse(title, watchUrl, TvType.Movie, watchUrl) {
                 this.posterUrl = poster
                 this.plot = description
             }
@@ -219,20 +227,41 @@ class MarayaProvider(private val prefs: SharedPreferences? = null) : MainAPI() {
     }
 
     // ---------- البث ----------
+    /**
+     * فك روابط التشغيل من `/video/{id}/player`.
+     *
+     * أخطاء التشغيل المكتشفة ميدانياً (§ أُلحقت عند إصلاحها):
+     *  - محتوى الأعضاء (`access:"member"`): `/player` يعيد **401** — قبل هذه
+     *    المعالجة كان `return false` يعرض «لا روابط». الآن نُطلق رابط صفحة
+     *    المشاهدة كبديل (خارج الـ try كي يغطي الاستثناءات أيضاً).
+     *  - أفلام بلا `settings` (أو معرّف مشروع بدل مقطع): `settings:null` —
+     *    نفس البديل.
+     *  - روابط الضيوف: **HLS/DASH محميّة بـ Widevine/FairPlay** (`drm.type`)،
+     *    لا تشتغل على أندرويد؛ لذا تُصدَر روابط MP4 المباشرة (قابلة للتشغيل)
+     *    **أولاً** ثم HLS في آخر القائمة لا أولها.
+     */
     override suspend fun loadLinks(
         data: String,
         isCasting: Boolean,
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
+        val videoId = Regex("""/video/(\d+)""").find(data)?.groupValues?.get(1)
+            ?: Regex("""(\d+)""").find(data.substringAfterLast('/'))?.groupValues?.get(1)
         val collected = mutableListOf<ExtractorLink>()
-        try {
-            val videoId = Regex("""/video/(\d+)""").find(data)?.groupValues?.get(1)
-                ?: Regex("""(\d+)""").find(data.substringAfterLast('/'))?.groupValues?.get(1)
-                ?: return false
-            val doc = app.get("$API/video/$videoId/player", headers = mapOf("User-Agent" to UA, "Accept" to "application/json")).parsed<JSONObject>()
-            val settings = doc.optJSONObject("settings") ?: return false
 
+        // جلب عدّادات السيرفر — 401/شبكة/تنسيق تُسقطنا إلى `null` (لا ترمي خارجاً).
+        val settings = try {
+            if (videoId == null) null
+            else app.get("$API/video/$videoId/player", headers = mapOf("User-Agent" to UA, "Accept" to "application/json"))
+                .parsed<JSONObject>()
+                .optJSONObject("settings")
+        } catch (e: Exception) {
+            Log.e(TAG, "loadLinks player ($videoId): ${e.message}")
+            null
+        }
+
+        if (settings != null) {
             // الترجمة (vtts) — مرايا غالباً بدونها
             if (prefs?.getBoolean(MarayaSettingsBottomSheet.KEY_SHOW_SUBS, true) != false) {
                 val vtts = settings.optJSONArray("vtts") ?: JSONArray()
@@ -245,12 +274,7 @@ class MarayaProvider(private val prefs: SharedPreferences? = null) : MainAPI() {
             }
 
             val emitted = mutableSetOf<String>()
-            // 1) HLS (السيرفر الرئيسي)
-            val hls = settings.optJSONObject("protocols")?.optString("hls").orEmpty()
-            if (hls.isNotBlank() && emitted.add(hls)) {
-                emitter(collected, "HLS مرايا", hls, ExtractorLinkType.M3U8, null)
-            }
-            // 2) روابط MP4 المباشرة لكل جودة
+            // 1) روابط MP4 المباشرة لكل جودة — قابلة للتشغيل على أندرويد (بلا DRM).
             val res = settings.optJSONArray("resolutions") ?: JSONArray()
             for (i in 0 until res.length()) {
                 val r = res.optJSONObject(i) ?: continue
@@ -261,20 +285,25 @@ class MarayaProvider(private val prefs: SharedPreferences? = null) : MainAPI() {
                 }
             }
 
-            if (collected.isEmpty()) {
-                if (prefs?.getBoolean(MarayaSettingsBottomSheet.KEY_SHOW_RAW_LINK, true) != false) {
-                    val fallback = "$mainUrl/watch/$videoId"
-                    emitter(collected, "مرايا (صفحة)", fallback, ExtractorLinkType.VIDEO, mainUrl)
-                }
-                return collected.isNotEmpty()
+            // 2) HLS — محمي بـ DRM في الغالب؛ يبقى متاحاً لكنه في نهاية القائمة.
+            val hls = settings.optJSONObject("protocols")?.optString("hls").orEmpty()
+            if (hls.isNotBlank() && emitted.add(hls)) {
+                val drm = settings.optJSONObject("drm")?.optString("type").orEmpty()
+                emitter(collected, if (drm.isNotBlank()) "HLS (DRM)" else "HLS", hls, ExtractorLinkType.M3U8, null)
             }
-
-            emitSorted(prefs, collected, callback)
-            return true
-        } catch (e: Exception) {
-            Log.e(TAG, "loadLinks error", e)
-            return false
         }
+
+        // بديل عند تعذّر فك السيرفر (اشتراك/401/بلا settings/استثناء) —
+        // خارج الـ try كي يغطي كل حالات الفشل بدل «لا روابط».
+        if (collected.isEmpty() && videoId != null &&
+            prefs?.getBoolean(MarayaSettingsBottomSheet.KEY_SHOW_RAW_LINK, true) != false
+        ) {
+            emitter(collected, "Maraya (صفحة)", "$mainUrl/video/$videoId", ExtractorLinkType.VIDEO, mainUrl)
+        }
+
+        if (collected.isEmpty()) return false
+        emitSorted(prefs, collected, callback)
+        return true
     }
 
     private suspend fun emitter(
@@ -289,7 +318,7 @@ class MarayaProvider(private val prefs: SharedPreferences? = null) : MainAPI() {
         val quality = runCatching { qualityName?.let { getQualityFromName(it) } }.getOrNull() ?: Qualities.Unknown.value
         collected.add(
             newExtractorLink(
-                source = "مرايا",
+                source = "Maraya",
                 name = label,
                 url = url,
                 type = type
