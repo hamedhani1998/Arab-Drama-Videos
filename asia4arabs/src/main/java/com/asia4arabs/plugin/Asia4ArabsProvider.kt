@@ -320,7 +320,7 @@ class Asia4ArabsProvider(private val prefs: SharedPreferences? = null) : MainAPI
                 val embedded = Regex("""iframe[^>]*?(?:data-litespeed-src|src)=["'](https?://[^"']+)["']""")
                     .findAll(pageForServers).map { it.groupValues[1] }
                 for (e in embedded) {
-                    try { extractFromEmbed(e, "سيرفر", null, collected) } catch (_: Exception) {}
+                    try { extractFromEmbed(e, "سيرفر", null, subtitleCallback, collected) } catch (_: Exception) {}
                 }
                 if (collected.isEmpty()) return false
                 emitSorted(prefs, collected, callback)
@@ -330,7 +330,7 @@ class Asia4ArabsProvider(private val prefs: SharedPreferences? = null) : MainAPI
             val emitted = mutableSetOf<String>()
             servers.forEach { (embedUrl, name) ->
                 try {
-                    extractFromEmbed(embedUrl, name, null, collected, emitted)
+                    extractFromEmbed(embedUrl, name, null, subtitleCallback, collected, emitted)
                 } catch (e: Exception) {
                     Log.e(TAG, "[$name] embed extraction failed: $e")
                 }
@@ -346,11 +346,19 @@ class Asia4ArabsProvider(private val prefs: SharedPreferences? = null) : MainAPI
     /**
      * يفتح صفحة تضمين السيرفر ويستخرج روابط HLS/MP4 منها.
      * `emitted` (عندما يكون غير null) يُستخدم لمنع تكرار الروابط عبر السيرفرات.
+     *
+     * السيرفرات التي تستخرج يدوياً (VIDS/UPT/MOLY — m3u8 في الصفحة/بفكّ PACKER)
+     * تبقى كما هي. سيرفرات Doodstream/Vinovo لا تُظهر m3u8 في الصفحة إطلاقاً —
+     * البث يتكوّن لاحقاً (async /pass_md5 + token) — لذلك عند عدم إيجاد ميديا
+     * نمرّر التضمين إلى مُستخرجي CloudStream المدمجين عبر `loadExtractor`
+     * (يقف doodstream/vinovo/vidoza… ويعمل تماماً كما في lodynet) قبل fallback
+     * صفحة التضمين كرابط VIDEO.
      */
     private suspend fun extractFromEmbed(
         embedUrl: String,
         label: String,
         _referer: String?,
+        subtitleCallback: (SubtitleFile) -> Unit,
         collected: MutableList<ExtractorLink>,
         emitted: MutableSet<String>? = null
     ) {
@@ -403,6 +411,22 @@ class Asia4ArabsProvider(private val prefs: SharedPreferences? = null) : MainAPI
                 found.sortedBy { if (it.contains(".m3u8")) 0 else 1 }
             }
         if (distinct.isEmpty()) {
+            // Doodstream/Vinovo embeds have no m3u8 in the page; the stream is built
+            // async (/pass_md5 + token). CloudStream's registry handles these hosts.
+            if (emitted == null || emitted.add("loadExtractor:$embedUrl")) {
+                Log.d(TAG, "[$label] no media inside → try built-in extractor")
+                val builtIn = mutableListOf<ExtractorLink>()
+                try {
+                    loadExtractor(embedUrl, ref, subtitleCallback) { link -> builtIn.add(link) }
+                } catch (e: Exception) {
+                    Log.d(TAG, "[$label] loadExtractor failed: ${e.message}")
+                }
+                if (builtIn.isNotEmpty()) {
+                    collected.addAll(builtIn)
+                    return
+                }
+            }
+            // لم يجد المدمَج شيئاً → صفحة التضمين نفسها كرابط VIDEO (السلوك السابق).
             Log.d(TAG, "[$label] no media inside → fallback to embed page as VIDEO")
             if (prefs?.getBoolean(Asia4ArabsSettingsBottomSheet.KEY_SHOW_RAW_LINK, true) != false) {
                 if (emitted == null || emitted.add(embedUrl)) {
