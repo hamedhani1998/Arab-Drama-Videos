@@ -778,6 +778,40 @@ class AryProvider(
         return "video"
     }
 
+    /** كوديك الفيديو مختصراً للعرض: avc1→H.264، vp9→VP9، av01→AV1، … */
+    private fun codecTag(mime: String?): String {
+        val m = mime.orEmpty()
+        return when {
+            m.contains("av01") -> "AV1"
+            m.contains("vp09") || m.contains("/vp9") -> "VP9"
+            m.contains("avc1") || m.contains("/avc") -> "H.264"
+            m.contains("webm") -> "VP9"
+            m.contains("mp4") -> "H.264"
+            else -> ""
+        }
+    }
+
+    /** حجم ملف الفيديو من معامل `clen` في رابط googlevideo (بالبايت). */
+    private fun byteSizeOf(url: String): Long {
+        if (url.isEmpty()) return 0
+        val i = url.indexOf("clen=")
+        if (i < 0) return 0
+        val after = url.substring(i + 5)
+        val j = after.indexOf('&')
+        val num = if (j >= 0) after.substring(0, j) else after
+        return runCatching { num.toLongOrNull() ?: 0L }.getOrDefault(0L)
+    }
+
+    /** «360 • 62MB (H.264)» — تسمية تُفرّق الجودات في منظار القائمة. */
+    private fun richLabel(height: Int, url: String, mime: String?): String {
+        val h = if (height > 0) height.toString() else "auto"
+        val bytes = byteSizeOf(url)
+        val mb = if (bytes > 0) "• ${"%.1f".format(bytes / 1048576.0)}MB" else ""
+        val tag = codecTag(mime)
+        val t = if (tag.isNotEmpty()) " ($tag)" else ""
+        return "$h$mb$t"
+    }
+
     /**
      * مسار تشغيل مطابق لسيرفرات إضافة «يوتيوب» في re-3arabi (التي تعمل على
      * هاتفك): `YoutubeStreamExtractor.fetchPage()` يعطي روابط googlevideo
@@ -879,8 +913,8 @@ class AryProvider(
                 } else null
 
                 val label = if (bestAudio != null && audiosByLanguage.size > 1)
-                    "${video.label} (${bestAudio.language})"
-                else video.label
+                    "${richLabel(video.height, video.url, video.mimeType)} (${bestAudio.language})"
+                else richLabel(video.height, video.url, video.mimeType)
 
                 val localLink = AryDashServer.buildAndRegister(
                     video, if (bestAudio != null) listOf(bestAudio) else emptyList(),
