@@ -530,7 +530,9 @@ class PakistaniliveProvider(private val prefs: SharedPreferences? = null) : Main
         val collected = mutableListOf<ExtractorLink>()
         val m = try {
             val html = app.get(data, headers = mapOf("User-Agent" to UA)).text
-            Regex("""initCustomPlayer\("video1","([^"]+)",`(.*?)`\s*\)""", RegexOption.DOT_MATCHES_ALL)
+            // ملاحظة: تُرقّم القناة اللاعب بحسب الحلقة («video1»، «video5»، …)،
+            // فالقبض على video1 فقط يُسقط مسلسلاتٍ عدة — نطابق أي رقم.
+            Regex("""initCustomPlayer\("video\d+","([^"]+)",`(.*?)`\s*\)""", RegexOption.DOT_MATCHES_ALL)
                 .find(html)
         } catch (e: Exception) {
             Log.e(TAG, "loadLinks fetch error: ${e.message}")
