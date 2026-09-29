@@ -157,7 +157,7 @@ object AryDashServer {
                     if (parts.size > 1) {
                         var path = parts[1].substring(1)
                         if (path.endsWith(".mpd")) path = path.replace(".mpd", "")
-                        val content = manifestMap[path.trim()]
+                        val content = manifestMap[path.trim()]?.xml
                         val out = socket.getOutputStream()
                         val head: String
                         val body: String
