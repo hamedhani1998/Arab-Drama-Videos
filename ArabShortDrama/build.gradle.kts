@@ -1,4 +1,4 @@
-version = 1
+version = 2
 
 cloudstream {
     description = "إضافة ArabShortDrama - دراما قصيرة عربية (يوتيوب + ديلي موشن)"

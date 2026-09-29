@@ -250,7 +250,56 @@ class ArabShortDramaProvider(private val prefs: SharedPreferences? = null) : Mai
 
     // ---------- التشغيل ----------
 
-    /** استخراج جودات يوتيوب عبر NewPipe (كما في aryarabia). */
+    /** كوديك الفيديو مختصراً للعرض: avc1→H.264، vp9→VP9، av01→AV1، … */
+    private fun codecTag(mime: String?): String {
+        val m = mime.orEmpty()
+        return when {
+            m.contains("av01") -> "AV1"
+            m.contains("vp09") || m.contains("/vp9") -> "VP9"
+            m.contains("avc1") || m.contains("/avc") -> "H.264"
+            m.contains("webm") -> "VP9"
+            m.contains("mp4") -> "H.264"
+            else -> ""
+        }
+    }
+
+    /** حجم ملف الفيديو من معامل `clen` في رابط googlevideo (بالبايت). */
+    private fun byteSizeOf(url: String): Long {
+        if (url.isEmpty()) return 0
+        val i = url.indexOf("clen=")
+        if (i < 0) return 0
+        val after = url.substring(i + 5)
+        val j = after.indexOf('&')
+        val num = if (j >= 0) after.substring(0, j) else after
+        return runCatching { num.toLongOrNull() ?: 0L }.getOrDefault(0L)
+    }
+
+    /** «360 • 62MB (H.264)» — تسمية تفرّق الجودات في قائمة الاختيار. */
+    private fun richLabel(height: Int, url: String, mime: String?): String {
+        val h = if (height > 0) height.toString() else "auto"
+        val bytes = byteSizeOf(url)
+        val mb = if (bytes > 0) "• ${"%.1f".format(bytes / 1048576.0)}MB" else ""
+        val tag = codecTag(mime)
+        val t = if (tag.isNotEmpty()) " ($tag)" else ""
+        return "$h$mb$t"
+    }
+
+    /** يستخرج كوديكاً حقيقياً من mimeType («video/mp4; codecs="avc1.640028"»). */
+    private fun codecFromMime(mime: String?): String? {
+        if (mime.isNullOrBlank()) return null
+        val i = mime.indexOf("codecs=")
+        if (i < 0) return null
+        return mime.substring(i + "codecs=".length).trim().removeSurrounding("\"")
+            .ifBlank { null }
+    }
+
+    /**
+     * استخراج جودات يوتيوب عبر NewPipe ثم تشغيلها عبر **خادم DASH محلي**
+     * (نمط aryarabia المُثبت). بعد تغييرات يوتيوب الأخيرة، روابط googlevideo
+     * الخام (كما كانت هذه الإضافة تفعل سابقاً) لم تعد تُشغَّل مباشرة: النطاقات
+     * مفكوكة وطلب الوسائط يحتاج Range requests رسمية للمضيف الموقَّع — وهو ما
+     * يفعله المانيفست المحلي. يُبثّ كل تنسيق (ارتفاع × كوديك) مع أفضل صوتٍ له.
+     */
     private suspend fun emitYoutube(
         videoId: String,
         callback: (ExtractorLink) -> Unit
@@ -262,23 +311,63 @@ class ArabShortDramaProvider(private val prefs: SharedPreferences? = null) : Mai
             val s = object : YoutubeStreamExtractor(ServiceList.YouTube, link) {}
             s.fetchPage()
 
-            val audioStreams = s.audioStreams.orEmpty()
+            val dur = runCatching { s.length }.getOrNull() ?: 0
+            val durationSeconds = if (dur > 0) dur else 3600L
+
             val seen = mutableSetOf<String>()
-            (s.videoOnlyStreams ?: emptyList()).forEach { v ->
-                val streamUrl = v.content
-                if (!seen.add(streamUrl)) return@forEach
-                val height = runCatching { v.height }.getOrNull() ?: 0
-                if (height <= 0) return@forEach
-                produced++
-                callback(
-                    newExtractorLink(name, "يوتيوب ${height}p", streamUrl) {
-                        referer = "https://www.youtube.com/"
-                        quality = height
-                        // ★ نفس قائمة الصوت لكل جودة، تُبنى مرة واحدة فقط
-                        // (newAudioFile معلق) بدل إعادة بنائها لكل جودة.
-                        audioTracks = audioStreams.map { newAudioFile(it.content) }
+            val videoList = (s.videoOnlyStreams ?: emptyList()).mapNotNull { v ->
+                try {
+                    val streamUrl = v.content ?: return@mapNotNull null
+                    if (!seen.add(streamUrl)) return@mapNotNull null
+                    val height = runCatching { v.height }.getOrNull() ?: 0
+                    if (height <= 0) return@mapNotNull null
+                    var mime = v.format?.mimeType
+                    if (mime.isNullOrEmpty()) mime = ArabShortDashServer.mimeFromUrl(streamUrl, false)
+                    val initR = if (v.initStart != null && v.initEnd != null) "${v.initStart}-${v.initEnd}" else null
+                    val indexR = if (v.indexStart != null && v.indexEnd != null) "${v.indexStart}-${v.indexEnd}" else null
+                    ASDStreamInfo(streamUrl, mime, height, height.toString(), initR, indexR, codecFromMime(mime))
+                } catch (_: Exception) { null }
+            }.distinctBy { it.url }
+
+            val audioList = (s.audioStreams ?: emptyList()).mapNotNull { a ->
+                try {
+                    val aUrl = a.content ?: return@mapNotNull null
+                    val bitrate = runCatching { a.bitrate ?: 128000 }.getOrNull() ?: 128000
+                    var mime = runCatching { a.format?.mimeType }.getOrNull()
+                    if (mime.isNullOrEmpty()) mime = ArabShortDashServer.mimeFromUrl(aUrl, true)
+                    val initR = if (a.initStart != null && a.initEnd != null) "${a.initStart}-${a.initEnd}" else null
+                    val indexR = if (a.indexStart != null && a.indexEnd != null) "${a.indexStart}-${a.indexEnd}" else null
+                    ASDAudioInfo(aUrl, mime, bitrate, initR, indexR, codec = codecFromMime(mime))
+                } catch (_: Exception) { null }
+            }.distinctBy { it.url }
+
+            ArabShortDashServer.ensureStarted()
+
+            // كل تنسيق فيديو يُبثّ مع أفضل صوتٍ مواءَماً لكوديكه، أو وحده عند غياب الصوت.
+            for (video in videoList) {
+                val bestAudio = if (audioList.isNotEmpty()) {
+                    val family = if (video.mimeType.contains("webm")) { a: ASDAudioInfo ->
+                        a.mimeType.contains("webm")
+                    } else { a: ASDAudioInfo ->
+                        a.mimeType.contains("mp4")
                     }
+                    audioList.sortedWith(
+                        compareByDescending<ASDAudioInfo>(family).thenByDescending { it.bitrate }
+                    ).firstOrNull()
+                } else null
+
+                val localLink = ArabShortDashServer.buildAndRegister(
+                    video, if (bestAudio != null) listOf(bestAudio) else emptyList(), durationSeconds
                 )
+                if (localLink != null) {
+                    produced++
+                    callback(
+                        newExtractorLink(name, "يوتيوب ${richLabel(video.height, video.url, video.mimeType)}", localLink, type = ExtractorLinkType.DASH) {
+                            referer = "https://www.youtube.com/"
+                            quality = video.height
+                        }
+                    )
+                }
             }
         } catch (_: Exception) {
         }
