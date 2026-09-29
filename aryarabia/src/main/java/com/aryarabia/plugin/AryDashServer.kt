@@ -29,7 +29,9 @@ data class StreamInfo(
     val height: Int,
     val label: String,
     val initRange: String? = null,
-    val indexRange: String? = null
+    val indexRange: String? = null,
+    /** كوديك حقيقي من NewPipe (avc1…/vp09…/av01…) — يُكتب في المانيفست. */
+    val codec: String? = null
 )
 
 data class AudioInfo(
@@ -38,7 +40,8 @@ data class AudioInfo(
     val bitrate: Int,
     val initRange: String? = null,
     val indexRange: String? = null,
-    val language: String = "DEFAULT"
+    val language: String = "DEFAULT",
+    val codec: String? = null
 )
 
 object AryDashServer {
@@ -131,6 +134,15 @@ object AryDashServer {
         durationSec: Long
     ): String? = registerManifestAndGetUrl(buildDashManifestXml(video, audioList, durationSec))
 
+    /**
+     * كوديكٌ كتابي للمانيفست: نفضّل ما أعطاه NewPipe فعلاً (avc1.*, vp09.*,
+     * av01.*, av1 …) — يعرّفه اللاعب بلا تخمين — وإلا نرتد للأسرة.
+     */
+    fun codecFor(mimeType: String, codec: String?): String {
+        if (!codec.isNullOrBlank()) return codec
+        return if (mimeType.contains("webm")) "vp9" else "avc1.4d401f"
+    }
+
     private fun buildDashManifestXml(
         video: StreamInfo,
         audioList: List<AudioInfo>,
@@ -144,7 +156,7 @@ object AryDashServer {
         sb.append("<Period>")
 
         val vMime = video.mimeType
-        val vCodecs = if (vMime.contains("webm")) "vp9" else "avc1.4d401f"
+        val vCodecs = codecFor(vMime, video.codec)
 
         val vSegmentBase = if (video.initRange != null && video.indexRange != null) {
             """<SegmentBase indexRange="${video.indexRange}"><Initialization range="${video.initRange}" /></SegmentBase>"""
@@ -163,7 +175,7 @@ object AryDashServer {
             val cleanAudioUrl = escapeXml(audio.url)
             val audioId = "audio_$index"
             val aMime = audio.mimeType
-            val aCodecs = if (aMime.contains("webm")) "opus" else "mp4a.40.2"
+            val aCodecs = codecFor(aMime, audio.codec) // mp4a.40.2 / opus / …
 
             val aSegmentBase = if (audio.initRange != null && audio.indexRange != null) {
                 """<SegmentBase indexRange="${audio.indexRange}"><Initialization range="${audio.initRange}" /></SegmentBase>"""

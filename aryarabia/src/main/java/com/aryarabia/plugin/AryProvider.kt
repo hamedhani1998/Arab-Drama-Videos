@@ -45,6 +45,15 @@ class AryProvider(
     private fun playbackMode(): String =
         prefs?.getString(ArySettingsBottomSheet.KEY_PLAYBACK_MODE, "newpipe") ?: "newpipe"
 
+    /** يستخرج كوديك حقيقي من mimeType («video/mp4; codecs="avc1.640028"») إن وُجد. */
+    private fun codecFromMime(mime: String?): String? {
+        if (mime.isNullOrBlank()) return null
+        val i = mime.indexOf("codecs=")
+        if (i < 0) return null
+        val v = mime.substring(i + "codecs=".length).trim().removeSurrounding("\"")
+        return if (v.isNotBlank()) v else null
+    }
+
     /** عرض كل الجودات أم الأعلى فقط. */
     private fun qualityMode(): String =
         prefs?.getString(ArySettingsBottomSheet.KEY_MAX_QUALITY, "all") ?: "all"
@@ -795,7 +804,9 @@ class AryProvider(
 
             val seenUrls = mutableSetOf<String>()
 
-            // جودات الفيديو (video-only): مفتاح الاستخراج — وفّقها مع أفضل صوت
+            // جودات الفيديو (video-only): مفتاح الاستخراج — نُبقي كل تنسيقٍ مميز
+            // (ارتفاعه وكوديكه: avc وvp9 وav1) بدل طيّ كل ارتفاع إلى تنسيقٍ واحد،
+            // فيظهر في اللاعب كل الجودات المتاحة بدل جزءٍ منها.
             val videoOnlyList = (s.videoOnlyStreams ?: emptyList()).mapNotNull { vs ->
                 try {
                     val streamUrl = vs.content ?: return@mapNotNull null
@@ -809,9 +820,9 @@ class AryProvider(
                     val initR = if (vs.initStart != null && vs.initEnd != null) "${vs.initStart}-${vs.initEnd}" else null
                     val indexR = if (vs.indexStart != null && vs.indexEnd != null) "${vs.indexStart}-${vs.indexEnd}" else null
 
-                    StreamInfo(streamUrl, mime, height, label, initR, indexR)
+                    StreamInfo(streamUrl, mime, height, label, initR, indexR, codecFromMime(mime))
                 } catch (e: Exception) { null }
-            }.distinctBy { it.height }
+            }.distinctBy { it.url }
 
             val audioInfoList = (s.audioStreams ?: emptyList()).mapNotNull { asr ->
                 try {
@@ -825,7 +836,7 @@ class AryProvider(
                     var rawLang = runCatching { asr.audioTrackId ?: "Default" }.getOrNull() ?: "Default"
                     if (rawLang.contains(".")) rawLang = rawLang.substringBefore(".")
 
-                    AudioInfo(aUrl, mime, bitrate, initR, indexR, rawLang.uppercase())
+                    AudioInfo(aUrl, mime, bitrate, initR, indexR, rawLang.uppercase(), codecFromMime(mime))
                 } catch (e: Exception) { null }
             }.distinctBy { it.url }
             val audiosByLanguage = audioInfoList.groupBy { it.language }
@@ -842,61 +853,78 @@ class AryProvider(
 
             AryDashServer.ensureStarted()
 
-            // إعداد «الجودات»: الأعلى فقط عند اختيار high
+            // إعداد «الجودات»: الأعلى فقط عند اختيار high (نُبقي نسخة الكوديك
+            // العليا أيضاً لئلا يختفي التنسيق شبه المتاح للاعب).
             val effectiveVideos = if (qualityMode() == "high") {
-                videoOnlyList.maxByOrNull { it.height }?.let { listOf(it) } ?: videoOnlyList
+                val top = videoOnlyList.maxByOrNull { it.height }
+                if (top != null) videoOnlyList.filter { it.height == top.height } else videoOnlyList
             } else videoOnlyList
 
-            if (audiosByLanguage.isNotEmpty()) {
-                for (video in effectiveVideos) {
-                    for ((lang, audios) in audiosByLanguage) {
-                        val bestAudioForLang = if (video.mimeType.contains("webm")) {
-                            audios.sortedWith(compareByDescending<AudioInfo> { it.mimeType.contains("webm") }.thenByDescending { it.bitrate }).firstOrNull()
-                        } else {
-                            audios.sortedWith(compareByDescending<AudioInfo> { it.mimeType.contains("mp4") }.thenByDescending { it.bitrate }).firstOrNull()
+            // كل تنسيق فيديو يُبث — بلا استثناء — مقترناً بأفضل صوتٍ متاحٍ لغةً
+            // ومواءمةً للكوديك. عند غياب الصوت نُبث الفيديو وحده (مانيفست بلا
+            // صوته) بدل أن يسقط التنسيق بالكامل.
+            for (video in effectiveVideos) {
+                val bestAudio = if (audiosByLanguage.isNotEmpty()) {
+                    val lang = audiosByLanguage.keys.firstOrNull()
+                    audiosByLanguage[lang]?.let { audios ->
+                        val family = if (video.mimeType.contains("webm")) { a: AudioInfo ->
+                            a.mimeType.contains("webm")
+                        } else { a: AudioInfo ->
+                            a.mimeType.contains("mp4")
                         }
-                        if (bestAudioForLang != null) {
-                            val localLink = AryDashServer.buildAndRegister(
-                                video, listOf(bestAudioForLang), durationSeconds
-                            )
-                            if (localLink != null) {
-                                callback(
-                                    newExtractorLink(
-                                        "ARY العربية",
-                                        "${video.label} (${bestAudioForLang.language})",
-                                        localLink,
-                                        type = ExtractorLinkType.DASH
-                                    ) {
-                                        this.referer = mainUrl
-                                        this.quality = video.height
-                                    }
-                                )
-                                produced++
-                            }
-                        }
+                        audios.sortedWith(
+                            compareByDescending<AudioInfo>(family).thenByDescending { it.bitrate }
+                        ).firstOrNull()
                     }
+                } else null
+
+                val label = if (bestAudio != null && audiosByLanguage.size > 1)
+                    "${video.label} (${bestAudio.language})"
+                else video.label
+
+                val localLink = AryDashServer.buildAndRegister(
+                    video, if (bestAudio != null) listOf(bestAudio) else emptyList(),
+                    durationSeconds
+                )
+                if (localLink != null) {
+                    callback(
+                        newExtractorLink(
+                            "ARY العربية",
+                            label,
+                            localLink,
+                            type = ExtractorLinkType.DASH
+                        ) {
+                            this.referer = mainUrl
+                            this.quality = video.height
+                        }
+                    )
+                    produced++
                 }
             }
 
-            // مقاطع مدمجة (muxed) كاحتياط إضافي — روابط مباشرة
-            val muxedList = (s.videoStreams ?: emptyList()).mapNotNull { vs ->
-                try {
-                    val mUrl = vs.content ?: return@mapNotNull null
-                    if (!seenUrls.add(mUrl)) return@mapNotNull null
-                    Triple(mUrl, qualityLabelOf(vs), runCatching { vs.height ?: 0 }.getOrNull() ?: 0)
-                } catch (e: Exception) { null }
-            }
-            val effectiveMuxed = if (qualityMode() == "high") {
-                muxedList.maxByOrNull { it.third }?.let { listOf(it) } ?: muxedList
-            } else muxedList
-            effectiveMuxed.forEach { (mUrl, mLabel, mHeight) ->
-                callback(
-                    newExtractorLink("ARY العربية", "$mLabel (Legacy)", mUrl, type = INFER_TYPE) {
-                        this.referer = mainUrl
-                        this.quality = mHeight
-                    }
-                )
-                produced++
+            // مقاطع مدمجة (muxed) — احتياط فقط: إن لم يُنتج مسار DASH أعلاه أي
+            // رابط (فيديو بلا video-only). كانت تُبث دائماً قبلاً كروابط خام
+            // «Legacy» تفشل أحياناً في اللاعب، فأصبحت هنا للطوارئ لا للعرض.
+            if (produced == 0) {
+                val muxedList = (s.videoStreams ?: emptyList()).mapNotNull { vs ->
+                    try {
+                        val mUrl = vs.content ?: return@mapNotNull null
+                        if (!seenUrls.add(mUrl)) return@mapNotNull null
+                        Triple(mUrl, qualityLabelOf(vs), runCatching { vs.height ?: 0 }.getOrNull() ?: 0)
+                    } catch (e: Exception) { null }
+                }
+                val effectiveMuxed = if (qualityMode() == "high") {
+                    muxedList.maxByOrNull { it.third }?.let { listOf(it) } ?: muxedList
+                } else muxedList
+                effectiveMuxed.forEach { (mUrl, mLabel, mHeight) ->
+                    callback(
+                        newExtractorLink("ARY العربية", "$mLabel (Legacy)", mUrl, type = INFER_TYPE) {
+                            this.referer = mainUrl
+                            this.quality = mHeight
+                        }
+                    )
+                    produced++
+                }
             }
 
             Log.d(TAG, "$vid NewPipe DASH links=$produced qualities=${effectiveVideos.size}")

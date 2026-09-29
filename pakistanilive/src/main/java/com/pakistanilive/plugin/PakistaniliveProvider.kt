@@ -44,6 +44,15 @@ class PakistaniliveProvider(private val prefs: SharedPreferences? = null) : Main
     private fun abs(u: String): String =
         if (u.startsWith("http")) u else "$mainUrl$u"
 
+    /** يستخرج كوديك حقيقي من mimeType («video/mp4; codecs="avc1.640028"») إن وُجد. */
+    private fun codecFromMime(mime: String?): String? {
+        if (mime.isNullOrBlank()) return null
+        val i = mime.indexOf("codecs=")
+        if (i < 0) return null
+        val v = mime.substring(i + "codecs=".length).trim().removeSurrounding("\"")
+        return if (v.isNotBlank()) v else null
+    }
+
     // ---------- خيارات التشغيل (مأخوذة من aryarabia) ----------
     private fun playbackMode(): String =
         prefs?.getString(PakistaniliveSettingsBottomSheet.KEY_PLAYBACK_MODE, "newpipe") ?: "newpipe"
@@ -221,7 +230,10 @@ class PakistaniliveProvider(private val prefs: SharedPreferences? = null) : Main
 
             val seenUrls = mutableSetOf<String>()
 
-            // جودات الفيديو (video-only): وفّقها مع أفضل صوت
+            // جودات الفيديو (video-only): نُبقي كل تنسيقٍ مميز — ارتفاعه وكوديكه —
+            // (mp4/avc وwebm/vp9 وحتى av1) بدل طي كل ارتفاع إلى تنسيقٍ واحد
+            // (كان `distinctBy{it.height}` يُسقط نسخ الكوديك المكررة في الصوتيات،
+            // ويظهر في اللاعب جزء من الجودات المتاحة فقط).
             val videoOnlyList = (s.videoOnlyStreams ?: emptyList()).mapNotNull { vs ->
                 try {
                     val streamUrl = vs.content ?: return@mapNotNull null
@@ -234,9 +246,9 @@ class PakistaniliveProvider(private val prefs: SharedPreferences? = null) : Main
                     val initR = if (vs.initStart != null && vs.initEnd != null) "${vs.initStart}-${vs.initEnd}" else null
                     val indexR = if (vs.indexStart != null && vs.indexEnd != null) "${vs.indexStart}-${vs.indexEnd}" else null
 
-                    PakiStreamInfo(streamUrl, mime ?: "video/mp4", height, label, initR, indexR)
+                    PakiStreamInfo(streamUrl, mime, height, label, initR, indexR, codecFromMime(mime))
                 } catch (e: Exception) { null }
-            }.distinctBy { it.height }
+            }.distinctBy { it.url }
 
             val audioInfoList = (s.audioStreams ?: emptyList()).mapNotNull { asr ->
                 try {
@@ -250,72 +262,64 @@ class PakistaniliveProvider(private val prefs: SharedPreferences? = null) : Main
                     var rawLang = runCatching { asr.audioTrackId ?: "Default" }.getOrNull() ?: "Default"
                     if (rawLang.contains(".")) rawLang = rawLang.substringBefore(".")
 
-                    PakiAudioInfo(aUrl, mime ?: "audio/mp4", bitrate, initR, indexR, rawLang.uppercase())
+                    PakiAudioInfo(aUrl, mime, bitrate, initR, indexR, rawLang.uppercase(), codecFromMime(mime))
                 } catch (e: Exception) { null }
             }.distinctBy { it.url }
             val audiosByLanguage = audioInfoList.groupBy { it.language }
 
             PakiDashServer.ensureStarted()
 
-            // إعداد «الجودات»: الأعلى فقط عند اختيار high
+            // إعداد «الجودات»: الأعلى فقط عند اختيار high (نُبقي نسخة الكوديك
+            // العليا أيضاً لئلا يختفي التنسيق شبه المتاح للاعب).
             val effectiveVideos = if (qualityMode() == "high") {
-                videoOnlyList.maxByOrNull { it.height }?.let { listOf(it) } ?: videoOnlyList
+                val top = videoOnlyList.maxByOrNull { it.height }
+                if (top != null) videoOnlyList.filter { it.height == top.height } else videoOnlyList
             } else videoOnlyList
 
-            if (audiosByLanguage.isNotEmpty()) {
-                for (video in effectiveVideos) {
-                    for ((lang, audios) in audiosByLanguage) {
-                        val bestAudioForLang = if (video.mimeType.contains("webm")) {
-                            audios.sortedWith(compareByDescending<PakiAudioInfo> { it.mimeType.contains("webm") }.thenByDescending { it.bitrate }).firstOrNull()
-                        } else {
-                            audios.sortedWith(compareByDescending<PakiAudioInfo> { it.mimeType.contains("mp4") }.thenByDescending { it.bitrate }).firstOrNull()
+            // كل تنسيق فيديو يُبث — بلا استثناء — مُقترناً بأفضل صوتٍ متاحٍ لغةً
+            // ومواءمةً للكوديك. عند غياب الصوت نُبث الفيديو وحده (مانيفست بلا
+            // AdaptationSet صوتي) بدل أن يسقط تنسيق الفيديو بالكامل.
+            for (video in effectiveVideos) {
+                val bestAudio = if (audiosByLanguage.isNotEmpty()) {
+                    // أول لغة، مع مَن يطابق أسرة كوديك الفيديو (mp4↔mp4، webm↔webm)
+                    val lang = audiosByLanguage.keys.firstOrNull()
+                    audiosByLanguage[lang]?.let { audios ->
+                        val family = if (video.mimeType.contains("webm")) { a: PakiAudioInfo ->
+                            a.mimeType.contains("webm")
+                        } else { a: PakiAudioInfo ->
+                            a.mimeType.contains("mp4")
                         }
-                        if (bestAudioForLang != null) {
-                            val localLink = PakiDashServer.buildAndRegister(
-                                video, listOf(bestAudioForLang), durationSeconds
-                            )
-                            if (localLink != null) {
-                                callback(
-                                    newExtractorLink(
-                                        "Pakistanilive",
-                                        "${video.label} (${bestAudioForLang.language})",
-                                        localLink,
-                                        type = ExtractorLinkType.DASH
-                                    ) {
-                                        this.referer = mainUrl
-                                        this.quality = video.height
-                                    }
-                                )
-                                produced++
-                            }
-                        }
+                        audios.sortedWith(
+                            compareByDescending<PakiAudioInfo>(family).thenByDescending { it.bitrate }
+                        ).firstOrNull()
                     }
+                } else null
+
+                val label = if (bestAudio != null && audiosByLanguage.size > 1)
+                    "${video.label} (${bestAudio.language})"
+                else video.label
+
+                val localLink = PakiDashServer.buildAndRegister(
+                    video, if (bestAudio != null) listOf(bestAudio) else emptyList(),
+                    durationSeconds
+                )
+                if (localLink != null) {
+                    callback(
+                        newExtractorLink(
+                            "Pakistanilive",
+                            label,
+                            localLink,
+                            type = ExtractorLinkType.DASH
+                        ) {
+                            this.referer = mainUrl
+                            this.quality = video.height
+                        }
+                    )
+                    produced++
                 }
             }
 
-            // مقاطع مدمجة (muxed) كاحتياط إضافي — روابط مباشرة
-            val muxedList = (s.videoStreams ?: emptyList()).mapNotNull { vs ->
-                try {
-                    val mUrl = vs.content ?: return@mapNotNull null
-                    if (!seenUrls.add(mUrl)) return@mapNotNull null
-                    val height = runCatching { vs.height ?: 0 }.getOrNull() ?: 0
-                    Triple(mUrl, if (height > 0) height.toString() else "video", height)
-                } catch (e: Exception) { null }
-            }
-            val effectiveMuxed = if (qualityMode() == "high") {
-                muxedList.maxByOrNull { it.third }?.let { listOf(it) } ?: muxedList
-            } else muxedList
-            effectiveMuxed.forEach { (mUrl, mLabel, mHeight) ->
-                callback(
-                    newExtractorLink("Pakistanilive", "$mLabel (Legacy)", mUrl, type = INFER_TYPE) {
-                        this.referer = mainUrl
-                        this.quality = mHeight
-                    }
-                )
-                produced++
-            }
-
-            Log.d(TAG, "$vid NewPipe DASH links=$produced qualities=${effectiveVideos.size}")
+            Log.d(TAG, "$vid NewPipe DASH links=$produced formats=${effectiveVideos.size}")
         } catch (e: Exception) {
             Log.w(TAG, "$vid NewPipe resolve failed: ${e.message}")
         }

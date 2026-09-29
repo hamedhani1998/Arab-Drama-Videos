@@ -1,4 +1,4 @@
-version = 5
+version = 6
 
 cloudstream {
     description = "باكستاني لايف - مسلسلات باكستانية مترجمة (pakistanilive.com)"
