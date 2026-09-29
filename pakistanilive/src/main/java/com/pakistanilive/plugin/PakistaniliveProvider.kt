@@ -79,34 +79,64 @@ class PakistaniliveProvider(private val prefs: SharedPreferences? = null) : Main
 
     // ---------- البث ----------
     /**
-     * بحث: صفحة نتائج WordPress `/?s={query}` تعرض بطاقات `div.series-item`
-     * لسلاسل — لكنها قد تتضمن روابطاً لمصادر خارجية (qisateishq.com …)
-     * المختلطة بنتائج الموقع. نكتفي بما يحيل إلى `mainUrl` (باكستاني لايف)
-     * كي لا ندخل مسلسلات من مواقع أخرى في النتائج.
+     * بحث: بحث WordPress `/?s=` يتجاهل النص ويعيد نفس جدار الفئات كله
+     * (204 بطاقة لكل استعلام) — لا نستخدمه. بدل ذلك نستعلم REST API
+     * `wp/v2/categories` (كل فئات الموقع باسمها وعدد حلقاتها ورابطها) ثم
+     * نطابق النص في الإضافة. الفئات كلها هنا — 200+ مسلسل باسم عربي حقيقي
+     * (مثل «مسلسل باكستاني دمى من الطين - Mitti De Baway») — فيعود البحث
+     * نتائج صحيحة مطابقةً فقط.
      */
     override suspend fun search(query: String): List<SearchResponse> {
         val q = query.trim()
         if (q.isBlank()) return emptyList()
-        val doc = try {
-            app.get("$mainUrl/?s=${java.net.URLEncoder.encode(q, "UTF-8")}").document
-        } catch (_: Exception) { return emptyList() }
-        val out = doc.select("div.series-item").mapNotNull { item ->
-            val href = item.selectFirst("a")?.attr("href")?.trim().orEmpty()
-            // فقط السلاسل على الموقع نفسه؛ تجاهل الخارجية (qisateishq…).
-            if (!isLocal(href) || !href.contains("/category/")) return@mapNotNull null
-            val title = item.selectFirst(".series-title")?.text()?.trim().orEmpty()
-                .ifBlank { item.selectFirst("a")?.attr("title") ?: return@mapNotNull null }
-            val poster = item.selectFirst("img")?.attr("data-src")
-                ?.ifBlank { item.selectFirst("img")?.attr("src") }
-                ?.let { abs(it) }
-            newTvSeriesSearchResponse(title, abs(href)) { this.posterUrl = poster }
-        }.distinctBy { it.url }
-        return out
+        val normQ = normForSearch(q)
+        if (normQ.isBlank()) return emptyList()
+
+        val out = ArrayList<SearchResponse>()
+        // الفئات 200+ على 3 صفحات (per_page=100) — نمرّها كلها ونطابق.
+        for (page in 1..3) {
+            val res = try {
+                app.get("$mainUrl/wp-json/wp/v2/categories?per_page=100&page=$page&_fields=name,count,link")
+            } catch (_: Exception) { break }
+            val arr = try {
+                org.json.JSONArray(res.text.trim().removePrefix("﻿"))
+            } catch (_: Exception) { break }
+            if (arr.length() == 0) break
+
+            for (i in 0 until arr.length()) {
+                val c = arr.optJSONObject(i) ?: continue
+                val name = c.optString("name", "").trim().ifBlank { continue }
+                val link = c.optString("link", "").ifBlank { continue }
+                if (!link.contains("/category/")) continue
+                if (!normForSearch(name).contains(normQ)) continue
+                out.add(newTvSeriesSearchResponse(name, link) {
+                    this.posterUrl = null
+                })
+            }
+        }
+        return out.distinctBy { it.url }
     }
 
-    /** هل الرابط على `mainUrl` (نسبي أو بنفس المضيف)؟ */
-    private fun isLocal(href: String): Boolean =
-        !href.contains("://") || href.startsWith(mainUrl)
+    /**
+     * توحيد مطابق لروح مدلول البحث في aryarabia: بلا تشكيل، والهمزات
+     * والألفات والألف المقصورة موحّدة، والتاء المربوطة كالهاء، والحرف
+     * صغير. يجعل «الانين» تجد «الأنين» و«اني» تجد «أناني».
+     */
+    private fun normForSearch(s: String): String {
+        val sb = StringBuilder()
+        for (c in s.trim()) {
+            when (c) {
+                in 'ً'..'ْ', 'ـ', 'ٰ', '،', '|', '-', '_', '(', ')', '[', ']', '"', '\'', ':' -> {}
+                'أ', 'إ', 'آ', 'ٱ' -> sb.append('ا')
+                'ى' -> sb.append('ي')
+                'ة' -> sb.append('ه')
+                'ء' -> {}
+                ' ' -> if (sb.isNotEmpty() && sb.last() != ' ') sb.append(' ')
+                else -> sb.append(c.lowercaseChar())
+            }
+        }
+        return sb.toString().trim()
+    }
 
     override suspend fun load(url: String): LoadResponse? {
         val doc = try { app.get(url).document } catch (_: Exception) { return null }

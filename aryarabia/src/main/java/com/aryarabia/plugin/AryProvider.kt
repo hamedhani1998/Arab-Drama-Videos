@@ -460,9 +460,14 @@ class AryProvider(
     /**
      * يحوّل عناصر القائمة إلى حلقات مرقّمة مرتّبة. القناة لا ترقّم الحلقة
      * الأخيرة، فتُوضع بعد أعلى رقم مُرقّم.
+     *
+     * الإعلانات ذات الحلقات المرقّمة تُرقَّم عادياً. أما الإعلانات التي لا
+     * تملك سوى عناصر غير مرقّمة («مسلسل X قريباً على ARYالعربية») فنُبقيها
+     * كحلقات في النهاية — وإلا عادت القائمة فارغة وفشل فتح صفحة تفاصيلها.
      */
     private fun episodesOf(items: List<Lockup>): List<Pair<Int, Lockup>> {
         val numbered = mutableListOf<Pair<Int, Lockup>>()
+        val extras = mutableListOf<Lockup>()
         var finale: Lockup? = null
         for (i in items) {
             if (skipTitle(i.title)) continue
@@ -470,10 +475,16 @@ class AryProvider(
             when {
                 n != null -> numbered.add(n to i)
                 isFinale(i.title) && finale == null -> finale = i
+                else -> extras.add(i)
             }
         }
         val maxNum = numbered.maxOfOrNull { it.first } ?: 0
-        finale?.let { numbered.add((maxNum + 1) to it) }
+        // «حلقة الأخيرة» فوق كل الأرقام، ثم التيزرات/غير المرقّمة بعدها —
+        // أرقام متتالية للترتيب فقط كي تبقى القائمة مرئية ولا يُسقط فتحها.
+        var next = maxNum + 1
+        if (finale != null) { numbered.add((next) to finale); next += 1 }
+        for (l in extras)
+            numbered.add((next++) to l)
         return numbered.distinctBy { it.second.id }.sortedBy { it.first }
     }
 
