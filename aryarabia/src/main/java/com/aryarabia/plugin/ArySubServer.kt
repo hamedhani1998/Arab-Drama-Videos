@@ -40,7 +40,7 @@ object ArySubServer {
      *
      * نفس سبب التنظيف في `AryDashServer`: الخريطة بلا حدّ ولا عمر فتنمو
      * مع كل حلقة مشاهَدة. ونصّ الترجمة يُقرأ مرة واحدة عند اختياره ثم
-     * لا يُحتاج، فبقياؤه بعد مدة إهدارٌ للذاكرة فقط.
+     * لا يُحتاج، فبقياؤه بعد مدة إهدار للذاكرة فقط.
      */
     private class Entry(val vtt: String, val at: Long)
 
@@ -53,7 +53,7 @@ object ArySubServer {
     private var activeServer: ServerSocket? = null
     @Volatile private var serverPort = 0
 
-    /** نفسReason in AryDashServer: موتُ حلقة القبول صامتٌ بلا هذا العلم. */
+    /** كما في AryDashServer: موت حلقة القبول صامت بلا هذا العلم. */
     @Volatile private var loopAlive = false
 
     @Synchronized
@@ -121,10 +121,8 @@ object ArySubServer {
     /** يُسقط ما تجاوز عمره أو الحدّ — يمنع التسرّب عبر جلسة طويلة. */
     private fun prune() {
         val now = System.currentTimeMillis()
-        val it = vttMap.entries.iterator()
-        while (it.hasNext()) {
-            if (now - it.next().value.at > VTT_TTL_MS) it.remove()
-        }
+        // نفس ملاحظة AryDashServer: لا remove عبر iterator.
+        vttMap.entries.removeIf { now - it.value.at > VTT_TTL_MS }
         while (vttMap.size > VTT_MAX) {
             val oldest = vttMap.entries.minByOrNull { it.value.at }?.key ?: break
             vttMap.remove(oldest)

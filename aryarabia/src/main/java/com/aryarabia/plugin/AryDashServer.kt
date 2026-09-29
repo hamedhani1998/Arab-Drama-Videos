@@ -129,11 +129,9 @@ object AryDashServer {
      */
     private fun prune() {
         val now = System.currentTimeMillis()
-        val it = manifestMap.entries.iterator()
-        while (it.hasNext()) {
-            val e = it.next()
-            if (now - e.value.at > MANIFEST_TTL_MS) it.remove()
-        }
+        // ★ `entries.iterator()` من java.util لا يدعم remove (يرمي
+        //   UnsupportedOperationException)، فالمسح الصحيح removeIf.
+        manifestMap.entries.removeIf { now - it.value.at > MANIFEST_TTL_MS }
         while (manifestMap.size > MANIFEST_MAX) {
             val oldest = manifestMap.entries.minByOrNull { it.value.at }?.key ?: break
             manifestMap.remove(oldest)
