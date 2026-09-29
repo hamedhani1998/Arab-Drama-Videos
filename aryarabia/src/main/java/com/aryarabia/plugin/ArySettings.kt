@@ -94,7 +94,7 @@ class ArySettingsBottomSheet(private val prefs: SharedPreferences) : BottomSheet
 
             val aboutPref = Preference(ctx).apply {
                 title = "قناة ARY يوتيوب + قنوات إضافية"
-                summary = "يعرض مسلسلات قناة ARY من قوائم يوتيوب (كاملة ومترجمة)، ويدعم إضافة قنواتٍ يوتيوب إضافية تظهر بقسمٍ خاص وتشملها نتائج البحث."
+                summary = "يعرض مسلسلات قناة ARY من قوائم يوتيوب (كاملة ومترجمة)، ويدعم إضافة قنواتٍ يوتيوب إضافية تظهر كلها في قسمٍ واحد «المقترحات» وتشملها نتائج البحث."
                 setSelectable(false)
             }
             intro.addPreference(aboutPref)
@@ -106,9 +106,9 @@ class ArySettingsBottomSheet(private val prefs: SharedPreferences) : BottomSheet
             val extraChannelPref = EditTextPreference(ctx).apply {
                 key = KEY_EXTRA_CHANNELS
                 title = "قنوات يوتيوب إضافية"
-                summary = "أضف قناةً لتظهر مسلسلاتها بقسمٍ خاص وضمن البحث. لتسمية القسم بنفسك اكتب الاسم ثم | ثم الرابط: الاسم | الرابط"
+                summary = "أضف قناةً لتظهر مسلسلاتها ضمن قسم «المقترحات» وضمن البحث. لتسمية القناة بنفسك اكتب الاسم ثم | ثم الرابط: الاسم | الرابط"
                 dialogTitle = "قنوات يوتيوب إضافية"
-                dialogMessage = "رابطٌ أو معرّفُ قناة في كل سطر:\n  https://youtube.com/@xxx\n  @xxx\n  UC…\n\nلتسمية القسم بنفسك اكتب الاسم ثم | ثم الرابط:\n  قناة القصص | https://youtube.com/@xxx\n\nاتركه فارغاً لسلوك اليوم تماماً."
+                dialogMessage = "رابطٌ أو معرّفُ قناة في كل سطر:\n  https://youtube.com/@xxx\n  @xxx\n  UC…\n\nلتسمية القناة بنفسك اكتب الاسم ثم | ثم الرابط:\n  قناة القصص | https://youtube.com/@xxx\n\nكل القنوات (المدمجة والمضافة) تظهر في قسمٍ واحد «المقترحات» مهما زادت، حتى لا تتقلّب الواجهة.\n\nاتركه فارغاً لسلوك اليوم تماماً."
                 setOnPreferenceChangeListener { _, newVal ->
                     (newVal as? String)?.isNotBlank() == false || newVal != null
                 }

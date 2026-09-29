@@ -73,6 +73,20 @@ class AryProvider(
         /** صفحة تبويب «قوائم التشغيل» في القناة — GET على HTML نجلب منها ytInitialData. */
         private const val PLAYLISTS_URL = "https://www.youtube.com/channel/$CHANNEL_ID/playlists"
 
+        /**
+         * قناتان انضمّتا إلى ARY بعد حذف إضافتي «هم العربية» و«عشق مرشد»
+         * (`@humarabia` و`@ishqmurshidarabichumtv`) ودمجهما هنا:
+         *   - UCyA7992LhLeYSd7ynpiwpeQ  = هم العربية
+         *   - UCOYvEjxqq0sx5XmeQx9-UgA  = عشق مرشد Arab Hum TV
+         * تُدمج قوائمهما في صفّ ARY نفسه تحت قسم «المقترحات» — لا صفًّا
+         * لكل قناة، فعدد الأقسام على الشاشة هو ما يبطئ العرض ويجعل
+         * التطبيق يعلّق. تشغيل الحلقات يبقى من هذا المصدر نفسه بلا فرق.
+         */
+        private val COMPANION_CHANNELS = listOf(
+            "هم العربية" to "UCyA7992LhLeYSd7ynpiwpeQ",
+            "عشق مرشد" to "UCOYvEjxqq0sx5XmeQx9-UgA"
+        )
+
         private const val INNERTUBE_KEY = "AIzaSyAO_FJ2SlqU8Q4STEHLGCilw_Y9_11qcW8"
         private const val BROWSE_URL =
             "https://www.youtube.com/youtubei/v1/browse?key=$INNERTUBE_KEY&prettyPrint=false"
@@ -90,10 +104,15 @@ class AryProvider(
          * (الأفضل لدى، أحدث الفيديوهات، أفلام …). كل هذه تُستبعد من صف
          * المسلسلات. أما إعلانات وتشويقات المسلسلات (إعلان ترويجي/تشويقي،
          * تريلر، برومو) فنعرضها في صفٍّ منفصل — طلب المستخدم.
+         *
+         * `Clips` و`Telefilms` أُضيفتا مع دمج قناتي هم وعشق مرشد: القوائم
+         * باسميهما ليست مسلسلات (كان تُستبعد في إضافتهما المستقلة). ولا
+         * يظهر أيٌّ منهما في عناوين ARY أصلاً — فالبندان لا يمسّان صفّها.
          */
         private val SKIP_RE = Regex(
             "ملخص|مشهد|Shorts|أفضل اللحظات|أجمل اللحظات|أغاني|الأفضل لدى|" +
-                "أحدث فيديو|أحدث الفيديوهات|Latest Videos|أفلام|إهداء",
+                "أحدث فيديو|أحدث الفيديوهات|Latest Videos|أفلام|إهداء|" +
+                "Clips|Telefilms",
             RegexOption.IGNORE_CASE
         )
 
@@ -455,15 +474,22 @@ class AryProvider(
         val id: String,
         val title: String,
         val cover: String?,
-        val count: Int = 0
+        val count: Int = 0,
+        /**
+         * اسم القناة التي جاءت منها القائمة (فارغ = قناة ARY الأساسية).
+         * يُعرض مع اسم المسلسل في صف «المقترحات» ليعرف المستخدم مصدره،
+         * ولا يُلحق بالعنوان الأصلي — فيبقى اسم المسلسل نظيفاً في صفحة
+         * تفاصيله (يأتي من `title` عبر `bareName`).
+         */
+        val from: String = ""
     )
 
     // ============================== extra channels ==============================
 
     /**
-     * قنوات إضافية من إعدادات المصدر (رابطٌ في كل سطر). كلٌّ منها يظهر بقسمٍ
-     * مستقل في الرئيسية وتشملها نتائج البحث، دون تغيير قنوات ARY الأساسية.
-     * الافتراضي (فارغ) = سلوك اليوم تماماً.
+     * قنوات إضافية من إعدادات المصدر (رابطٌ في كل سطر). كلٌّ منها يظهر ضمن
+     * قسمٍ واحد «المقترحات» مع القنوات المدمجة، وتشملها نتائج البحث، دون
+     * تغيير صفّ ARY الأساسي. الافتراضي (فارغ) = سلوك اليوم تماماً.
      *
      * الصيغة المقبولة لكل سطر:
      *   - رابط/معرّف قناة فقط: `UC…` أو `/channel/UC…` أو `/@handle` أو `@handle`
@@ -541,19 +567,20 @@ class AryProvider(
     }
 
     /**
-     * قوائم المصدر مجزّأةً: قناة ARY وحدها في صفّها، وكل قناة إضافية في
-     * صفّها هي. تُجلب كلها مرةً واحدة (بالتوازي) وتُحفظ، فتبقى في الذاكرة
-     * طلباتُ صفحةِ واحدة لا عمليتين.
+     * قوائم المصدر كلها: قناة ARY الأساسية + القناتان المندمجتان + كل قناة
+     * أضافها المستخدم. تُجلب كلها مرةً واحدة (بالتوازي) وتُحفظ، فتبقى في
+     * الذاكرة طلباتُ صفحةِ واحدة لا عمليتين.
      */
     private data class SourceLists(
+        /** قوائم ARY وحدها — هذه صفّ «مسلسلات ARY العربية». */
         val base: List<PlaylistInfo>,
-        val extras: List<Pair<ExtraChannel, List<PlaylistInfo>>>,
+        /** قوائم بقية القنوات مجتمعة — هذه صفّ «المقترحات» الواحد. */
+        val companions: List<PlaylistInfo>,
         /** قناة لم يصل طلبها — نُعيد المحاولة لاحقاً بدل تثبيت فراغها. */
         val failed: Set<String>
     ) {
         /** كل القوائم بلا تكرار — هذا ما يبحث فيه `search`. */
-        val all: List<PlaylistInfo> =
-            (base + extras.flatMap { it.second }).distinctBy { it.id }
+        val all: List<PlaylistInfo> = (base + companions).distinctBy { it.id }
     }
 
     @Volatile
@@ -569,7 +596,8 @@ class AryProvider(
     private val RETRY_COOLDOWN_MS = 20_000L
 
     /**
-     * جلبٌ واحد لكل قناة: ARY الأساسية + كل الإضافية بالتوازي.
+     * جلبٌ واحد لكل قناة: ARY الأساسية + القناتان المندمجتان + كل قناة
+     * أضافها المستخدم، جميعها بالتوازي.
      *
      * ⚠ لا تُخفّض هذا إلى طلبٍ لكل صفحة رئيسية: الإصدار السابق كان يجلب
      * القناة الإضافية مرتين (مرةً في `allPlaylists` ومرةً لبناء صفّها)،
@@ -580,33 +608,36 @@ class AryProvider(
     private suspend fun loadSourceLists(): SourceLists = coroutineScope {
         val extras = extraChannels()
         val base = async { channelPlaylists(PLAYLISTS_URL) }
-        val extraLists = if (extras.isEmpty()) {
-            emptyList()
-        } else {
-            extras.map { extra ->
-                async {
-                    val pls = try {
-                        channelPlaylists(extra.url)
-                    } catch (e: Exception) {
-                        Log.w(TAG, "extra channel '${extra.label}' failed: ${e.message}")
-                        null
-                    }
-                    extra to pls
+
+        // بقية القنوات (المندمجة ثم الإضافية) — كلها طلبات متوازٍ واحد.
+        val others = COMPANION_CHANNELS.map { (label, cid) ->
+            ExtraChannel(label, "https://www.youtube.com/channel/$cid/playlists")
+        } + extras
+
+        val restLists = others.map { ch ->
+            async {
+                val pls = try {
+                    channelPlaylists(ch.url)
+                } catch (e: Exception) {
+                    Log.w(TAG, "channel '${ch.label}' failed: ${e.message}")
+                    null
                 }
-            }.awaitAll()
-        }
+                ch to pls
+            }
+        }.awaitAll()
+
         val baseLists = base.await()
+        // قوائم ARY تسبق غيرها، فمشتركٌ معها يُنسب إلى ARY ولا يتكرّر.
         val baseIds = baseLists.orEmpty().map { it.id }.toSet()
         val failed = mutableSetOf<String>()
         if (baseLists == null) failed.add(BASE_URL_KEY)
-        SourceLists(
-            baseLists.orEmpty(),
-            extraLists.mapNotNull { (c, pls) ->
-                if (pls == null) { failed.add(c.url); null }
-                else c to pls.filter { it.id !in baseIds }
-            },
-            failed
-        )
+
+        val companions = restLists.flatMap { (ch, pls) ->
+            if (pls == null) { failed.add(ch.url); emptyList() }
+            else pls.filter { it.id !in baseIds }
+                .map { it.copy(from = ch.label) }
+        }
+        SourceLists(baseLists.orEmpty(), companions, failed)
     }
 
     /**
@@ -623,7 +654,7 @@ class AryProvider(
         val src = loadSourceLists()
         Log.d(
             TAG,
-            "playlists: base=${src.base.size} extras=${src.extras.size} " +
+            "playlists: base=${src.base.size} companions=${src.companions.size} " +
                 "failed=${src.failed.size} total=${src.all.size}"
         )
         if (src.failed.isEmpty() && src.base.isNotEmpty()) {
@@ -708,9 +739,17 @@ class AryProvider(
     // ============================== main page ==============================
 
     /**
-     * الصفحة الرئيسية = قوائم القناة (المسلسلات). طلب أو طلبان فقط: لا
+     * الصفحة الرئيسية = قوائم القنوات (المسلسلات). طلب أو طلبان فقط: لا
      * نعدّد حلقات كل قائمة هنا (23 قائمة × صفحتان = 46 طلباً بلا داعٍ)،
      * والحلقات تُجلب عند فتح المسلسل.
+     *
+     * ⚠ صِرنا صفَّين لا أكثر، ونُبقيهما ثابتين مهما أضاف المستخدم قنوات:
+     *   1) «مسلسلات ARY العربية»  — مسلسلات قناة ARY وحدها.
+     *   2) «المقترحات»            — كل ما جاء من القنوات الأخرى مجتمعةً
+     *      في صفٍّ واحد، واسم القناة يظهر مع كل مسلسل داخله.
+     * الإصدار السابق كان يبني صفًّا مستقلاً لكل قناة، فكل قناة إضافية
+     * كانت تُضاعف الأقسام على الشاشة وترهق الواجهة — وهو ما جعل التطبيق
+     * يعلّق. صفٌّ واحد لا يتأثر بعدد القنوات إطلاقاً.
      *
      * لا نضيف صفاً من تبويب «الفيديوهات»: جُرِّب وقيس، فالقناة ترفع مقاطع
      * قصيرة من مسلسل واحد (450 فيديو متتالٍ كلها «الغيرة»، وبعد 15 صفحة
@@ -720,27 +759,36 @@ class AryProvider(
         if (page > 1) return newHomePageResponse(emptyList())
         val lists = mutableListOf<HomePageList>()
 
-        // جلبٌ واحد لكل قناة (الأساسية أولاً، وكل إضافية مستقلة) — لا نعيد
-        // طلب أي قناة هنا، فالبيانات محفوظة أصلاً.
+        // جلبٌ واحد لكل قناة (الأساسية أولاً، وبقية القنوات بالتوازي) — لا
+        // نعيد طلب أي قناة هنا، فالبيانات محفوظة أصلاً.
         val src = sourceLists()
 
         // صفّ ARY الأساسي: قوائم قناة ARY وحدها.
         homeFrom(src.base, lists)
 
-        // صفٌّ مستقل لكل قناة إضافية، بلا تكرار مع صفّ ARY (استُبعدت
-        // القوائم المشتركة عند الجلب في loadSourceLists).
-        for ((extra, pls) in src.extras) {
-            homeFromTitled(pls, "قناة ${extra.label}", lists)
+        // صفٌّ واحد للقنوات كلها مجتمعةً (المندمجة + الإضافية).
+        val extras = dedupe(src.companions.filter { !isPromo(it.title) })
+        if (extras.isNotEmpty()) {
+            val cards = extras.map { p -> companionCard(p) }
+            lists.add(HomePageList("المقترحات", cards))
         }
         return newHomePageResponse(lists)
     }
 
-    /** نسخة مُسمّاة لصنف قناةٍ إضافية: تستدعي homeFrom بعنوان مخصص. */
-    private fun homeFromTitled(
-        playlists: List<PlaylistInfo>,
-        rowTitle: String,
-        lists: MutableList<HomePageList>
-    ) = homeFrom(playlists, lists, rowTitle)
+    /**
+     * كارت مسلسل من قناةٍ أخرى، بعنوان يذكر مصدره («عہد الوفا · هم العربية»)
+     * ليعرف المستخدم أن المسلسل ليس من ARY.
+     *
+     * آمن أن نغيّر اسم الكارت: صفحة التفاصيل لا تأخذ اسمها منه، بل من
+     * `PlaylistInfo.title` عبر `bareName` في `loadPlaylist` — فيبقى داخل
+     * المسلسل اسمُه نظيفاً بلا هذه اللاحقة.
+     */
+    private fun companionCard(p: PlaylistInfo) = newTvSeriesSearchResponse(
+        if (p.from.isBlank()) bareName(p.title) else "${bareName(p.title)} · ${p.from}",
+        playlistUrl(p.id)
+    ) {
+        this.posterUrl = p.cover
+    }
 
     private fun homeFrom(playlists: List<PlaylistInfo>, lists: MutableList<HomePageList>, rowTitle: String = "مسلسلات ARY العربية") {
         val series = dedupe(playlists.filter { !isPromo(it.title) })
@@ -812,10 +860,15 @@ class AryProvider(
         val seriesHits = hitsIn(dedupe(playlists.filter { !isPromo(it.title) }), words, keyOf(q))
         val promoHits = hitsIn(playlists.filter { isPromo(it.title) }, words, keyOf(q))
 
-        // نعيدها مصفوفة واحدة: المسلسلات أولاً ثم إعلاناتها.
+        // نعيدها مصفوفة واحدة: المسلسلات أولاً ثم إعلاناتها. النتيجة من قناة
+        // أخرى تحمل اسمها كما في صف «المقترحات».
         val out = (seriesHits + promoHits).map { p ->
             newTvSeriesSearchResponse(
-                if (isPromo(p.title)) promoName(p.title) else bareName(p.title),
+                when {
+                    isPromo(p.title) -> promoName(p.title)
+                    p.from.isBlank() -> bareName(p.title)
+                    else -> "${bareName(p.title)} · ${p.from}"
+                },
                 playlistUrl(p.id)
             ) {
                 this.posterUrl = p.cover
