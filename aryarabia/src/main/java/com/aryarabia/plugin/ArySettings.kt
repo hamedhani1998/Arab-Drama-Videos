@@ -69,6 +69,37 @@ class ArySettingsBottomSheet(private val prefs: SharedPreferences) : BottomSheet
         const val KEY_REDIRECT = "ary_use_redirect"           // Boolean بديل النطاق
         const val KEY_QUALITY_ORDER = "ary_quality_order"     // "default" | "asc" | "desc"
         const val KEY_EXTRA_CHANNELS = "ary_extra_channels"  // أسطر: رابط قناة، أو «الاسم | الرابط»
+        const val KEY_SUB_LANG = "ary_sub_lang"              // "auto" (عربية) أو رمز لغة كـ "en"
+        const val KEY_AUDIO_PREF = "ary_audio_pref"          // "best" | "opus" | "aac" | "lowest" | "low" | "high"
+
+        /**
+         * لغات الترجمة المقترحة، وكلها من `translationLanguages` التي يعرضها
+         * يوتيوب فعلياً (مُتحقَّق منها على فيديو ARY). ملاحظة مهمة: يوتيوب
+         * ينشر على ARY ترجمةً عربية واحدة، وما عداها يُولّده عند الطلب عبر
+         * `tlang` — فاختيار لغة تكلّف طلباً واحداً لكل حلقة.
+         */
+        val SUB_LANGUAGES = listOf(
+            "auto" to "العربية (تلقائية)",
+            "en" to "الإنجليزية",
+            "fr" to "الفرنسية",
+            "es" to "الإسبانية",
+            "de" to "الألمانية",
+            "tr" to "التركية",
+            "ru" to "الروسية",
+            "fa" to "الفارسية",
+            "ur" to "الأردية",
+            "hi" to "الهندية",
+            "id" to "الإندونيسية",
+            "ms" to "الماليزية",
+            "zh-Hans" to "الصينية المبسّطة",
+            "ja" to "اليابانية",
+            "ko" to "الكورية",
+            "pt" to "البرتغالية",
+            "it" to "الإيطالية",
+            "nl" to "الهولندية",
+            "sw" to "السواحيلية",
+            "so" to "الصومالية"
+        )
 
         fun show(fm: FragmentManager, prefs: SharedPreferences) {
             ArySettingsBottomSheet(prefs).show(fm, "ary_settings")
@@ -171,6 +202,42 @@ class ArySettingsBottomSheet(private val prefs: SharedPreferences) : BottomSheet
             }
             playbackCategory.addPreference(redirectPref)
 
+            // ===================== الترجمة والصوت =====================
+            val mediaCategory = PreferenceCategory(ctx)
+            mediaCategory.title = "الترجمة والصوت"
+            preferenceScreen.addPreference(mediaCategory)
+
+            val subLangPref = ListPreference(ctx).apply {
+                key = KEY_SUB_LANG
+                title = "لغة الترجمة"
+                summaryProvider = ListPreference.SimpleSummaryProvider.getInstance()
+                entryValues = SUB_LANGUAGES.map { it.first }.toTypedArray()
+                entries = SUB_LANGUAGES.map { it.second }.toTypedArray()
+                setDefaultValue("auto")
+            }
+            mediaCategory.addPreference(subLangPref)
+
+            // ملاحظة مقصودة: ARY لا تملك مسارات صوتية بديلة (لا نسخة
+            // إنجليزية من الصوت)، فـ`audioTracks` في CloudStream لا مكان
+            // له هنا. ما نتيحه اختيار أيٍّ من تنسيقاتها الصوتية الاثني
+            // عشر مع كل جودة.
+            val audioPref = ListPreference(ctx).apply {
+                key = KEY_AUDIO_PREF
+                title = "الملف الصوتي"
+                summaryProvider = ListPreference.SimpleSummaryProvider.getInstance()
+                entryValues = arrayOf("best", "opus", "aac", "high", "low", "lowest")
+                entries = arrayOf(
+                    "الأفضل (موصى به)",
+                    "Opus (أصغر حجماً)",
+                    "AAC (توافق أوسع)",
+                    "العالي",
+                    "المتوسط",
+                    "الأصغر حجماً"
+                )
+                setDefaultValue("best")
+            }
+            mediaCategory.addPreference(audioPref)
+
             // زر إعادة تسجيل بيانات — احتياطي.
             val resetPref = Preference(ctx).apply {
                 key = "ary_reset_prefs"
@@ -180,6 +247,7 @@ class ArySettingsBottomSheet(private val prefs: SharedPreferences) : BottomSheet
                     prefs.edit().apply {
                         remove(KEY_PLAYBACK_MODE); remove(KEY_MAX_QUALITY); remove(KEY_REDIRECT)
                         remove(KEY_QUALITY_ORDER); remove(KEY_EXTRA_CHANNELS)
+                        remove(KEY_SUB_LANG); remove(KEY_AUDIO_PREF)
                     }.apply()
                     Toast.makeText(ctx, "تمت إعادة الضبط", Toast.LENGTH_SHORT).show()
                     true

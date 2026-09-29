@@ -8,6 +8,10 @@ import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.GlobalScope
+import kotlinx.coroutines.launch
+import java.net.URLEncoder
 import org.json.JSONArray
 import org.json.JSONObject
 import org.schabi.newpipe.extractor.ServiceList
@@ -47,6 +51,17 @@ class AryProvider(
     /** خيار محرك التشغيل المختار في الإعدادات ("newpipe" الافتراضي). */
     private fun playbackMode(): String =
         prefs?.getString(ArySettingsBottomSheet.KEY_PLAYBACK_MODE, "newpipe") ?: "newpipe"
+
+    /**
+     * لغة الترجمة المطلوبة، أو `SUB_LANG_AUTO` للعربية الأصلية بلا
+     * طلبٍ إضافي (وهو السلوك الافتراضي). راجع `emitSubtitle`.
+     */
+    private fun subLanguage(): String =
+        prefs?.getString(ArySettingsBottomSheet.KEY_SUB_LANG, SUB_LANG_AUTO) ?: SUB_LANG_AUTO
+
+    /** أي ملف صوتي مع كل جودة ("best" الافتراضي = أعلى بت/ث متوافق). */
+    private fun audioPref(): String =
+        prefs?.getString(ArySettingsBottomSheet.KEY_AUDIO_PREF, "best") ?: "best"
 
     /** يستخرج كوديك حقيقي من mimeType («video/mp4; codecs="avc1.640028"») إن وُجد. */
     private fun codecFromMime(mime: String?): String? {
@@ -97,6 +112,13 @@ class AryProvider(
                 "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
 
         private const val BOM = "﻿"
+
+        /**
+         * القيمة الافتراضية لـ«لغة الترجمة»: العربية الأصلية بلا `tlang`.
+         * يوتيوب لا ينشر على ARY سوى مسار ترجمةٍ عربيّ واحد، وما عداه
+         * (نحو 156 لغة) يُولَّد عند الطلب — فكل لغة أخرى تكلّف طلباً.
+         */
+        private const val SUB_LANG_AUTO = "auto"
 
         /**
          * قوائم ليست مسلسلات ولا إعلانات ترويجية: ملحقات القناة العامة
@@ -595,6 +617,14 @@ class AryProvider(
 
     /** آخر حلقات ناجحة لكل قائمة، ومتى جُلبت — لكل قائمةٍ مدتها الخاصة. */
     private val episodeItems = HashMap<String, Pair<List<Lockup>, Long>>()
+
+    /**
+     * الفيديوهات التي أُصدِرت ترجمتها في نداء `loadLinks` الجاري — حارس
+     * تكرار لا ذاكرة: `resolveFromNewPipe` قد تُستدعى ثلاث مرات (أساسي
+     * ثم احتياطان)، فبلا هذا الحارس تنزل نفس الترجمة ثلاثاً في قائمة
+     * المشغّل. يُمسح في أول `loadLinks` فلا يبقى أثر بين الحلقات.
+     */
+    private val subsEmittedFor = java.util.concurrent.ConcurrentHashMap<String, Boolean>()
 
     /**
      * يبطل كل ما خُزّن عند تغيير إعدادات القنوات: اللائحة الجديدة تعني
@@ -1145,6 +1175,47 @@ class AryProvider(
         return runCatching { num.toLongOrNull() ?: 0L }.getOrDefault(0L)
     }
 
+    /**
+     * اختيار الملف الصوتي المرافق لجودة فيديو معيّنة.
+     *
+     * فيديو ARY يحمل اثني عشر تنسيقاً صوتياً (AAC و Opus من ~60 إلى ~153
+     * ألف بت/ث) و**لا مسارات صوتية بديلة** — أي لا نسخة إنجليزية من
+     * الصوت. لذلك `audioTracks` في CloudStream (وهو للّغة ثانية على الفيديو
+     * نفسه) لا مكان له هنا، فترجمةُ طلب «جميع الملفات الصوتية» عملياً:
+     * **أن يُختار أيٌّ من الاثني عشر** مع كل جودة، لا أن يُحصر في واحد.
+     *
+     * الافتراضي `best` هو السلوك السابق حرفياً: مواءمة كوديك الفيديو
+     * (webm ↔ webm، mp4 ↔ mp4) ثم أعلى بت/ث — لأن اختيار opus لفيديو mp4
+     * قد يجعل اللاعب يحوّل الصوت بلا داعٍ.
+     *
+     * أي خيار آخر يبقى داخل نفس مجموعة الصيغ المتوافقة، فلا نخرج عن
+     * كوديك الفيديو ولا نكسر المانيفست.
+     */
+    private fun pickAudio(audios: List<AudioInfo>, video: StreamInfo, pref: String): AudioInfo? {
+        // مواءمة كوديك الفيديو أولاً: webm يستقبل webm، وmp4 يستقبل mp4.
+        val family = if (video.mimeType.contains("webm")) { a: AudioInfo ->
+            a.mimeType.contains("webm")
+        } else { a: AudioInfo ->
+            a.mimeType.contains("mp4")
+        }
+        val compatible = audios.filter(family).ifEmpty { audios }
+        if (pref.isEmpty() || pref == "best") {
+            return compatible.maxByOrNull { it.bitrate }
+        }
+        return when (pref) {
+            "opus" -> compatible.filter { it.mimeType.contains("webm") }
+                .maxByOrNull { it.bitrate } ?: compatible.maxByOrNull { it.bitrate }
+            "aac" -> compatible.filter { it.mimeType.contains("mp4") }
+                .maxByOrNull { it.bitrate } ?: compatible.maxByOrNull { it.bitrate }
+            "lowest" -> compatible.minByOrNull { it.bitrate }
+            "low" -> compatible.sortedBy { it.bitrate }
+                .getOrNull((compatible.size - 1) / 2) ?: compatible.maxByOrNull { it.bitrate }
+            "high" -> compatible.sortedByDescending { it.bitrate }
+                .getOrNull(1) ?: compatible.maxByOrNull { it.bitrate }
+            else -> compatible.maxByOrNull { it.bitrate }
+        }
+    }
+
     /** «360 • 62MB (H.264)» — تسمية تُفرّق الجودات في منظار القائمة. */
     private fun richLabel(height: Int, url: String, mime: String?): String {
         val h = if (height > 0) height.toString() else "auto"
@@ -1154,6 +1225,88 @@ class AryProvider(
         val t = if (tag.isNotEmpty()) " ($tag)" else ""
         return "$h$mb$t"
     }
+
+    /**
+     * يصدّر ترجمةً واحدةً للمشغّل.
+     *
+     * ARY لا تنشر على يوتيوب سوى مسار ترجمةٍ واحد (`ar` تلقائية، `asr`)،
+     * وتترك الباقي — نحو 156 لغة — *غير منشورة*: يوتيوب يولّدها عند الطلب
+     * عبر معامل `tlang` على رابط `timedtext` الموقَّع. ولهذا لا جديد هنا
+     * في `getSubtitlesDefault()`: هو يعيد ذلك المسار الواحد، لا الستة
+     * والخمسين. فبنينا الجلب على `timedtext` مباشرةً.
+     *
+     * اللغة الافتراضية عربية (سلوك ما قبل هذا الإصدار تماماً: بلا
+     * `tlang` ولا طلبٍ إضافي)، والمستخدم يختار غيرها من الإعدادات.
+     *
+     * الجلب عبر `HttpURLConnection` (HTTP/1.1) لا عبر `app.get`، لسبب
+     * موثّق في `MosSubServer`: مكدّس يوتيوب يقتل بعض الطلبات على أجهزة
+     * بعينها بينما يردّ HTTP/1.1 سليماً. النص يُثبَّت محلياً على خادم
+     * `ArySubServer` ثم يُسلَّم رابط `127.0.0.1` — لأن `SubtitleFile` لا
+     * يحمل محتوىً، ولأن المشغّل يرفض عناوين `data:`.
+     *
+     * الفشل يُبتلَع بصمت: ترجمةٌ غير ظاهرة أفضل من استثناءٍ يصل المشغّل.
+     */
+    private suspend fun emitSubtitle(
+        vid: String,
+        extractor: YoutubeStreamExtractor,
+        subtitleCallback: (SubtitleFile) -> Unit
+    ) {
+        try {
+            // حارس التكرار: `resolveFromNewPipe` قد تُستدعى حتى ثلاث مرات
+            // في نداء `loadLinks` واحد (أساسي ثم احتياطان)، فبلا هذا الحارس
+            // تنزل نفس الترجمة ثلاثاً في قائمة المشغّل.
+            if (subsEmittedFor.putIfAbsent(vid, true) != null) return
+
+            val track = runCatching { extractor.subtitlesDefault }
+                .getOrNull()?.filterNotNull()?.firstOrNull() ?: return
+            val base = track.url?.takeIf { it.isNotBlank() } ?: return
+
+            val wanted = subLanguage()
+            val shown = if (wanted == SUB_LANG_AUTO) "ar" else wanted
+            // `fmt=vtt` يجعل يوتيوب يعيد WebVTT مباشرةً. و`tlang` هو
+            // ما يولّد الترجمة بلغة أخرى — يوتيوب لا ينشرها محسوبة.
+            val url = buildString {
+                append(base)
+                append("&fmt=vtt")
+                if (wanted != SUB_LANG_AUTO) {
+                    append("&tlang=")
+                    append(URLEncoder.encode(wanted, "UTF-8"))
+                }
+            }
+
+            val text = fetchSubtitleText(url, "https://www.youtube.com/watch?v=$vid")
+            if (text.isBlank()) return
+
+            val local = ArySubServer.register(text) ?: return
+            subtitleCallback(
+                newSubtitleFile(shown, local) {
+                    this.headers = mapOf("Referer" to "https://www.youtube.com/")
+                }
+            )
+            Log.d(TAG, "$vid subtitle ok lang=$shown bytes=${text.length}")
+        } catch (e: Exception) {
+            Log.w(TAG, "$vid subtitle skipped: ${e.message}")
+        }
+    }
+
+    /** جلب نص الترجمة عبر HTTP/1.1 — يُرجع فارغاً عند أي فشل. */
+    private fun fetchSubtitleText(url: String, referer: String): String =
+        try {
+            val conn = java.net.URL(url).openConnection() as java.net.HttpURLConnection
+            conn.requestMethod = "GET"
+            conn.connectTimeout = 8000
+            conn.readTimeout = 12000
+            conn.instanceFollowRedirects = true
+            conn.setRequestProperty("User-Agent", UA)
+            conn.setRequestProperty("Referer", referer)
+            conn.setRequestProperty("Accept", "text/vtt, text/plain, */*")
+            val rc = conn.responseCode
+            if (rc !in 200..299) { Log.w(TAG, "timedtext http $rc"); "" }
+            else conn.inputStream.bufferedReader(Charsets.UTF_8).use { it.readText() }
+        } catch (e: Exception) {
+            Log.w(TAG, "timedtext failed: ${e.message}")
+            ""
+        }
 
     /**
      * مسار تشغيل مطابق لسيرفرات إضافة «يوتيوب» في re-3arabi (التي تعمل على
@@ -1218,16 +1371,12 @@ class AryProvider(
             }.distinctBy { it.url }
             val audiosByLanguage = audioInfoList.groupBy { it.language }
 
-            runCatching {
-                s.subtitlesDefault?.filterNotNull()?.mapNotNull { ss ->
-                    try {
-                        val lang = ss.locale?.language ?: return@mapNotNull null
-                        val content = ss.content ?: ss.url ?: return@mapNotNull null
-                        newSubtitleFile(lang, content)
-                    } catch (e: Exception) { null }
-                }?.forEach { subtitleCallback(it) }
-            }
-
+            // ★ لا شيء يُجلب عبر الشبكة هنا: الروابط تُبثّ فوراً أدناه، ثم
+            //   تُطلق الترجمة في خيط منفصل. الجلبُ الشبكي للترجمة قبل
+            //   إصدار الروابط كان يوقف `loadLinks` حتى 20 ثانية — فيبدو
+            //   للمستخدم «الفيديو يدور ولا يشتغل» — ويزيد على ذلك أن
+            //   CloudStream يجمع `loadLinks` كاملاً قبل عرض القائمة، فلا
+            //   تظهر الترجمة إلا بعد انتهاء الجلب. صفر جلب هنا.
             AryDashServer.ensureStarted()
 
             // إعداد «الجودات»: الأعلى فقط عند اختيار high (نُبقي نسخة الكوديك
@@ -1237,21 +1386,14 @@ class AryProvider(
                 if (top != null) videoOnlyList.filter { it.height == top.height } else videoOnlyList
             } else videoOnlyList
 
-            // كل تنسيق فيديو يُبث — بلا استثناء — مقترناً بأفضل صوتٍ متاحٍ لغةً
-            // ومواءمةً للكوديك. عند غياب الصوت نُبث الفيديو وحده (مانيفست بلا
-            // صوته) بدل أن يسقط التنسيق بالكامل.
+            // كل تنسيق فيديو يُبث — بلا استثناء — مقترناً بصوتٍ مختارٍ من
+            // تنسيقاته. عند غياب الصوت نُبث الفيديو وحده (مانيفست بلا صوته)
+            // بدل أن يسقط التنسيق بالكامل.
             for (video in effectiveVideos) {
                 val bestAudio = if (audiosByLanguage.isNotEmpty()) {
                     val lang = audiosByLanguage.keys.firstOrNull()
                     audiosByLanguage[lang]?.let { audios ->
-                        val family = if (video.mimeType.contains("webm")) { a: AudioInfo ->
-                            a.mimeType.contains("webm")
-                        } else { a: AudioInfo ->
-                            a.mimeType.contains("mp4")
-                        }
-                        audios.sortedWith(
-                            compareByDescending<AudioInfo>(family).thenByDescending { it.bitrate }
-                        ).firstOrNull()
+                        pickAudio(audios, video, audioPref())
                     }
                 } else null
 
@@ -1305,6 +1447,21 @@ class AryProvider(
             }
 
             Log.d(TAG, "$vid NewPipe DASH links=$produced qualities=${effectiveVideos.size}")
+
+            // ★ الترجمة تأتي بعد الروابط، في coroutine منفصل على IO. لا
+            //   نبطل `loadLinks` حتى لو عَلِقت الترجمة: التشغيل لا يتأخر
+            //   بسببها. النمط نفسه المستعمل في NartoDrama و Reellee.
+            if (produced > 0) {
+                val ext = s
+                val cb = subtitleCallback
+                GlobalScope.launch(Dispatchers.IO) {
+                    try {
+                        emitSubtitle(vid, ext, cb)
+                    } catch (e: Exception) {
+                        Log.w(TAG, "$vid subtitle job: ${e.message}")
+                    }
+                }
+            }
         } catch (e: Exception) {
             Log.w(TAG, "$vid NewPipe resolve failed: ${e.message}")
         }
@@ -1434,6 +1591,8 @@ class AryProvider(
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
+        // كل نداءٍ هو لمشاهد جديد: تصفير حارس تكرار الترجمة.
+        subsEmittedFor.clear()
         val raw = data.trim()
         val vid = if (Regex("""^[\w-]{11}$""").matches(raw)) raw
         else Regex("""[?&]v=([\w-]{11})""").find(raw)?.groupValues?.get(1)

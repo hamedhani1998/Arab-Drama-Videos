@@ -3,7 +3,6 @@ package com.aryarabia.plugin
 import android.util.Log
 import java.io.BufferedReader
 import java.io.InputStreamReader
-import java.io.PrintWriter
 import java.net.ServerSocket
 import java.net.URLDecoder
 import java.util.UUID
@@ -47,68 +46,146 @@ data class AudioInfo(
 object AryDashServer {
     private const val TAG = "AryDashServer"
 
-    private val manifestMap = ConcurrentHashMap<String, String>()
+    /**
+     * المانيفستات المسجّلة: `معرّف → (النص، وقت تسجيله)`.
+     *
+     * كان `ConcurrentHashMap<String, String>` بلا حدّ ولا عمر: كل حلقة تُشاهَد
+     * تترك مانيفستها للأبد. أثران حقيقيان:
+     *  1) روابط `googlevideo` داخله **موقّعة ومحدودة الصلاحية** (`expire`)،
+     *     فتصير ميتة بعد ساعات بينما المانيفست ما زال مُخدَماً — واللاعب
+     *     يطلب مانيفستاً صحيحاً فيه وسائط محذوفة فيتعثّر عند التشغيل.
+     *  2) نموّ الذاكرة بلا سقف يضغط التطبيق حتى يقتله النظام، فيظهر
+     *     الانقطاع فجأةً بلا رسالة (وهو «أحياناً» الذي شكا منه المستخدم).
+     * فلا يُحتفظ إلا بما يستحق، ويُمسح الأقدم عند الحاجة.
+     */
+    private class Entry(val xml: String, val at: Long)
+
+    private val manifestMap = ConcurrentHashMap<String, Entry>()
+
+    /** عمر المانيفست: بعده يُرفض ويُمسح، لأن روابطه الموقّعة صارت ميتة. */
+    private const val MANIFEST_TTL_MS = 3L * 60 * 60 * 1000
+    /** أقصى عدد مانيفستات محفوظة؛ الزائد يُمسح من الأقدم. */
+    private const val MANIFEST_MAX = 60
     private var activeServer: ServerSocket? = null
     @Volatile private var serverPort = 0
 
+    /**
+     * هل حلقة القبول عادية فعلاً؟ لا يكفي أن `ServerSocket` غير مغلق: إن
+     * ماتت الحلقة من استثناء عابر بقي المقبس مفتوحاً، فكان فحص
+     * `isClosed` وحده يظنّ أن الخادم حيّ فيعود `ensureStarted` بلا إعادة
+     * تشغيل — فلا يقبل أحد الاتصالات، ويتصل المشغّل فلا يجد خادماً أبداً
+     * فيدور بلا نهاية. فالحياوية تُشتق من الحلقة نفسها.
+     */
+    @Volatile private var loopAlive = false
+
     @Synchronized
     fun ensureStarted() {
-        if (activeServer != null && !activeServer!!.isClosed) return
+        if (loopAlive && serverPort != 0) return
         try {
+            runCatching { activeServer?.close() }
             val srv = ServerSocket(0)
             activeServer = srv
             serverPort = srv.localPort
+            loopAlive = true
             thread(name = "ary-dash-server") {
                 try {
-                    while (activeServer != null && !activeServer!!.isClosed) {
+                    while (activeServer === srv && !srv.isClosed) {
                         val client = srv.accept()
                         thread(name = "ary-dash-client") { handleClient(client) }
                     }
                 } catch (e: Exception) {
                     Log.w(TAG, "server loop exited: ${e.message}")
+                } finally {
+                    // ★ العطل يصير صامتاً بلا هذا السطر: يبقى الخادم
+                    //   «مفتوحاً» فلا يُعاد تشغيله، فلا يستجيب لأحد بعدها.
+                    if (activeServer === srv) loopAlive = false
                 }
             }
             Log.d(TAG, "DASH server on port $serverPort")
         } catch (e: Exception) {
+            loopAlive = false
+            serverPort = 0
             Log.e(TAG, "could not start server: ${e.message}")
         }
     }
 
     private fun registerManifestAndGetUrl(xmlContent: String): String? {
+        // ★ نضمن البدء هنا أيضاً: كان يُفترض أن المتطّلع سبقه، فإن كانت
+        //   الحلقة ميّتة في تلك اللحظة صارت كل الروابط `null` وصار
+        //   التشغيل يدور بلا روابط.
+        ensureStarted()
         if (serverPort == 0) return null
         val id = UUID.randomUUID().toString()
-        manifestMap[id] = xmlContent
+        manifestMap[id] = Entry(xmlContent, System.currentTimeMillis())
+        prune()
         return "http://127.0.0.1:$serverPort/$id.mpd"
+    }
+
+    /**
+     * يُسقط ما تجاوز عمره أو الحدّ. تجاوز العمر أولاً: روابطه الموقّعة
+     * صارت ميتة، وتقديم ميت أسوأ من 404 — فهو يقرأ اللاعب المانيفست
+     * السليم ثم يتعثّر عند الوسائط. وتجاوز العدد يمنع تضخّم الذاكرة الذي
+     * يُنهي العملية قسراً (وهو «أحياناً» الذي شكا منه المستخدم).
+     */
+    private fun prune() {
+        val now = System.currentTimeMillis()
+        val it = manifestMap.entries.iterator()
+        while (it.hasNext()) {
+            val e = it.next()
+            if (now - e.value.at > MANIFEST_TTL_MS) it.remove()
+        }
+        while (manifestMap.size > MANIFEST_MAX) {
+            val oldest = manifestMap.entries.minByOrNull { it.value.at }?.key ?: break
+            manifestMap.remove(oldest)
+        }
     }
 
     private fun handleClient(client: java.net.Socket) {
         try {
             client.use { socket ->
-                val reader = BufferedReader(InputStreamReader(socket.getInputStream()))
-                val output = PrintWriter(socket.getOutputStream(), true)
+                socket.soTimeout = 5000
+                val reader = BufferedReader(InputStreamReader(socket.getInputStream(), Charsets.UTF_8))
                 val line = reader.readLine()
+                // ★ نقرأ رأس الطلب كاملاً حتى السطر الفارغ. الإبقاء على
+                //   الترويسات في مخزن الاستقبال ثم الإغلاق يجعل النظام
+                //   يُرسل RST بدل FIN، فيُمحى الرد قبل أن يقرأه اللاعب —
+                //   وهو سبب تعذّر متقطّع (خطأ 2002) رغم صحة الخادم.
+                while (true) {
+                    val h = reader.readLine() ?: break
+                    if (h.isEmpty()) break
+                }
                 if (line != null && line.startsWith("GET")) {
                     val parts = line.split(" ")
                     if (parts.size > 1) {
                         var path = parts[1].substring(1)
                         if (path.endsWith(".mpd")) path = path.replace(".mpd", "")
                         val content = manifestMap[path.trim()]
+                        val out = socket.getOutputStream()
+                        val head: String
+                        val body: String
                         if (content != null) {
-                            output.println("HTTP/1.1 200 OK")
-                            output.println("Content-Type: application/dash+xml")
-                            output.println("Connection: close")
-                            output.println("Access-Control-Allow-Origin: *")
-                            output.println("")
-                            output.println(content)
+                            val bytes = content.toByteArray(Charsets.UTF_8)
+                            head = "HTTP/1.1 200 OK\r\n" +
+                                "Content-Type: application/dash+xml\r\n" +
+                                "Content-Length: ${bytes.size}\r\n" +
+                                "Connection: close\r\n" +
+                                "Access-Control-Allow-Origin: *\r\n\r\n"
+                            body = content
+                            out.write(head.toByteArray(Charsets.UTF_8))
+                            out.write(bytes)
                         } else {
-                            output.println("HTTP/1.1 404 Not Found")
-                            output.println("")
+                            head = "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n" +
+                                "Connection: close\r\n\r\n"
+                            body = ""
+                            out.write(head.toByteArray(Charsets.UTF_8))
                         }
+                        out.flush()
+                        try { socket.shutdownOutput() } catch (e: Exception) { }
                     }
                 }
             }
         } catch (e: Exception) {
-            // اتصال مغلق — يتجاهل
+            // اتصال مقطوع — يتجاهل
         }
     }
 
