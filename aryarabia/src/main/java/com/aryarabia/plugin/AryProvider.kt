@@ -1257,14 +1257,30 @@ class AryProvider(
             // تنزل نفس الترجمة ثلاثاً في قائمة المشغّل.
             if (subsEmittedFor.putIfAbsent(vid, true) != null) return
 
-            val track = runCatching { extractor.subtitlesDefault }
-                .getOrNull()?.filterNotNull()?.firstOrNull() ?: return
-            val base = track.url?.takeIf { it.isNotBlank() } ?: return
+            val tracks = runCatching { extractor.subtitlesDefault }
+                .getOrNull()?.filterNotNull() ?: return
+            if (tracks.isEmpty()) return
 
+            // ★ 1) الأصلية أولاً — كما في الإصدار 11 تماماً: رابط يوتيوب
+            //   يُسلَّم للمشغّل مباشرةً. لا نشترط نجاح أي جلب، فتبقى
+            //   ظاهرة في القائمة دائماً ولو ردّ يوتيوب فارغاً لها. هذا ما
+            //   كان قد اختفى: جعل الجلب شرطاً للظهور.
+            var emittedOriginal = false
+            for (t in tracks) {
+                val u = t.url?.takeIf { it.isNotBlank() } ?: continue
+                if (!emittedOriginal) {
+                    subtitleCallback(newSubtitleFile(t.locale?.language ?: "ar", u) {
+                        this.headers = mapOf("Referer" to "https://www.youtube.com/")
+                    })
+                    emittedOriginal = true
+                }
+            }
+
+            // 2) ثم التلقائية/المولَّدة بلغة المستخدم — من `timedtext`
+            //    مباشرةً، لأنها غير منشورة على يوتيوب فلا يراها NewPipe.
             val wanted = subLanguage()
+            val base = tracks.first().url?.takeIf { it.isNotBlank() } ?: return
             val shown = if (wanted == SUB_LANG_AUTO) "ar" else wanted
-            // `fmt=vtt` يجعل يوتيوب يعيد WebVTT مباشرةً. و`tlang` هو
-            // ما يولّد الترجمة بلغة أخرى — يوتيوب لا ينشرها محسوبة.
             val url = buildString {
                 append(base)
                 append("&fmt=vtt")
