@@ -139,6 +139,14 @@ object PakiDashServer {
         return if (mimeType.contains("webm")) "vp9" else "avc1.4d401f"
     }
 
+    /**
+     * mimeType من NewPipe قد يحمل كوديك («video/mp4; codecs="avc1.…"») — نبعثره
+     * فيسمة منفصلة. تفرّد صفة mimeType بقيمة خام (video/mp4) وإلا انكسرت XML إن
+     * وُضعت الكوديك داخل عبارة الاقتباس.
+     */
+    fun bareMime(mime: String): String =
+        mime.substringBefore(";").trim().ifBlank { mime }
+
     private fun buildDashManifestXml(
         video: PakiStreamInfo,
         audioList: List<PakiAudioInfo>,
@@ -151,7 +159,7 @@ object PakiDashServer {
         sb.append("""<MPD xmlns="urn:mpeg:dash:schema:mpd:2011" profiles="urn:mpeg:dash:profile:isoff-on-demand:2011" type="static" minBufferTime="PT5.0S" mediaPresentationDuration="$durationString">""")
         sb.append("<Period>")
 
-        val vMime = video.mimeType
+        val vMime = bareMime(video.mimeType)
         val vCodecs = codecFor(vMime, video.codec)
 
         val vSegmentBase = if (video.initRange != null && video.indexRange != null) {
@@ -170,7 +178,7 @@ object PakiDashServer {
         audioList.forEachIndexed { index, audio ->
             val cleanAudioUrl = escapeXml(audio.url)
             val audioId = "audio_$index"
-            val aMime = audio.mimeType
+            val aMime = bareMime(audio.mimeType)
             val aCodecs = codecFor(aMime, audio.codec) // mp4a.40.2 / opus / …
 
             val aSegmentBase = if (audio.initRange != null && audio.indexRange != null) {
