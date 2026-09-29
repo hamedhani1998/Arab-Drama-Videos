@@ -1265,21 +1265,19 @@ class AryProvider(
             //   يُسلَّم للمشغّل مباشرةً. لا نشترط نجاح أي جلب، فتبقى
             //   ظاهرة في القائمة دائماً ولو ردّ يوتيوب فارغاً لها. هذا ما
             //   كان قد اختفى: جعل الجلب شرطاً للظهور.
-            var emittedOriginal = false
-            for (t in tracks) {
-                val u = t.url?.takeIf { it.isNotBlank() } ?: continue
-                if (!emittedOriginal) {
-                    subtitleCallback(newSubtitleFile(t.locale?.language ?: "ar", u) {
+            val original = tracks.firstOrNull { !it.url.isNullOrBlank() }
+            if (original != null) {
+                subtitleCallback(
+                    newSubtitleFile(original.locale?.language ?: "ar", original.url!!) {
                         this.headers = mapOf("Referer" to "https://www.youtube.com/")
-                    })
-                    emittedOriginal = true
-                }
+                    }
+                )
             }
 
             // 2) ثم التلقائية/المولَّدة بلغة المستخدم — من `timedtext`
             //    مباشرةً، لأنها غير منشورة على يوتيوب فلا يراها NewPipe.
             val wanted = subLanguage()
-            val base = tracks.first().url?.takeIf { it.isNotBlank() } ?: return
+            val base = original?.url?.takeIf { it.isNotBlank() } ?: return
             val shown = if (wanted == SUB_LANG_AUTO) "ar" else wanted
             val url = buildString {
                 append(base)
