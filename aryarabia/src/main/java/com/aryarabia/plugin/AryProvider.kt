@@ -590,10 +590,60 @@ class AryProvider(
     @Volatile private var lastPartial: SourceLists? = null
     @Volatile private var lastFailedAt = 0L
 
+    /** متى جُلبت القوائم بنجاح آخر مرة — يحدّد انتهاء صلاحية الحفظ. */
+    @Volatile private var cachedAt = 0L
+
+    /** آخر حلقات ناجحة لكل قائمة، ومتى جُلبت — لكل قائمةٍ مدتها الخاصة. */
+    private val episodeItems = HashMap<String, Pair<List<Lockup>, Long>>()
+
+    /**
+     * يبطل كل ما خُزّن عند تغيير إعدادات القنوات: اللائحة الجديدة تعني
+     * قوائمَ ومقترحاتَ مختلفة، فلا يجوز أن تُقدَّم بياناتُ القديم حتى تنتهي
+     * المهلة. التشغيلُ بلا هذه الإضافة يعمل تماماً كالمعتاد.
+     */
+    private var prefsWatcher: SharedPreferences.OnSharedPreferenceChangeListener? = null
+
+    private fun watchChannelSetting() {
+        val p = prefs ?: return
+        if (prefsWatcher != null) return
+        val w = SharedPreferences.OnSharedPreferenceChangeListener { _, key ->
+            if (key != ArySettingsBottomSheet.KEY_EXTRA_CHANNELS) return@OnSharedPreferenceChangeListener
+            Log.d(TAG, "extra channels changed — dropping cached playlists")
+            cachedSource = null
+            cachedAt = 0L
+            lastPartial = null
+            lastFailedAt = 0L
+            synchronized(episodeItems) { episodeItems.clear() }
+        }
+        prefsWatcher = w
+        runCatching { p.registerOnSharedPreferenceChangeListener(w) }
+            .onFailure { Log.w(TAG, "cannot watch prefs: ${it.message}") }
+    }
+
+    /**
+     * عمر حفظ الحلقات قبل إعادة جلبها. الحلقات هي ما يتغيّر فعلاً (مسلسلٌ
+     * ينشر حلقة اليوم)، فمهلةٌ قصيرة هنا هي الفارق بين «الحلقة الجديدة
+     * ظهرت» و«الحلقة الجديدة ستظهر بعد إعادة تشغيل التطبيق».
+     */
+    private val EPISODE_FRESH_MS = 3 * 60 * 1000L
+
     /** مفتاح القناة الأساسية في `SourceLists.failed` (ـ URL مفتاحها). */
     private val BASE_URL_KEY = "base"
 
     private val RETRY_COOLDOWN_MS = 20_000L
+
+    /**
+     * عمر حفظ القوائم قبل إعادة جلبها — قصير عمداً، ليجعل تحديثات الحلقات
+     * والمسلسلات تظهر أوّل بأوّل: الحفظ كان يدوم الجلسة كلها، فمسلسلٌ
+     * نشرته القناة اليوم لا يظهر إلا بعد إعادة تشغيل التطبيق. الآن
+     * نُعيد استعمال آخر جلبٍ ناجح، وأول فتح للرئيسية بعد انقضاء المهلة
+     * يعيد الفحص من يوتيوب.
+     *
+     * ليس صفراً عن قصد: إعادة الجلب عند كل فتح كانت سبب إبطاء يوتيوب
+     * سابقاً وإخفاء كل الأقسام دفعةً واحدة. مهلةٌ قصيرة تُظهر الجديد
+     * سريعاً، وتبقى مجموعة الفتحات المتتابعة في طلبٍ واحد لكل قناة.
+     */
+    private val FRESH_MS = 5 * 60 * 1000L
 
     /**
      * جلبٌ واحد لكل قناة: ARY الأساسية + القناتان المندمجتان + كل قناة
@@ -603,7 +653,7 @@ class AryProvider(
      * القناة الإضافية مرتين (مرةً في `allPlaylists` ومرةً لبناء صفّها)،
      * فتضاعف عدد الطلبات على يوتيوب عند كل فتح للرئيسية حتى بطأ يوتيوب
      * الردّ وصارت `channelPlaylists` تُرجع فارغة — فيختفي البحث ومعه كل
-     * الأقسام معاً. هنا طلبٌ واحد لكل قناة في الجلسة كلها.
+     * الأقسام معاً. هنا طلبٌ واحد لكل قناة لكل مهلة.
      */
     private suspend fun loadSourceLists(): SourceLists = coroutineScope {
         val extras = extraChannels()
@@ -648,8 +698,8 @@ class AryProvider(
      * من الأصل).
      */
     private suspend fun sourceLists(): SourceLists {
-        cachedSource?.let { return it }
         val now = System.currentTimeMillis()
+        cachedSource?.let { if (now - cachedAt < FRESH_MS) return it }
         if (now - lastFailedAt < RETRY_COOLDOWN_MS && lastPartial != null) return lastPartial!!
         val src = loadSourceLists()
         Log.d(
@@ -659,6 +709,7 @@ class AryProvider(
         )
         if (src.failed.isEmpty() && src.base.isNotEmpty()) {
             cachedSource = src
+            cachedAt = now
             lastPartial = null
         } else {
             lastFailedAt = now
@@ -670,15 +721,32 @@ class AryProvider(
     /** كل القوائم (أساسية + إضافية) للبحث و`load` — للمعرّف اسمُه الصحيح. */
     private suspend fun allPlaylists(): List<PlaylistInfo> = sourceLists().all
 
-    /** حلقات قائمة: 60–100+ حلقة يُعيدها يوتيوب كاملةً في الصفحة الأولى. */
+    /**
+     * حلقات قائمة: 60–100+ حلقة يُعيدها يوتيوب كاملةً في الصفحة الأولى.
+     *
+     * تُحفظ الحلقات مدّةً قصيرة كي تظهر الحلقات الجديدة أوّل بأوّل: من
+     * يفتح مسلسلاً بعد ساعتين يجب أن يرى ما نُشر فيه بعد آخر فتح له،
+     * لا ما رآه في وقته الأول. الحفظ يُلغى عند فشل الجلب (لا يُثبَّت
+     * فراغٌ أبداً — انظر `sourceLists`)، ويُحذف عند تغيير إعدادات
+     * القنوات فلا تُقرأ قائمةٌ بقيمٍ من العالم القديم.
+     */
     private suspend fun playlistItems(playlistId: String): List<Lockup> {
-        return try {
-            val data = fetchInitialData("https://www.youtube.com/playlist?list=$playlistId")
-            lockupsOf(data).filter { it.type.contains("VIDEO") }
+        val now = System.currentTimeMillis()
+        val hit = synchronized(episodeItems) { episodeItems[playlistId] }
+        if (hit != null && now - hit.second < EPISODE_FRESH_MS) return hit.first
+
+        val items = try {
+            fetchInitialData("https://www.youtube.com/playlist?list=$playlistId")
+                .let { lockupsOf(it).filter { l -> l.type.contains("VIDEO") } }
         } catch (e: Exception) {
             Log.w(TAG, "playlist $playlistId failed: ${e.message}")
-            emptyList()
+            // آخر قائمةٍ ناجبة أفضل من لا شيء — ولا تُحفظ هنا.
+            return hit?.first ?: emptyList()
         }
+        if (items.isEmpty()) return hit?.first ?: emptyList()
+
+        synchronized(episodeItems) { episodeItems[playlistId] = items to now }
+        return items
     }
 
     /**
@@ -761,6 +829,7 @@ class AryProvider(
 
         // جلبٌ واحد لكل قناة (الأساسية أولاً، وبقية القنوات بالتوازي) — لا
         // نعيد طلب أي قناة هنا، فالبيانات محفوظة أصلاً.
+        watchChannelSetting()
         val src = sourceLists()
 
         // صفّ ARY الأساسي: قوائم قناة ARY وحدها.
