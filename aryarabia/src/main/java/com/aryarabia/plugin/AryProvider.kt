@@ -11,7 +11,6 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.GlobalScope
 import kotlinx.coroutines.launch
-import java.net.URLEncoder
 import org.json.JSONArray
 import org.json.JSONObject
 import org.schabi.newpipe.extractor.ServiceList
@@ -52,16 +51,6 @@ class AryProvider(
     private fun playbackMode(): String =
         prefs?.getString(ArySettingsBottomSheet.KEY_PLAYBACK_MODE, "newpipe") ?: "newpipe"
 
-    /**
-     * لغة الترجمة المطلوبة، أو `SUB_LANG_AUTO` للعربية الأصلية بلا
-     * طلبٍ إضافي (وهو السلوك الافتراضي). راجع `emitSubtitle`.
-     */
-    private fun subLanguage(): String =
-        prefs?.getString(ArySettingsBottomSheet.KEY_SUB_LANG, SUB_LANG_AUTO) ?: SUB_LANG_AUTO
-
-    /** أي ملف صوتي مع كل جودة ("best" الافتراضي = أعلى بت/ث متوافق). */
-    private fun audioPref(): String =
-        prefs?.getString(ArySettingsBottomSheet.KEY_AUDIO_PREF, "best") ?: "best"
 
     /** يستخرج كوديك حقيقي من mimeType («video/mp4; codecs="avc1.640028"») إن وُجد. */
     private fun codecFromMime(mime: String?): String? {
@@ -118,8 +107,7 @@ class AryProvider(
          * يوتيوب لا ينشر على ARY سوى مسار ترجمةٍ عربيّ واحد، وما عداه
          * (نحو 156 لغة) يُولَّد عند الطلب — فكل لغة أخرى تكلّف طلباً.
          */
-        private const val SUB_LANG_AUTO = "auto"
-
+    
         /**
          * قوائم ليست مسلسلات ولا إعلانات ترويجية: ملحقات القناة العامة
          * (أفضل اللحظات، أغاني، Shorts، ملخص، مشهد …) وقوائم الوكالة
@@ -1181,17 +1169,13 @@ class AryProvider(
      * فيديو ARY يحمل اثني عشر تنسيقاً صوتياً (AAC و Opus من ~60 إلى ~153
      * ألف بت/ث) و**لا مسارات صوتية بديلة** — أي لا نسخة إنجليزية من
      * الصوت. لذلك `audioTracks` في CloudStream (وهو للّغة ثانية على الفيديو
-     * نفسه) لا مكان له هنا، فترجمةُ طلب «جميع الملفات الصوتية» عملياً:
-     * **أن يُختار أيٌّ من الاثني عشر** مع كل جودة، لا أن يُحصر في واحد.
+     * نفسه) لا مكان له هنا، ويبقى السلوك بلا خيارات: مواءمة كوديك الفيديو
+     * (webm ↔ webm، mp4 ↔ mp4) ثم أعلى بت/ث، تماماً كما كان.
      *
-     * الافتراضي `best` هو السلوك السابق حرفياً: مواءمة كوديك الفيديو
-     * (webm ↔ webm، mp4 ↔ mp4) ثم أعلى بت/ث — لأن اختيار opus لفيديو mp4
-     * قد يجعل اللاعب يحوّل الصوت بلا داعٍ.
-     *
-     * أي خيار آخر يبقى داخل نفس مجموعة الصيغ المتوافقة، فلا نخرج عن
-     * كوديك الفيديو ولا نكسر المانيفست.
+     * السبب: اختيار opus لفيديو mp4 قد يجعل اللاعب يحوّل الصوت بلا داعٍ،
+     * فلا داعي لخيار — المواءمة تكفي.
      */
-    private fun pickAudio(audios: List<AudioInfo>, video: StreamInfo, pref: String): AudioInfo? {
+    private fun pickAudio(audios: List<AudioInfo>, video: StreamInfo): AudioInfo? {
         // مواءمة كوديك الفيديو أولاً: webm يستقبل webm، وmp4 يستقبل mp4.
         val family = if (video.mimeType.contains("webm")) { a: AudioInfo ->
             a.mimeType.contains("webm")
@@ -1199,21 +1183,7 @@ class AryProvider(
             a.mimeType.contains("mp4")
         }
         val compatible = audios.filter(family).ifEmpty { audios }
-        if (pref.isEmpty() || pref == "best") {
-            return compatible.maxByOrNull { it.bitrate }
-        }
-        return when (pref) {
-            "opus" -> compatible.filter { it.mimeType.contains("webm") }
-                .maxByOrNull { it.bitrate } ?: compatible.maxByOrNull { it.bitrate }
-            "aac" -> compatible.filter { it.mimeType.contains("mp4") }
-                .maxByOrNull { it.bitrate } ?: compatible.maxByOrNull { it.bitrate }
-            "lowest" -> compatible.minByOrNull { it.bitrate }
-            "low" -> compatible.sortedBy { it.bitrate }
-                .getOrNull((compatible.size - 1) / 2) ?: compatible.maxByOrNull { it.bitrate }
-            "high" -> compatible.sortedByDescending { it.bitrate }
-                .getOrNull(1) ?: compatible.maxByOrNull { it.bitrate }
-            else -> compatible.maxByOrNull { it.bitrate }
-        }
+        return compatible.maxByOrNull { it.bitrate }
     }
 
     /** «360 • 62MB (H.264)» — تسمية تُفرّق الجودات في منظار القائمة. */
@@ -1274,18 +1244,13 @@ class AryProvider(
                 )
             }
 
-            // 2) ثم التلقائية/المولَّدة بلغة المستخدم — من `timedtext`
-            //    مباشرةً، لأنها غير منشورة على يوتيوب فلا يراها NewPipe.
-            val wanted = subLanguage()
+            // 2) ثم العربية التلقائية تلقائياً — بلا إعداد ولا اختيار.
+            //    يوتيوب لا ينشر غير العربية، فهي تُولَّد عند الطلب عبر
+            //    معامل tlang على رابط timedtext الموقّع، فلا يراها NewPipe.
             val base = original?.url?.takeIf { it.isNotBlank() } ?: return
-            val shown = if (wanted == SUB_LANG_AUTO) "ar" else wanted
             val url = buildString {
                 append(base)
-                append("&fmt=vtt")
-                if (wanted != SUB_LANG_AUTO) {
-                    append("&tlang=")
-                    append(URLEncoder.encode(wanted, "UTF-8"))
-                }
+                append("&fmt=vtt&tlang=ar")
             }
 
             val text = fetchSubtitleText(url, "https://www.youtube.com/watch?v=$vid")
@@ -1293,11 +1258,11 @@ class AryProvider(
 
             val local = ArySubServer.register(text) ?: return
             subtitleCallback(
-                newSubtitleFile(shown, local) {
+                newSubtitleFile("ar", local) {
                     this.headers = mapOf("Referer" to "https://www.youtube.com/")
                 }
             )
-            Log.d(TAG, "$vid subtitle ok lang=$shown bytes=${text.length}")
+            Log.d(TAG, "$vid subtitle ok lang=ar bytes=${text.length}")
         } catch (e: Exception) {
             Log.w(TAG, "$vid subtitle skipped: ${e.message}")
         }
@@ -1407,7 +1372,7 @@ class AryProvider(
                 val bestAudio = if (audiosByLanguage.isNotEmpty()) {
                     val lang = audiosByLanguage.keys.firstOrNull()
                     audiosByLanguage[lang]?.let { audios ->
-                        pickAudio(audios, video, audioPref())
+                        pickAudio(audios, video)
                     }
                 } else null
 
