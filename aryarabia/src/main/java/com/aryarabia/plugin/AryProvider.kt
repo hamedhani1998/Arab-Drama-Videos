@@ -510,8 +510,12 @@ class AryProvider(
      * قوائم قناةٍ ما: صفحة tab «قوائم التشغيل» تعرض أول 30، ثم نتابع بطلب
      * صفحة ثانية لاسترداد الباقي. تُستخدم للقناة الأساسية والقنوات الإضافية.
      * إن فشلت الصفحة الثانية نحتفظ بالأولى.
+     *
+     * نُرجع `null` — لا قائمة فارغة — عند فشل الطلب، ليميّز المستدعي بين
+     * «القناة بلا قوائم» و«الطلب لم يصل». حفظُ نتيجةٍ فارغة بعد فشلٍ عابرٍ
+     * كان يُخفي مسلسلات القناة عن البحث حتى إعادة تشغيل التطبيق.
      */
-    private suspend fun channelPlaylists(url: String): List<PlaylistInfo> {
+    private suspend fun channelPlaylists(url: String): List<PlaylistInfo>? {
         val out = mutableListOf<PlaylistInfo>()
         try {
             val first = fetchInitialData(url)
@@ -531,49 +535,109 @@ class AryProvider(
             }
         } catch (e: Exception) {
             Log.e(TAG, "playlists tab failed: ${e.message}")
+            return null
         }
         return out
     }
 
     /**
-     * كل قوائم المصدر: قناة ARY الأساسية + القنوات الإضافية (تُجلب بالتوازي
-     * للسرعة). القائمة شبه ثابتة فتُحفظ في الذاكرة وتخدم الرئيسية والبحث.
+     * قوائم المصدر مجزّأةً: قناة ARY وحدها في صفّها، وكل قناة إضافية في
+     * صفّها هي. تُجلب كلها مرةً واحدة (بالتوازي) وتُحفظ، فتبقى في الذاكرة
+     * طلباتُ صفحةِ واحدة لا عمليتين.
      */
-    @Volatile
-    private var cachedPlaylists: List<PlaylistInfo>? = null
-
-    private suspend fun allPlaylists(): List<PlaylistInfo> {
-        cachedPlaylists?.let { return it }
-
-        val byId = LinkedHashMap<String, PlaylistInfo>()
-
-        // الأساسية: قناة ARY.
-        for (p in channelPlaylists(PLAYLISTS_URL)) byId[p.id] = p
-
-        // الإضافية: بالتوازي، دون تكرار قائمةٍ في أكثر من قناة.
-        val extras = extraChannels()
-        if (extras.isNotEmpty()) {
-            coroutineScope {
-                extras.map { extra ->
-                    async {
-                        try {
-                            channelPlaylists(extra.url)
-                        } catch (e: Exception) {
-                            Log.w(TAG, "extra channel '${extra.label}' failed: ${e.message}")
-                            emptyList()
-                        }
-                    }
-                }.awaitAll().forEach { pls ->
-                    for (p in pls) if (p.id !in byId) byId[p.id] = p
-                }
-            }
-        }
-
-        Log.d(TAG, "playlists: ${byId.size}")
-        val out = byId.values.toList()
-        if (out.isNotEmpty()) cachedPlaylists = out
-        return out
+    private data class SourceLists(
+        val base: List<PlaylistInfo>,
+        val extras: List<Pair<ExtraChannel, List<PlaylistInfo>>>,
+        /** قناة لم يصل طلبها — نُعيد المحاولة لاحقاً بدل تثبيت فراغها. */
+        val failed: Set<String>
+    ) {
+        /** كل القوائم بلا تكرار — هذا ما يبحث فيه `search`. */
+        val all: List<PlaylistInfo> =
+            (base + extras.flatMap { it.second }).distinctBy { it.id }
     }
+
+    @Volatile
+    private var cachedSource: SourceLists? = null
+
+    /** آخر جلبٍ ناقص، ومتى حدث — لنعيد المحاولة إلا بعد مهلة. */
+    @Volatile private var lastPartial: SourceLists? = null
+    @Volatile private var lastFailedAt = 0L
+
+    /** مفتاح القناة الأساسية في `SourceLists.failed` (ـ URL مفتاحها). */
+    private val BASE_URL_KEY = "base"
+
+    private val RETRY_COOLDOWN_MS = 20_000L
+
+    /**
+     * جلبٌ واحد لكل قناة: ARY الأساسية + كل الإضافية بالتوازي.
+     *
+     * ⚠ لا تُخفّض هذا إلى طلبٍ لكل صفحة رئيسية: الإصدار السابق كان يجلب
+     * القناة الإضافية مرتين (مرةً في `allPlaylists` ومرةً لبناء صفّها)،
+     * فتضاعف عدد الطلبات على يوتيوب عند كل فتح للرئيسية حتى بطأ يوتيوب
+     * الردّ وصارت `channelPlaylists` تُرجع فارغة — فيختفي البحث ومعه كل
+     * الأقسام معاً. هنا طلبٌ واحد لكل قناة في الجلسة كلها.
+     */
+    private suspend fun loadSourceLists(): SourceLists = coroutineScope {
+        val extras = extraChannels()
+        val base = async { channelPlaylists(PLAYLISTS_URL) }
+        val extraLists = if (extras.isEmpty()) {
+            emptyList()
+        } else {
+            extras.map { extra ->
+                async {
+                    val pls = try {
+                        channelPlaylists(extra.url)
+                    } catch (e: Exception) {
+                        Log.w(TAG, "extra channel '${extra.label}' failed: ${e.message}")
+                        null
+                    }
+                    extra to pls
+                }
+            }.awaitAll()
+        }
+        val baseLists = base.await()
+        val baseIds = baseLists.orEmpty().map { it.id }.toSet()
+        val failed = mutableSetOf<String>()
+        if (baseLists == null) failed.add(BASE_URL_KEY)
+        SourceLists(
+            baseLists.orEmpty(),
+            extraLists.mapNotNull { (c, pls) ->
+                if (pls == null) { failed.add(c.url); null }
+                else c to pls.filter { it.id !in baseIds }
+            },
+            failed
+        )
+    }
+
+    /**
+     * القوائم المحفوظة. لا نحفظ إلا إذا نجحت **كل** القنوات: فشلُ قناةٍ
+     * عابرٌ (بطء يوتيوب) كان يُثبّت فراغها فيبقى قسمُها ونتائجُها مخفيّة
+     * حتى إعادة تشغيل التطبيق. الآن يُعاد الجلب — بعد مهلة قصيرة فقط،
+     * حتى لا يولّد كل ضغطة مفتاح في البحث طلباً جديداً (وهو مابطّئ يوتيوب
+     * من الأصل).
+     */
+    private suspend fun sourceLists(): SourceLists {
+        cachedSource?.let { return it }
+        val now = System.currentTimeMillis()
+        if (now - lastFailedAt < RETRY_COOLDOWN_MS && lastPartial != null) return lastPartial!!
+        val src = loadSourceLists()
+        Log.d(
+            TAG,
+            "playlists: base=${src.base.size} extras=${src.extras.size} " +
+                "failed=${src.failed.size} total=${src.all.size}"
+        )
+        if (src.failed.isEmpty() && src.base.isNotEmpty()) {
+            cachedSource = src
+            lastPartial = null
+        } else {
+            lastFailedAt = now
+            lastPartial = src
+        }
+        return src
+    }
+
+    /** كل القوائم (أساسية + إضافية) للبحث و`load` — للمعرّف اسمُه الصحيح. */
+    private suspend fun allPlaylists(): List<PlaylistInfo> = sourceLists().all
 
     /** حلقات قائمة: 60–100+ حلقة يُعيدها يوتيوب كاملةً في الصفحة الأولى. */
     private suspend fun playlistItems(playlistId: String): List<Lockup> {
@@ -655,28 +719,18 @@ class AryProvider(
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
         if (page > 1) return newHomePageResponse(emptyList())
         val lists = mutableListOf<HomePageList>()
-        val playlists = allPlaylists()
-        homeFrom(playlists, lists)
 
-        // صفٌّ مستقل لكل قناة إضافية (بالتوازي سرعةً؛ لا نكرر مسلسلات ARY).
-        val extras = extraChannels()
-        if (extras.isNotEmpty()) {
-            val aryIds = playlists.map { it.id }.toSet()
-            coroutineScope {
-                extras.map { extra ->
-                    async {
-                        val pls = try {
-                            channelPlaylists(extra.url).filter { it.id !in aryIds }
-                        } catch (e: Exception) {
-                            Log.w(TAG, "extra channel '${extra.label}' failed: ${e.message}")
-                            emptyList()
-                        }
-                        pls to extra
-                    }
-                }.awaitAll().forEach { (pls, extra) ->
-                    homeFromTitled(pls, "قناة ${extra.label}", lists)
-                }
-            }
+        // جلبٌ واحد لكل قناة (الأساسية أولاً، وكل إضافية مستقلة) — لا نعيد
+        // طلب أي قناة هنا، فالبيانات محفوظة أصلاً.
+        val src = sourceLists()
+
+        // صفّ ARY الأساسي: قوائم قناة ARY وحدها.
+        homeFrom(src.base, lists)
+
+        // صفٌّ مستقل لكل قناة إضافية، بلا تكرار مع صفّ ARY (استُبعدت
+        // القوائم المشتركة عند الجلب في loadSourceLists).
+        for ((extra, pls) in src.extras) {
+            homeFromTitled(pls, "قناة ${extra.label}", lists)
         }
         return newHomePageResponse(lists)
     }
