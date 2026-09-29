@@ -9,6 +9,7 @@ import org.schabi.newpipe.extractor.services.youtube.extractors.YoutubeStreamExt
 import org.schabi.newpipe.extractor.services.youtube.linkHandler.YoutubeStreamLinkHandlerFactory
 import android.content.SharedPreferences
 import android.util.Log
+import org.json.JSONObject
 
 /**
  * مصدر «باكستاني لايف» (pakistanilive.com) — دراما باكستانية مترجمة للعربية.
@@ -42,6 +43,16 @@ class PakistaniliveProvider(private val prefs: SharedPreferences? = null) : Main
 
     private fun abs(u: String): String =
         if (u.startsWith("http")) u else "$mainUrl$u"
+
+    // ---------- خيارات التشغيل (مأخوذة من aryarabia) ----------
+    private fun playbackMode(): String =
+        prefs?.getString(PakistaniliveSettingsBottomSheet.KEY_PLAYBACK_MODE, "newpipe") ?: "newpipe"
+
+    private fun qualityMode(): String =
+        prefs?.getString(PakistaniliveSettingsBottomSheet.KEY_MAX_QUALITY, "all") ?: "all"
+
+    private fun orderMode(): String =
+        prefs?.getString(PakistaniliveSettingsBottomSheet.KEY_QUALITY_ORDER, "default") ?: "default"
 
     // ---------- بطاقات السلسلة ----------
     private fun seriesCardOf(item: Element): SearchResponse? {
@@ -191,8 +202,13 @@ class PakistaniliveProvider(private val prefs: SharedPreferences? = null) : Main
 
             PakiDashServer.ensureStarted()
 
+            // إعداد «الجودات»: الأعلى فقط عند اختيار high
+            val effectiveVideos = if (qualityMode() == "high") {
+                videoOnlyList.maxByOrNull { it.height }?.let { listOf(it) } ?: videoOnlyList
+            } else videoOnlyList
+
             if (audiosByLanguage.isNotEmpty()) {
-                for (video in videoOnlyList) {
+                for (video in effectiveVideos) {
                     for ((lang, audios) in audiosByLanguage) {
                         val bestAudioForLang = if (video.mimeType.contains("webm")) {
                             audios.sortedWith(compareByDescending<PakiAudioInfo> { it.mimeType.contains("webm") }.thenByDescending { it.bitrate }).firstOrNull()
@@ -231,7 +247,10 @@ class PakistaniliveProvider(private val prefs: SharedPreferences? = null) : Main
                     Triple(mUrl, if (height > 0) height.toString() else "video", height)
                 } catch (e: Exception) { null }
             }
-            muxedList.forEach { (mUrl, mLabel, mHeight) ->
+            val effectiveMuxed = if (qualityMode() == "high") {
+                muxedList.maxByOrNull { it.third }?.let { listOf(it) } ?: muxedList
+            } else muxedList
+            effectiveMuxed.forEach { (mUrl, mLabel, mHeight) ->
                 callback(
                     newExtractorLink("Pakistanilive", "$mLabel (Legacy)", mUrl, type = INFER_TYPE) {
                         this.referer = mainUrl
@@ -241,11 +260,172 @@ class PakistaniliveProvider(private val prefs: SharedPreferences? = null) : Main
                 produced++
             }
 
-            Log.d(TAG, "$vid NewPipe DASH links=$produced qualities=${videoOnlyList.size}")
+            Log.d(TAG, "$vid NewPipe DASH links=$produced qualities=${effectiveVideos.size}")
         } catch (e: Exception) {
             Log.w(TAG, "$vid NewPipe resolve failed: ${e.message}")
         }
         return produced
+    }
+
+    // ---------- المسار «مباشر» (روابط HTML) مأخوذ من aryarabia ----------
+    private fun ytPlayerResponse(html: String): JSONObject? {
+        val markers = listOf(
+            "var ytInitialPlayerResponse = ",
+            "window[\"ytInitialPlayerResponse\"] = ",
+            "\"ytInitialPlayerResponse\"] = ",
+            "ytInitialPlayerResponse = "
+        )
+        for (m in markers) {
+            val idx = html.indexOf(m)
+            if (idx < 0) continue
+            val start = idx + m.length
+            if (start >= html.length || html[start] != '{') continue
+            var depth = 0
+            var i = start
+            var inStr = false
+            var esc = false
+            while (i < html.length) {
+                val c = html[i]
+                if (inStr) {
+                    if (esc) esc = false
+                    else if (c == '\\') esc = true
+                    else if (c == '"') inStr = false
+                } else {
+                    when (c) {
+                        '"' -> inStr = true
+                        '{' -> depth++
+                        '}' -> {
+                            depth--
+                            if (depth == 0) {
+                                return try {
+                                    JSONObject(html.substring(start, i + 1))
+                                } catch (_: Exception) { null }
+                            }
+                        }
+                    }
+                }
+                i++
+            }
+        }
+        return null
+    }
+
+    private fun randomCpn(): String {
+        val chars = "0123456789abcdef"
+        val r = java.util.Random()
+        return (1..16).map { chars[r.nextInt(chars.length)] }.joinToString("")
+    }
+
+    private fun qualityLabelOf(vs: org.schabi.newpipe.extractor.stream.VideoStream): String {
+        val height = runCatching { vs.height }.getOrNull() ?: 0
+        return if (height > 0) height.toString() else "video"
+    }
+
+    private fun redirectHost(url: String): String {
+        return try {
+            val u = java.net.URI(url)
+            if (u.host?.endsWith(".googlevideo.com") == true) {
+                val query = u.rawQuery
+                val base = "https://redirector.googlevideo.com${u.rawPath}"
+                if (!query.isNullOrBlank()) "$base?$query" else base
+            } else url
+        } catch (_: Exception) { url }
+    }
+
+    /**
+     * مسار HTML المباشر (نمط aryarabia): نجلب صفحة watch، نستخرج
+     * `ytInitialPlayerResponse`، ونمرّر الروابط. تبثّ نسخةً بالتواصل مع
+     * `cpn`، ونسخةٍ بديلة عبر redirector. إن لم يعطِ روابط url جاهزة يعطي
+     * ABR المتكيّف (`serverAbrStreamingUrl`) بكل جودة حرفياً.
+     */
+    private suspend fun resolveFromHtml(
+        vid: String,
+        subtitleCallback: (SubtitleFile) -> Unit,
+        callback: (ExtractorLink) -> Unit
+    ): Int {
+        var produced = 0
+        val watchUrl = "https://www.youtube.com/watch?v=$vid"
+        try {
+            val res = app.get(
+                watchUrl,
+                headers = mapOf(
+                    "User-Agent" to UA,
+                    "Accept-Language" to "ar",
+                    "Accept" to "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
+                )
+            )
+            val pr = ytPlayerResponse(res.text) ?: return 0
+            val status = pr.optJSONObject("playabilityStatus")?.optString("status")
+            if (status != "OK") {
+                Log.w(TAG, "$vid playableStatus=$status (${pr.optJSONObject("playabilityStatus")?.optString("reason")})")
+                return 0
+            }
+            fun emit(url: String, name: String, quality: Int, headers: Map<String, String> = mapOf()) {
+                if (url.isBlank()) return
+                val withCpn = if (url.contains(".googlevideo.com")) {
+                    if (url.contains("cpn=")) url
+                    else url + (if (url.contains("?")) "&" else "?") + "cpn=" + randomCpn()
+                } else url
+                val link = ExtractorLink(
+                    "Pakistanilive", name, withCpn, watchUrl, quality, headers,
+                    null, ExtractorLinkType.VIDEO, emptyList<AudioFile>()
+                )
+                produced++
+                callback(link)
+                if (withCpn.contains(".googlevideo.com") && !withCpn.contains("redirector.googlevideo.com")) {
+                    val redirected = redirectHost(withCpn)
+                    if (redirected != withCpn) {
+                        val link2 = ExtractorLink(
+                            "Pakistanilive", "$name · redirect", redirected, watchUrl, quality,
+                            headers, null, ExtractorLinkType.VIDEO, emptyList<AudioFile>()
+                        )
+                        produced++
+                        callback(link2)
+                    }
+                }
+            }
+            val sd = pr.optJSONObject("streamingData") ?: return 0
+            val arr = ArrayList<JSONObject>()
+            sd.optJSONArray("formats")?.let { for (i in 0 until it.length()) arr.add(it.getJSONObject(i)) }
+            sd.optJSONArray("adaptiveFormats")?.let { for (i in 0 until it.length()) arr.add(it.getJSONObject(i)) }
+
+            val abr = sd.optString("serverAbrStreamingUrl")
+            val abrHeaders = mapOf("Referer" to "https://www.youtube.com/")
+
+            var emittedReal = 0
+            for (f in arr) {
+                val url = f.optString("url")
+                if (url.isBlank()) continue
+                val q = f.optString("qualityLabel")
+                val name = "Pakistanilive ${if (q.isNotBlank()) q else f.optInt("itag").toString()}"
+                emit(url, name, f.optInt("itag"), abrHeaders)
+                emittedReal++
+            }
+
+            val labels = LinkedHashMap<String, String>()
+            for (f in arr) {
+                val q = f.optString("qualityLabel")
+                if (q.isBlank()) continue
+                labels[q] = q
+            }
+            val ordered = labels.keys.sortedByDescending { label ->
+                Regex("""(\d{3,4})p""").find(label)?.groupValues?.get(1)?.toIntOrNull() ?: 0
+            }
+            if (abr.isNotBlank() && emittedReal == 0) {
+                if (ordered.isEmpty()) {
+                    emit(abr, "Pakistanilive (ABR)", 0, abrHeaders)
+                } else {
+                    for (label in ordered) {
+                        emit(abr, "Pakistanilive $label", 0, abrHeaders)
+                    }
+                }
+            }
+            Log.d(TAG, "$vid resolveFromHtml: real=$emittedReal abr-labels=${ordered.size}")
+            return produced
+        } catch (e: Exception) {
+            Log.w(TAG, "$vid resolveFromHtml failed: ${e.message}")
+            return produced
+        }
     }
 
     override suspend fun loadLinks(
@@ -276,19 +456,59 @@ class PakistaniliveProvider(private val prefs: SharedPreferences? = null) : Main
             }
         }
 
-        // المسار الأساسي: NewPipe + DASH محلي (يعمل حيث يفشل loadExtractor).
-        // خلافاً للأصل نُبقي loadExtractor احتياطاً (لا تحلّ محل الإعدادات).
-        val sink: (ExtractorLink) -> Unit = { link -> collected.add(link); Unit }
-        var links = resolveFromNewPipe(ytId, subtitleCallback, sink)
+        val watchUrl = "https://www.youtube.com/watch?v=$ytId"
+        val mode = playbackMode()
 
-        if (links == 0) {
-            loadExtractor("https://www.youtube.com/watch?v=$ytId", "https://www.youtube.com/", subtitleCallback) { link ->
+        // المسار الابتدائي حسب الإعداد: newpipe (افتراضي) / direct / extractor.
+        // البقية تُجرَّب احتياطياً ما لم تُنتج روابط (نمط aryarabia).
+        val orderedPrimary = when (mode) {
+            "extractor" -> 1
+            "direct" -> 2
+            else -> 0
+        }
+
+        val sink: (ExtractorLink) -> Unit = { link -> collected.add(link); Unit }
+        var links = 0
+
+        // ★ روابط ما وراء المسارات تجمع في قائمة واحدة ويُبثّ ترتيبها حسب
+        //   KEY_QUALITY_ORDER مع بقية الخيارات. الدوال المساندة ترجع عددها.
+        suspend fun runFirst() {
+            when (orderedPrimary) {
+                1 -> {
+                    loadExtractor(watchUrl, "https://www.youtube.com/", subtitleCallback) { link ->
+                        sink(link); links++
+                    }
+                }
+                2 -> { links += resolveFromHtml(ytId, subtitleCallback, sink) }
+                else -> { links += resolveFromNewPipe(ytId, subtitleCallback, sink) }
+            }
+        }
+        runFirst()
+
+        if (links == 0 && orderedPrimary != 0) {
+            links += resolveFromNewPipe(ytId, subtitleCallback, sink)
+        }
+        if (links == 0 && orderedPrimary != 1) {
+            loadExtractor(watchUrl, "https://www.youtube.com/", subtitleCallback) { link ->
                 sink(link); links++
             }
         }
+        if (links == 0 && orderedPrimary != 2) {
+            links += resolveFromHtml(ytId, subtitleCallback, sink)
+        }
 
         if (collected.isEmpty()) return false
-        collected.forEach { callback(it) }
+
+        // ★ البث النهائي: «default» = نفس ترتيب اليوم حرفياً؛ asc/desc يعيدان
+        //   الترتيب فقط (فرز مستقر، بلا حذف أو تكرار).
+        val order = orderMode()
+        val sorted = when (order) {
+            "asc" -> collected.sortedBy { it.quality }
+            "desc" -> collected.sortedByDescending { it.quality }
+            else -> collected
+        }
+        sorted.forEach { callback(it) }
+        Log.d(TAG, "loadLinks $ytId mode=$mode links=$links")
         return true
     }
 }
