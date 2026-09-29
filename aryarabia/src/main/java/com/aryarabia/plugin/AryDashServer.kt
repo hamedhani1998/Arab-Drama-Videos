@@ -136,11 +136,19 @@ object AryDashServer {
 
     /**
      * كوديكٌ كتابي للمانيفست: نفضّل ما أعطاه NewPipe فعلاً (avc1.*, vp09.*,
-     * av01.*, av1 …) — يعرّفه اللاعب بلا تخمين — وإلا نرتد للأسرة.
+     * av01.*, mp4a.40.2 …) — يعرّفه اللاعب بلا تخمين — وإلا نرتد للأسرة
+     * الصحيحة: مقطع فيديو → avc1/vp9، مقطع صوت → mp4a.40.2/opus.
+     * (ضع كوديك فيديو على مقطع صوت يجعل ExoPlayer يوجّهه لمُعترف فيديو
+     * فيسقط FfmpegVideoRenderer NPE — الخلل الذي أصلحه this.)
      */
     fun codecFor(mimeType: String, codec: String?): String {
         if (!codec.isNullOrBlank()) return codec
-        return if (mimeType.contains("webm")) "vp9" else "avc1.4d401f"
+        return when {
+            mimeType.startsWith("audio/") && mimeType.contains("webm") -> "opus"
+            mimeType.startsWith("audio/") -> "mp4a.40.2"
+            mimeType.contains("webm") -> "vp9"
+            else -> "avc1.4d401f"
+        }
     }
 
     /**
