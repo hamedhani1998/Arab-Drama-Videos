@@ -1,10 +1,9 @@
 rootProject.name = "CloudstreamPlugins"
 
 
-// ShortDramaAR: إضافة قيد الإنشاء (18:46) لم تكتمل بعد، وبما أن هذا الملف
-// يضمّ كل مجلد فيه build.gradle.kts فإن فشلها يُسقط بناء كل الإضافات.
-// معطّلة مؤقتاً — يكفي حذف اسمها من القائمة لإكمال بناءها.
-val disabled = listOf<String>("ShortDramaAR")
+// ShortDramaAR: إضافة قيد الإنشاء محلياً (غير متتبَّعة بـgit، فلا تدخل
+// بناء GitHub). أضف اسمها هنا فقط إن أردتَ بناءها مع البقية محلياً.
+val disabled = listOf<String>()
 
 File(rootDir, ".").eachDir { dir ->
     if (!disabled.contains(dir.name) && File(dir, "build.gradle.kts").exists()) {
