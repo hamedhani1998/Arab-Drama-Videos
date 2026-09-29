@@ -108,11 +108,11 @@ class MarayaSettingsBottomSheet(private val prefs: SharedPreferences) : BottomSh
             }
             playbackCategory.addPreference(showSubsPref)
 
-            // إظهار رابط الصفحة الخام كبديل.
+            // إظهار رابط الصفحة الخام كبديل (HTML — يُفتح في المتصفح لا يُشغَّل داخل اللاعب).
             val showRawLinkPref = SwitchPreferenceCompat(ctx).apply {
                 key = KEY_SHOW_RAW_LINK
                 title = "إظهار رابط الصفحة الخام كبديل"
-                summary = "عند تعذّر فك السيرفر، يعرض رابط التضمين بدل «لا روابط»"
+                summary = "عند تعذّر فك السيرفر (عضو/اشتراك) يُظهر رابط المشاهدة (يُفتح بالمتصفح — لا يُشغَّل باللاعب)"
                 setDefaultValue(true)
             }
             playbackCategory.addPreference(showRawLinkPref)

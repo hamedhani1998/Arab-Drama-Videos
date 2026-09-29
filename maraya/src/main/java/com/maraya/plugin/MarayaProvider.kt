@@ -319,12 +319,23 @@ class MarayaProvider(private val prefs: SharedPreferences? = null) : MainAPI() {
             }
         }
 
-        // بديل عند تعذّر فك السيرفر (اشتراك/401/بلا settings/استثناء) —
-        // خارج الـ try كي يغطي كل حالات الفشل بدل «لا روابط».
+        // الحل الصادق عند تعذّر فك السيرفر (member/svod/بلا settings).
+        // ميدانياً (فحص 2026-09): محتوى الأعضاء (member) وsvod يعيد /player **401** —
+        // روابطه غير موجودة للزائر أصلاً. كل أنواع الروابط في CloudStream
+        // (VIDEO/M3U8/DASH) تُشغَّل كمقطع — لا يوجد نوع «صفحة/mوقع». لذا سياسة
+        // اليوم (رابط كاذب يبدو فيديو وهو صفحة HTML) خطأ أُصلحه هنا:
+        // افتراضياً نُنهي بلا روابط (الوضع الفعلي). وإن فعّل المستخدم خيار
+        // «رابط الصفحة الخام» (افتراضياً true = سلوك اليوم) نُصدِر صفحة HTML
+        // بتسمية تنبّه أنها لا تُشغَّل — فاختياره هو ولمعدّه سببٌ صريح.
         if (collected.isEmpty() && videoId != null &&
-            prefs?.getBoolean(MarayaSettingsBottomSheet.KEY_SHOW_RAW_LINK, true) != false
+            prefs?.getBoolean(MarayaSettingsBottomSheet.KEY_SHOW_RAW_LINK, true) == true
         ) {
-            emitter(collected, "Maraya (صفحة)", "$mainUrl/video/$videoId", ExtractorLinkType.VIDEO, mainUrl)
+            // طلب المستخدم رؤية الرابط: نُصدِر الصفحة لكن بتسمية «لا يُشغَّل».
+            emitter(
+                collected, "رابط الصفحة (HTML — لا يُشغَّل)",
+                "$mainUrl/video/$videoId", ExtractorLinkType.M3U8, mainUrl
+            )
+            Log.w(TAG, "loadLinks: no stream for video $videoId — page link emitted (user requested)")
         }
 
         if (collected.isEmpty()) return false
