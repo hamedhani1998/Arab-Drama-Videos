@@ -73,14 +73,21 @@ class AryProvider(
         private const val BOM = "﻿"
 
         /**
-         * قوائم ليست مسلسلات. القناة تنشر لكل مسلسل قائمةً أو أكثر من قوائم
-         * الملحقات (إعلان ترويجي / تشويقي، أفضل اللحظات، أغاني، Shorts)،
-         * إضافة إلى قوائم عامة (الأفضل لدى، أحدث الفيديوهات، أفلام). كل هذه
-         * تُستبعد وإلا ظهرت في الواجهة كأنها مسلسلات.
+         * قوائم ليست مسلسلات ولا إعلانات ترويجية: ملحقات القناة العامة
+         * (أفضل اللحظات، أغاني، Shorts، ملخص، مشهد …) وقوائم الوكالة
+         * (الأفضل لدى، أحدث الفيديوهات، أفلام …). كل هذه تُستبعد من صف
+         * المسلسلات. أما إعلانات وتشويقات المسلسلات (إعلان ترويجي/تشويقي،
+         * تريلر، برومو) فنعرضها في صفٍّ منفصل — طلب المستخدم.
          */
         private val SKIP_RE = Regex(
-            "إعلان|تشويق|تريلر|trailer|ملخص|مشهد|Shorts|أفضل اللحظات|أجمل اللحظات|" +
-                "أغاني|برومو|الأفضل لدى|أحدث فيديو|أحدث الفيديوهات|Latest Videos|أفلام",
+            "ملخص|مشهد|Shorts|أفضل اللحظات|أجمل اللحظات|أغاني|الأفضل لدى|" +
+                "أحدث فيديو|أحدث الفيديوهات|Latest Videos|أفلام|إهداء",
+            RegexOption.IGNORE_CASE
+        )
+
+        /** إعلانات المسلسلات وتشويقاتها — صفٌّ منفصل في الواجهة. */
+        private val PROMO_RE = Regex(
+            "إعلان|تشويق|تريلر|trailer|برومو",
             RegexOption.IGNORE_CASE
         )
 
@@ -338,6 +345,10 @@ class AryProvider(
         return t
     }
 
+    /** اسم الإعلان مع إبقاء صداه «إعلان/تشويق» ليسهل تمييزه عن المسلسل. */
+    private fun promoName(title: String): String =
+        clean(title).replace(Regex("""\s+"""), " ").trim()
+
     /**
      * مفتاح التطابق: بلا تشكيل، والهمزات والألفات والألف المقصورة موحّدة،
      * والتاء المربوطة كالهاء. القناة تكتب الاسم نفسه بأشكال مختلفة
@@ -372,6 +383,17 @@ class AryProvider(
      */
     private fun playlistUrl(id: String): String = "https://www.youtube.com/playlist?list=$id"
 
+    /**
+     * المسلسلات في تبويب القوائم نوعان من يوتيوب: PLAYLIST لأغلب المسلسلات،
+     * وSHOW للمسلسلات الجديدة/القادمة (مثل «مسلسل الغيرة»). نقبلهما —
+     * وكلٌّ منهما يُفتح بصفحة قائمة اعتيادية.
+     */
+    private fun isPlaylistOrShow(type: String): Boolean =
+        type.contains("PLAYLIST") || type.contains("SHOW")
+
+    /** إعلانات وتشويقات المسلسلات (طلب المستخدم) — لا تُستبعد ولا تُدمج. */
+    private fun isPromo(title: String): Boolean = PROMO_RE.containsMatchIn(title)
+
     // ============================== playlists ==============================
 
     private data class PlaylistInfo(
@@ -395,9 +417,11 @@ class AryProvider(
         val out = mutableListOf<PlaylistInfo>()
         try {
             // الصفحة الأولى: GET على HTML — الطريق الأسرع والأقل عرضة للرفض.
+            // المسلسلات الجديدة/القادمة قد تُنشر كنوع SHOW (مثل «مسلسل الغيرة»)
+            // وليس PLAYLIST — نقبَل النوعين كليهما.
             val first = fetchInitialData(PLAYLISTS_URL)
             for (l in lockupsOf(first)) {
-                if (!l.type.contains("PLAYLIST")) continue
+                if (!isPlaylistOrShow(l.type)) continue
                 if (out.any { it.id == l.id }) continue
                 out.add(PlaylistInfo(l.id, l.title, l.thumb, l.count))
             }
@@ -408,7 +432,7 @@ class AryProvider(
             val second = token?.let { continuationPage(it) }
             if (second != null) {
                 for (l in lockupsOf(second)) {
-                    if (!l.type.contains("PLAYLIST")) continue
+                    if (!isPlaylistOrShow(l.type)) continue
                     if (out.any { it.id == l.id }) continue
                     out.add(PlaylistInfo(l.id, l.title, l.thumb, l.count))
                 }
@@ -466,27 +490,44 @@ class AryProvider(
      */
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
         if (page > 1) return newHomePageResponse(emptyList())
-        return homeFrom(allPlaylists())
+        val lists = mutableListOf<HomePageList>()
+        homeFrom(allPlaylists(), lists)
+        return newHomePageResponse(lists)
     }
 
-    private fun homeFrom(playlists: List<PlaylistInfo>): HomePageResponse {
-        val cards = dedupe(playlists).map { p ->
+    /**
+     * صف المسلسلات (بعد إزالة الملحقات العامة)، ثم صف «إعلانات المسلسلات
+     * وتشويقاتها» بعدها. إعلان المسلسل له قائمة مستقلة (قد تتجاوز الحلقات
+     * نفسها عدداً)، وتحمل عنواناً مميزاً «إعلان ترويجي / تشويقي»، فلا
+     * يختلط بمجموعة `dedupe` الخاصة بالمسلسل.
+     */
+    private fun homeFrom(playlists: List<PlaylistInfo>, lists: MutableList<HomePageList>) {
+        val series = dedupe(playlists.filter { !isPromo(it.title) })
+        val cards = series.map { p ->
             newTvSeriesSearchResponse(bareName(p.title), playlistUrl(p.id)) {
                 this.posterUrl = p.cover
             }
         }
-        if (cards.isEmpty()) return newHomePageResponse(emptyList())
-        return newHomePageResponse(listOf(HomePageList("مسلسلات ARY العربية", cards)))
+        if (cards.isNotEmpty())
+            lists.add(HomePageList("مسلسلات ARY العربية", cards))
+
+        // إعلان المسلسل قد يكون «ترويجياً» و«تشويقياً» في آنٍ — كلاهما قائمة
+        // مستقلة يريد المستخدم رؤيتها، فلا ندمجهما (`dedupe` يوحّد اسميهما).
+        val promoCards = playlists.filter { isPromo(it.title) }
+            .distinctBy { it.id }
+            .map { p ->
+                newTvSeriesSearchResponse(promoName(p.title), playlistUrl(p.id)) {
+                    this.posterUrl = p.cover
+                }
+            }
+        if (promoCards.isNotEmpty())
+            lists.add(HomePageList("إعلانات وتشويقات المسلسلات", promoCards))
     }
 
-    /** الصفحة الرئيسية كصف واحد — يُستخدم للبحث أيضاً. */
-    private fun searchRow(playlists: List<PlaylistInfo>): List<SearchResponse> =
-        homeFrom(playlists).items.firstOrNull()?.list ?: emptyList()
-
     /**
-     * يستبعد قوائم الملحقات والقوائم العامة، ويزيل تكرار الاسم نفسه
-     * (نفس المسلسل في أكثر من قائمة). عند التكرار نُبقي القائمة الأكبر،
-     * لأن قائمة الإعلانات الترويجية أصغر من قائمة المسلسل دوماً.
+     * يزيل تكرار الاسم نفسه: نفس المسلسل قد يُنشر بقائمتين (PLAYLIST وSHOW —
+     * «مسلسل التربية» مثلًا) أو بتسميتين (مسلسل X / X). عند التكرار نُبقي
+     * القائمة الأكبر. نُستدعى على سلاسل وإعلانات منفصلة، فلا تتداخل.
      */
     private fun dedupe(playlists: List<PlaylistInfo>): List<PlaylistInfo> {
         val byKey = LinkedHashMap<String, PlaylistInfo>()
@@ -525,18 +566,32 @@ class AryProvider(
         val words = keyOf(q).split(' ')
             .filter { it.length > 1 && it != "مسلسل" && it != "حلقه" }
 
-        val pool = dedupe(playlists)
-        val hits = if (words.isEmpty()) {
-            pool.filter { keyOf(it.title).contains(keyOf(q)) }
-        } else {
-            pool.filter { p ->
-                val hay = keyOf(p.title)
-                words.all { hay.contains(it) }
+        // نبحث في المسلسلات والإعلانات معاً، بلا مزج (`dedupe` للسيريس فقط —
+        // ترويجي وتشويقي إعلانان مختلفان وكلاهما يُعرض).
+        val seriesHits = hitsIn(dedupe(playlists.filter { !isPromo(it.title) }), words, keyOf(q))
+        val promoHits = hitsIn(playlists.filter { isPromo(it.title) }, words, keyOf(q))
+
+        // نعيدها مصفوفة واحدة: المسلسلات أولاً ثم إعلاناتها.
+        val out = (seriesHits + promoHits).map { p ->
+            newTvSeriesSearchResponse(
+                if (isPromo(p.title)) promoName(p.title) else bareName(p.title),
+                playlistUrl(p.id)
+            ) {
+                this.posterUrl = p.cover
             }
         }
+        Log.d(TAG, "search '$q' -> ${out.size}")
+        return out
+    }
 
-        Log.d(TAG, "search '$q' -> ${hits.size}")
-        return homeFrom(hits).items.firstOrNull()?.list ?: emptyList()
+    /** مطابقة نصية داخل قائمة قوائم (يتقاسمها البحث للسلاسل والإعلانات). */
+    private fun hitsIn(pool: List<PlaylistInfo>, words: List<String>, queryKey: String): List<PlaylistInfo> {
+        if (words.isEmpty())
+            return pool.filter { keyOf(it.title).contains(queryKey) }
+        return pool.filter { p ->
+            val hay = keyOf(p.title)
+            words.all { hay.contains(it) }
+        }
     }
 
     // ================================ load ================================

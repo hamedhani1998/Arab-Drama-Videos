@@ -78,10 +78,35 @@ class PakistaniliveProvider(private val prefs: SharedPreferences? = null) : Main
     }
 
     // ---------- البث ----------
+    /**
+     * بحث: صفحة نتائج WordPress `/?s={query}` تعرض بطاقات `div.series-item`
+     * لسلاسل — لكنها قد تتضمن روابطاً لمصادر خارجية (qisateishq.com …)
+     * المختلطة بنتائج الموقع. نكتفي بما يحيل إلى `mainUrl` (باكستاني لايف)
+     * كي لا ندخل مسلسلات من مواقع أخرى في النتائج.
+     */
     override suspend fun search(query: String): List<SearchResponse> {
-        // لا حاجة للبحث — الموقع فهرس كاتيكوريات؛ نمرره.
-        return emptyList()
+        val q = query.trim()
+        if (q.isBlank()) return emptyList()
+        val doc = try {
+            app.get("$mainUrl/?s=${java.net.URLEncoder.encode(q, "UTF-8")}").document
+        } catch (_: Exception) { return emptyList() }
+        val out = doc.select("div.series-item").mapNotNull { item ->
+            val href = item.selectFirst("a")?.attr("href")?.trim().orEmpty()
+            // فقط السلاسل على الموقع نفسه؛ تجاهل الخارجية (qisateishq…).
+            if (!isLocal(href) || !href.contains("/category/")) return@mapNotNull null
+            val title = item.selectFirst(".series-title")?.text()?.trim().orEmpty()
+                .ifBlank { item.selectFirst("a")?.attr("title") ?: return@mapNotNull null }
+            val poster = item.selectFirst("img")?.attr("data-src")
+                ?.ifBlank { item.selectFirst("img")?.attr("src") }
+                ?.let { abs(it) }
+            newTvSeriesSearchResponse(title, abs(href)) { this.posterUrl = poster }
+        }.distinctBy { it.url }
+        return out
     }
+
+    /** هل الرابط على `mainUrl` (نسبي أو بنفس المضيف)؟ */
+    private fun isLocal(href: String): Boolean =
+        !href.contains("://") || href.startsWith(mainUrl)
 
     override suspend fun load(url: String): LoadResponse? {
         val doc = try { app.get(url).document } catch (_: Exception) { return null }
