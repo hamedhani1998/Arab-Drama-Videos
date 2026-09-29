@@ -77,6 +77,18 @@ class HumSettingsBottomSheet(private val prefs: SharedPreferences) : BottomSheet
 
             preferenceScreen = preferenceManager.createPreferenceScreen(ctx)
 
+            // شرح الميزة في أول الورقة.
+            val intro = PreferenceCategory(ctx)
+            intro.title = "عن مصدر هم العربية"
+            preferenceScreen.addPreference(intro)
+
+            val aboutPref = Preference(ctx).apply {
+                title = "قناتا هم العربية + عشق مرشد (Hum TV)"
+                summary = "المصدر يعرض مسلسلات القناة من قوائم يوتيوب (كاملة ومترجمة)، ويدعم إضافةَ قنواتٍ إضافية تظهر بقسمٍ خاص."
+                setSelectable(false)
+            }
+            intro.addPreference(aboutPref)
+
             val playbackCategory = PreferenceCategory(ctx)
             playbackCategory.title = "خيارات التشغيل"
             preferenceScreen.addPreference(playbackCategory)
@@ -126,10 +138,10 @@ class HumSettingsBottomSheet(private val prefs: SharedPreferences) : BottomSheet
             // الرئيسية وتشملها نتائج البحث. الافتراضي فارغ = سلوك اليوم تماماً.
             val extraChannelPref = EditTextPreference(ctx).apply {
                 key = KEY_EXTRA_CHANNELS
-                title = "قنوات يوتيوب إضافية (اختياري)"
-                summary = "ألصق رابط قناة لكل سطر (مثال https://youtube.com/@xxx) لتظهر مسلسلاتها بقسم مستقل بعد مسلسلات هم العربية. اتركه فارغاً للافتراضي."
+                title = "قنوات يوتيوب إضافية"
+                summary = "أضف قنواتٍ ليوتيوب لتظهر مسلسلاتها بقسمٍ خاص (وآخرُ للبحث). قد تُكتب بلا اسم فتظهر «قناة @الاسم»، أو باسمٍ مخصص قبل الرابط: الاسم | الرابط"
                 dialogTitle = "قنوات يوتيوب إضافية"
-                dialogMessage = "ألصق رابط قناة أو معرّفها (UC… أو @handle) — رابطٌ واحد في كل سطر"
+                dialogMessage = "رابطٌ أو معرّفُ قناة في كل سطر:\n  https://youtube.com/@xxx\n  @xxx\n  UC…\n\nلتسمية القسم بنفسك اكتب الاسم، ثم | (فاصل)، ثم الرابط:\n  قناة القصص | https://youtube.com/@xxx\n\nاتركه فارغاً لسلوك اليوم تماماً."
                 setOnPreferenceChangeListener { _, newVal ->
                     (newVal as? String)?.isNotBlank() == false || newVal != null
                 }

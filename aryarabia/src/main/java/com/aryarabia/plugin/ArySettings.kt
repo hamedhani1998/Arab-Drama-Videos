@@ -68,6 +68,7 @@ class ArySettingsBottomSheet(private val prefs: SharedPreferences) : BottomSheet
         const val KEY_MAX_QUALITY = "ary_max_quality"         // "all" | "high"
         const val KEY_REDIRECT = "ary_use_redirect"           // Boolean بديل النطاق
         const val KEY_QUALITY_ORDER = "ary_quality_order"     // "default" | "asc" | "desc"
+        const val KEY_EXTRA_CHANNELS = "ary_extra_channels"  // أسطر: رابط قناة، أو «الاسم | الرابط»
 
         fun show(fm: FragmentManager, prefs: SharedPreferences) {
             ArySettingsBottomSheet(prefs).show(fm, "ary_settings")
@@ -85,6 +86,34 @@ class ArySettingsBottomSheet(private val prefs: SharedPreferences) : BottomSheet
             preferenceManager.setSharedPreferencesName(PREFS_NAME)
 
             preferenceScreen = preferenceManager.createPreferenceScreen(ctx)
+
+            // شرح الميزة في أول الورقة.
+            val intro = PreferenceCategory(ctx)
+            intro.title = "عن مصدر ARY العربية"
+            preferenceScreen.addPreference(intro)
+
+            val aboutPref = Preference(ctx).apply {
+                title = "قناة ARY يوتيوب + قنوات إضافية"
+                summary = "يعرض مسلسلات قناة ARY من قوائم يوتيوب (كاملة ومترجمة)، ويدعم إضافة قنواتٍ يوتيوب إضافية تظهر بقسمٍ خاص وتشملها نتائج البحث."
+                setSelectable(false)
+            }
+            intro.addPreference(aboutPref)
+
+            val channelsCategory = PreferenceCategory(ctx)
+            channelsCategory.title = "قنوات إضافية"
+            preferenceScreen.addPreference(channelsCategory)
+
+            val extraChannelPref = EditTextPreference(ctx).apply {
+                key = KEY_EXTRA_CHANNELS
+                title = "قنوات يوتيوب إضافية"
+                summary = "أضف قناةً لتظهر مسلسلاتها بقسمٍ خاص وضمن البحث. لتسمية القسم بنفسك اكتب الاسم ثم | ثم الرابط: الاسم | الرابط"
+                dialogTitle = "قنوات يوتيوب إضافية"
+                dialogMessage = "رابطٌ أو معرّفُ قناة في كل سطر:\n  https://youtube.com/@xxx\n  @xxx\n  UC…\n\nلتسمية القسم بنفسك اكتب الاسم ثم | ثم الرابط:\n  قناة القصص | https://youtube.com/@xxx\n\nاتركه فارغاً لسلوك اليوم تماماً."
+                setOnPreferenceChangeListener { _, newVal ->
+                    (newVal as? String)?.isNotBlank() == false || newVal != null
+                }
+            }
+            channelsCategory.addPreference(extraChannelPref)
 
             val playbackCategory = PreferenceCategory(ctx)
             playbackCategory.title = "خيارات التشغيل"
@@ -150,7 +179,7 @@ class ArySettingsBottomSheet(private val prefs: SharedPreferences) : BottomSheet
                 setOnPreferenceClickListener {
                     prefs.edit().apply {
                         remove(KEY_PLAYBACK_MODE); remove(KEY_MAX_QUALITY); remove(KEY_REDIRECT)
-                        remove(KEY_QUALITY_ORDER)
+                        remove(KEY_QUALITY_ORDER); remove(KEY_EXTRA_CHANNELS)
                     }.apply()
                     Toast.makeText(ctx, "تمت إعادة الضبط", Toast.LENGTH_SHORT).show()
                     true

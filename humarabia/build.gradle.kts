@@ -1,4 +1,4 @@
-version = 1
+version = 2
 
 cloudstream {
     description = "هم العربية (Hum TV) - مسلسلات باكستانية مترجمة (يوتيوب)"

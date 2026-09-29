@@ -4,6 +4,9 @@ import android.content.SharedPreferences
 import android.util.Log
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import org.json.JSONArray
 import org.json.JSONObject
@@ -77,6 +80,12 @@ class HumProvider(
 
         private val EP_NUM_RE = Regex("""حلقة\s*(\d+)""")
         private val FINALE_RE = Regex("""حلقة\s*(?:الأخيرة|الاخيرة|أخيرة|اخيرة)""")
+
+        /** «الجزء الأول/الثاني/…» — عندما تُقسَّم حلقةٌ إلى أجزاء. */
+        private val PART_RE = Regex(
+            """الجزء\s*([وأ_]?)(ال)?(?:الأول|الاول|الثاني|الثانى|الثاني|ثاني|الثالث|الرابع|الخامس|الأخير|الاخير|النهائى|النهائي|\d+)""",
+            RegexOption.IGNORE_CASE
+        )
     }
 
     override var name = "هم العربية"
@@ -272,6 +281,50 @@ class HumProvider(
     private fun episodeNumberOf(title: String): Int? =
         EP_NUM_RE.find(title)?.groupValues?.get(1)?.toIntOrNull()
 
+    /**
+     * رقم الجزء داخل الحلقة («الجزء الأول/الثاني/…») عند تقسيم حلقةٍ لأجزاء.
+     * القناة تقسم أحياناً الحلقة الأخيرة («الحلقة 31 الجزء الأول / الجزء
+     * الثاني والاخير»)، فيجب أن يحمل كلّ جزءٍ رقمَ حلقاتٍ مختلفاً وإلا
+     * تعارض الحلقتان برقمٍ واحد في التطبيق واختفى أحدهما. نعود 0 عند عدم
+     * وجود جزء.
+     */
+    private fun partNumberOf(title: String): Int {
+        val m = PART_RE.find(title) ?: return 0
+        val w = keyOf(m.value)          // قبل التوحيد: «الجزء»
+        return when {
+            w.contains("اول") -> 1
+            w.contains("ثان") || w.contains("ثانى") -> 2
+            w.contains("ثال") || w.contains("ثالث") -> 3
+            w.contains("رابع") -> 4
+            w.contains("خامس") -> 5
+            w.contains("اخير") -> 6      // «الجزء الأخير» بعد الأول
+            else -> {
+                // «الجزء 2»، «الجزء 02»
+                Regex("""\d+""").find(m.value)?.value?.toIntOrNull()?.takeIf { it in 1..50 } ?: 1
+            }
+        }
+    }
+
+    /** تنسيق الحلقة للعرض: «31» أو «الحلقة 31 - الجزء الأول». */
+    private fun episodeLabel(num: Int, title: String): String {
+        val part = partNumberOf(title)
+        val base = num.toString()
+        return when {
+            part <= 0 -> base
+            part == 1 -> "الحلقة $num"
+            else -> "$num (الجزء ${partNameOf(part)})"
+        }
+    }
+
+    private fun partNameOf(part: Int): String = when (part) {
+        1 -> "الأول"
+        2 -> "الثاني"
+        3 -> "الثالث"
+        4 -> "الرابع"
+        5 -> "الخامس"
+        else -> "الأخير"
+    }
+
     private fun isFinale(title: String): Boolean = FINALE_RE.containsMatchIn(title)
 
     private fun skipTitle(title: String): Boolean = SKIP_RE.containsMatchIn(title)
@@ -346,8 +399,13 @@ class HumProvider(
 
     private suspend fun builtinPlaylists(): List<PlaylistInfo> {
         cachedPlaylists?.let { return it }
-        val builtin =
-            channelPlaylists(playlistsUrl(CHANNEL_ID)) + channelPlaylists(playlistsUrl(CHANNEL_ID_2))
+        // نجلب القناتين المدمجتين بالتوازي، فترتّب الرئيسية عوض تتابعٍ
+        // يضاعف زمن الانتظار.
+        val builtin = coroutineScope {
+            listOf(CHANNEL_ID, CHANNEL_ID_2).map { id ->
+                async { channelPlaylists(playlistsUrl(id)) }
+            }.awaitAll().flatten()
+        }
         val byId = LinkedHashMap<String, PlaylistInfo>()
         for (p in builtin) byId[p.id] = p
         Log.d(TAG, "builtin playlists: ${byId.size}")
@@ -358,10 +416,11 @@ class HumProvider(
     /**
      * قنوات إضافية من الإعدادات (رابطٌ في كل سطر). كلٌّ منها يظهر بقسمٍ مستقل
      * في الرئيسية وتشملها نتائج البحث. الافتراضي (فارغ) = سلوك اليوم تماماً.
-     * الصيغ المقبولة لكل سطر:
-     *   - معرّف قناة صرف: `UC…` (24 حرفاً) → /channel/UC…/playlists
-     *   - رابط كامل يحوي `/channel/UC…` أو `/@handle`
-     *   - `@handle` وحده
+     *
+     * الصيغة المقبولة لكل سطر:
+     *   - رابط/معرّف قناة فقط: `UC…` أو `/channel/UC…` أو `/@handle` أو `@handle`
+     *     → الاسم يُشتق تلقائياً من الـ handle أو المعرّف.
+     *   - اسمٌ مخصص للقسم: `الاسم | الرابط` (كلٌّ منهما كما سبق).
      * لا تُسقط أيّ سطر فاشل بقية الأقسام ولا القناتين المدمجتين.
      */
     private data class ExtraChannel(val label: String, val url: String)
@@ -372,15 +431,30 @@ class HumProvider(
         if (raw.isEmpty()) return emptyList()
         val out = mutableListOf<ExtraChannel>()
         for (line in raw.lines()) {
-            val cid = Regex("""UC[\w-]{22}""").find(line)?.value
-            val handle = Regex("""@([\w.-]+)""").find(line)?.groupValues?.get(1)
+            val trimmed = line.trim()
+            if (trimmed.isEmpty()) continue
+            // اسمٌ مخصص اختياري: «الاسم | الرابط» — الشطر قبل | الاسم، وبعده الرابط.
+            var customName: String? = null
+            var rest = trimmed
+            val pipe = trimmed.split('|')
+            if (pipe.size >= 2) {
+                val a = pipe[0].trim()
+                val b = pipe.subList(1, pipe.size).joinToString("|").trim()
+                if (a.isNotEmpty() && (b.startsWith("http") || b.startsWith("UC") || b.startsWith("@") || b.contains("/channel/") || b.contains("youtube.com"))) {
+                    customName = a
+                    rest = b
+                }
+            }
+            val cid = Regex("""UC[\w-]{22}""").find(rest)?.value
+            val handle = Regex("""@([\w.-]+)""").find(rest)?.groupValues?.get(1)
             val url = when {
                 cid != null -> playlistsUrl(cid)
                 handle != null -> "https://www.youtube.com/@$handle/playlists"
                 else -> null
             }
             if (url != null) {
-                val label = handle?.let { "@$it" } ?: cid ?: ""
+                // الاسم المخصص يغلب الاسم المشتق تلقائياً.
+                val label = customName ?: (handle?.let { "@$it" } ?: cid ?: "")
                 if (out.none { it.url == url }) out.add(ExtraChannel(label, url))
             }
         }
@@ -391,9 +465,22 @@ class HumProvider(
     private suspend fun allPlaylists(): List<PlaylistInfo> {
         val byId = LinkedHashMap<String, PlaylistInfo>()
         for (p in builtinPlaylists()) byId[p.id] = p
-        for (extra in extraChannels()) {
-            for (p in channelPlaylists(extra.url)) {
-                if (p.id !in byId) byId[p.id] = p
+        val extras = extraChannels()
+        if (extras.isNotEmpty()) {
+            // نجلب القنوات الإضافية بالتوازي (أسرع من التتابع).
+            coroutineScope {
+                extras.map { extra ->
+                    async {
+                        try {
+                            channelPlaylists(extra.url)
+                        } catch (e: Exception) {
+                            Log.w(TAG, "extra channel '${extra.label}' failed: ${e.message}")
+                            emptyList()
+                        }
+                    }
+                }.awaitAll().forEach { pls ->
+                    for (p in pls) if (p.id !in byId) byId[p.id] = p
+                }
             }
         }
         return byId.values.toList()
@@ -433,7 +520,42 @@ class HumProvider(
         if (finale != null) { numbered.add((next) to finale); next += 1 }
         for (l in extras)
             numbered.add((next++) to l)
-        return numbered.distinctBy { it.second.id }.sortedBy { it.first }
+        return distinctEpisodes(numbered)
+    }
+
+    /**
+     * عندما تُقسَّم حلقةٌ لعدة أجزاء (كلّها برقمٍ واحد «الحلقة 31 الجزء
+     * الأول/الثاني») تتعارض برقمٍ واحد في التطبيق فيسقط أحدها. نمنح كلّ
+     * عنصرٍ رقماً مختلفاً يحافظ على الترتيب: أوّلُ ما يُعرض ضمن رقم الحلقة
+     * يأخذ الرقم نفسه، والتالون يأخذون الأرقام اللاحقة الشاغرة (n+1, n+2…).
+     * تُرتَّب الأجزاء بترتيب رقم الجزء (الأول قبل الثاني) ثم الناتج تصاعدياً.
+     */
+    private fun distinctEpisodes(all: List<Pair<Int, Lockup>>): List<Pair<Int, Lockup>> {
+        // نفس الفيديو قد يُتكرر في القائمة — نُبقي أول ظهور فقط (كما كان سابقاً).
+        val eps = all.distinctBy { it.second.id }
+
+        // جمّع العناصر المتشاركة في رقم الحلقة نفسه (مثل «الحلقة 31» بأجزائها).
+        val byBase = LinkedHashMap<Int, MutableList<Lockup>>()
+        for ((n, l) in eps) byBase.getOrPut(n) { mutableListOf() }.add(l)
+
+        val used = HashSet<Int>()
+        val out = mutableListOf<Pair<Int, Lockup>>()
+
+        for ((base, group) in byBase) {
+            // الحلقات المفردة (بلا جزأ) أولاً، ثم الأجزاء بترتيب رقمها
+            // (الأول قبل الثاني قبل الأخير).
+            val ordered = group.sortedWith(
+                compareBy({ partNumberOf(it.title) == 0 }, { partNumberOf(it.title) })
+            )
+            var slot = base
+            for (l in ordered) {
+                while (slot in used) slot += 1      // تجاوز الأرقام المشغولة
+                out.add(slot to l)
+                used.add(slot)
+                slot += 1
+            }
+        }
+        return out.sortedBy { it.first }
     }
 
     // ============================== main page ==============================
@@ -443,13 +565,27 @@ class HumProvider(
         val lists = mutableListOf<HomePageList>()
 
         // صف القناتين المدمجتين أولاً.
-        homeFrom(builtinPlaylists(), "مسلسلات هم العربية", lists)
+        val builtin = builtinPlaylists()
+        homeFrom(builtin, "مسلسلات هم العربية", lists)
 
-        // ثم صفٌّ مستقل لكل قناة إضافية (لا نعيد عرضَ ما سبق ظهوره).
-        val seen = seenKeys(builtinPlaylists())
-        for (extra in extraChannels()) {
-            val pls = channelPlaylists(extra.url).filter { seen.add(keyOf(it.title)) }
-            homeFrom(pls, "قناة ${extra.label}", lists)
+        // ثم صفٌّ مستقل لكل قناة إضافية (تُجلب بالتوازي؛ لا نعيد ما سبق عرضه).
+        val seen = seenKeys(builtin)
+        val extras = extraChannels()
+        if (extras.isNotEmpty()) {
+            coroutineScope {
+                extras.map { extra ->
+                    async {
+                        try {
+                            channelPlaylists(extra.url).filter { seen.add(keyOf(it.title)) } to extra
+                        } catch (e: Exception) {
+                            Log.w(TAG, "extra channel '${extra.label}' failed: ${e.message}")
+                            emptyList<PlaylistInfo>() to extra
+                        }
+                    }
+                }.awaitAll().forEach { (pls, extra) ->
+                    homeFrom(pls, "قناة ${extra.label}", lists)
+                }
+            }
         }
         return newHomePageResponse(lists)
     }
@@ -553,7 +689,7 @@ class HumProvider(
 
         val episodes = eps.map { (num, l) ->
             newEpisode("https://www.youtube.com/watch?v=${l.id}") {
-                this.name = l.title.ifBlank { "الحلقة $num" }
+                this.name = episodeLabel(num, l.title).ifBlank { "الحلقة $num" }
                 this.episode = num
                 this.posterUrl = l.thumb ?: posterOf(l.id)
             }

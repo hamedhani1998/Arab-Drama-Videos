@@ -4,6 +4,9 @@ import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
 import android.content.SharedPreferences
 import android.util.Log
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import org.json.JSONArray
 import org.json.JSONObject
@@ -107,6 +110,12 @@ class AryProvider(
          */
         private val EP_NUM_RE = Regex("""حلقة\s*(\d+)""")
         private val FINALE_RE = Regex("""حلقة\s*(?:الأخيرة|الاخيرة|أخيرة|اخيرة)""")
+
+        /** «الجزء الأول/الثاني/…» — عندما تُقسَّم حلقةٌ إلى أجزاء. */
+        private val PART_RE = Regex(
+            """الجزء\s*([وأ_]?)(ال)?(?:الأول|الاول|الثاني|الثانى|الثالث|الرابع|الخامس|الأخير|الاخير|النهائى|النهائي|\d+)""",
+            RegexOption.IGNORE_CASE
+        )
     }
 
     override var name = "ARY العربية"
@@ -346,6 +355,43 @@ class AryProvider(
 
     private fun skipTitle(title: String): Boolean = SKIP_RE.containsMatchIn(title)
 
+    /** رقم الجزء داخل الحلقة («الجزء الأول/الثاني/…») عند تقسيم حلقةٍ لأجزاء.
+     *   القناة تقسم أحياناً الحلقة الأخيرة («31 الجزء الأول / الجزء الثاني»)،
+     *   فيتعارض الجزءان برقمٍ واحد في التطبيق ويختفي أحدهما. نعيد 0 دون جزء. */
+    private fun partNumberOf(title: String): Int {
+        val m = PART_RE.find(title) ?: return 0
+        val w = keyOf(m.value)          // توحيد الهمزات: «الجزء»
+        return when {
+            w.contains("اول") -> 1
+            w.contains("ثان") || w.contains("ثانى") -> 2
+            w.contains("ثال") || w.contains("ثالث") -> 3
+            w.contains("رابع") -> 4
+            w.contains("خامس") -> 5
+            w.contains("اخير") -> 6      // «الجزء الأخير» بعد الأول
+            else -> Regex("""\d+""").find(m.value)?.value?.toIntOrNull()?.takeIf { it in 1..50 } ?: 1
+        }
+    }
+
+    /** تنسيق الحلقة للعرض: «31» أو «الحلقة 31 - الجزء الأول». */
+    private fun episodeLabel(num: Int, title: String): String {
+        val part = partNumberOf(title)
+        val base = num.toString()
+        return when {
+            part <= 0 -> base
+            part == 1 -> "الحلقة $num"
+            else -> "$num (الجزء ${partNameOf(part)})"
+        }
+    }
+
+    private fun partNameOf(part: Int): String = when (part) {
+        1 -> "الأول"
+        2 -> "الثاني"
+        3 -> "الثالث"
+        4 -> "الرابع"
+        5 -> "الخامس"
+        else -> "الأخير"
+    }
+
     /** «مسلسل نهاية قلبي» و«نهاية قلبي | ARY» كلاهما «نهاية قلبي». */
     private fun bareName(title: String): String {
         var t = clean(title).replace(Regex("""\s+"""), " ")
@@ -412,31 +458,68 @@ class AryProvider(
         val count: Int = 0
     )
 
+    // ============================== extra channels ==============================
+
     /**
-     * كل قوائم القناة: صفحة tab «قوائم التشغيل» الجاهزة تعرض أول 30،
-     * ثم نتابع بطلب صفحة ثانية لاسترداد الباقي (القناة عندها ~54 قائمة).
-     * قائمة شبه ثابتة، فتُحفظ في الذاكرة وتخدم الصفحة الرئيسية والبحث معاً.
+     * قنوات إضافية من إعدادات المصدر (رابطٌ في كل سطر). كلٌّ منها يظهر بقسمٍ
+     * مستقل في الرئيسية وتشملها نتائج البحث، دون تغيير قنوات ARY الأساسية.
+     * الافتراضي (فارغ) = سلوك اليوم تماماً.
+     *
+     * الصيغة المقبولة لكل سطر:
+     *   - رابط/معرّف قناة فقط: `UC…` أو `/channel/UC…` أو `/@handle` أو `@handle`
+     *     → الاسم يُشتق تلقائياً من الـ handle أو المعرّف.
+     *   - اسمٌ مخصص: `الاسم | الرابط`.
      */
-    @Volatile
-    private var cachedPlaylists: List<PlaylistInfo>? = null
+    private data class ExtraChannel(val label: String, val url: String)
 
-    private suspend fun allPlaylists(): List<PlaylistInfo> {
-        cachedPlaylists?.let { return it }
+    private fun extraChannels(): List<ExtraChannel> {
+        val raw = prefs?.getString(ArySettingsBottomSheet.KEY_EXTRA_CHANNELS, "")
+            ?.trim().orEmpty()
+        if (raw.isEmpty()) return emptyList()
+        val out = mutableListOf<ExtraChannel>()
+        for (line in raw.lines()) {
+            val trimmed = line.trim()
+            if (trimmed.isEmpty()) continue
+            var customName: String? = null
+            var rest = trimmed
+            val pipe = trimmed.split('|')
+            if (pipe.size >= 2) {
+                val a = pipe[0].trim()
+                val b = pipe.subList(1, pipe.size).joinToString("|").trim()
+                if (a.isNotEmpty() && (b.startsWith("http") || b.startsWith("UC") || b.startsWith("@") || b.contains("/channel/") || b.contains("youtube.com"))) {
+                    customName = a
+                    rest = b
+                }
+            }
+            val cid = Regex("""UC[\w-]{22}""").find(rest)?.value
+            val handle = Regex("""@([\w.-]+)""").find(rest)?.groupValues?.get(1)
+            val url = when {
+                cid != null -> "https://www.youtube.com/channel/$cid/playlists"
+                handle != null -> "https://www.youtube.com/@$handle/playlists"
+                else -> null
+            }
+            if (url != null) {
+                val label = customName ?: (handle?.let { "@$it" } ?: cid ?: "")
+                if (out.none { it.url == url }) out.add(ExtraChannel(label, url))
+            }
+        }
+        return out
+    }
 
+    /**
+     * قوائم قناةٍ ما: صفحة tab «قوائم التشغيل» تعرض أول 30، ثم نتابع بطلب
+     * صفحة ثانية لاسترداد الباقي. تُستخدم للقناة الأساسية والقنوات الإضافية.
+     * إن فشلت الصفحة الثانية نحتفظ بالأولى.
+     */
+    private suspend fun channelPlaylists(url: String): List<PlaylistInfo> {
         val out = mutableListOf<PlaylistInfo>()
         try {
-            // الصفحة الأولى: GET على HTML — الطريق الأسرع والأقل عرضة للرفض.
-            // المسلسلات الجديدة/القادمة قد تُنشر كنوع SHOW (مثل «مسلسل الغيرة»)
-            // وليس PLAYLIST — نقبَل النوعين كليهما.
-            val first = fetchInitialData(PLAYLISTS_URL)
+            val first = fetchInitialData(url)
             for (l in lockupsOf(first)) {
                 if (!isPlaylistOrShow(l.type)) continue
                 if (out.any { it.id == l.id }) continue
                 out.add(PlaylistInfo(l.id, l.title, l.thumb, l.count))
             }
-
-            // الصفحة الثانية: POST عبر InnerTube فقط (الـ GET لا يقلّبها).
-            // إن فشل نحتفظ بالصفحة الأولى — لا نُسقط كل القوائم.
             val token = continuationTokenOf(first)
             val second = token?.let { continuationPage(it) }
             if (second != null) {
@@ -449,8 +532,45 @@ class AryProvider(
         } catch (e: Exception) {
             Log.e(TAG, "playlists tab failed: ${e.message}")
         }
+        return out
+    }
 
-        Log.d(TAG, "playlists: ${out.size}")
+    /**
+     * كل قوائم المصدر: قناة ARY الأساسية + القنوات الإضافية (تُجلب بالتوازي
+     * للسرعة). القائمة شبه ثابتة فتُحفظ في الذاكرة وتخدم الرئيسية والبحث.
+     */
+    @Volatile
+    private var cachedPlaylists: List<PlaylistInfo>? = null
+
+    private suspend fun allPlaylists(): List<PlaylistInfo> {
+        cachedPlaylists?.let { return it }
+
+        val byId = LinkedHashMap<String, PlaylistInfo>()
+
+        // الأساسية: قناة ARY.
+        for (p in channelPlaylists(PLAYLISTS_URL)) byId[p.id] = p
+
+        // الإضافية: بالتوازي، دون تكرار قائمةٍ في أكثر من قناة.
+        val extras = extraChannels()
+        if (extras.isNotEmpty()) {
+            coroutineScope {
+                extras.map { extra ->
+                    async {
+                        try {
+                            channelPlaylists(extra.url)
+                        } catch (e: Exception) {
+                            Log.w(TAG, "extra channel '${extra.label}' failed: ${e.message}")
+                            emptyList()
+                        }
+                    }
+                }.awaitAll().forEach { pls ->
+                    for (p in pls) if (p.id !in byId) byId[p.id] = p
+                }
+            }
+        }
+
+        Log.d(TAG, "playlists: ${byId.size}")
+        val out = byId.values.toList()
         if (out.isNotEmpty()) cachedPlaylists = out
         return out
     }
@@ -494,7 +614,31 @@ class AryProvider(
         if (finale != null) { numbered.add((next) to finale); next += 1 }
         for (l in extras)
             numbered.add((next++) to l)
-        return numbered.distinctBy { it.second.id }.sortedBy { it.first }
+        return distinctEpisodes(numbered)
+    }
+
+    /** يفصل أجزاءَ الحلقة الواحدة بأرقامٍ مختلفة — انظر comment في episodesOf. */
+    private fun distinctEpisodes(all: List<Pair<Int, Lockup>>): List<Pair<Int, Lockup>> {
+        val eps = all.distinctBy { it.second.id }
+        val byBase = LinkedHashMap<Int, MutableList<Lockup>>()
+        for ((n, l) in eps) byBase.getOrPut(n) { mutableListOf() }.add(l)
+
+        val used = HashSet<Int>()
+        val out = mutableListOf<Pair<Int, Lockup>>()
+
+        for ((base, group) in byBase) {
+            val ordered = group.sortedWith(
+                compareBy({ partNumberOf(it.title) == 0 }, { partNumberOf(it.title) })
+            )
+            var slot = base
+            for (l in ordered) {
+                while (slot in used) slot += 1
+                out.add(slot to l)
+                used.add(slot)
+                slot += 1
+            }
+        }
+        return out.sortedBy { it.first }
     }
 
     // ============================== main page ==============================
@@ -511,17 +655,40 @@ class AryProvider(
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
         if (page > 1) return newHomePageResponse(emptyList())
         val lists = mutableListOf<HomePageList>()
-        homeFrom(allPlaylists(), lists)
+        val playlists = allPlaylists()
+        homeFrom(playlists, lists)
+
+        // صفٌّ مستقل لكل قناة إضافية (بالتوازي سرعةً؛ لا نكرر مسلسلات ARY).
+        val extras = extraChannels()
+        if (extras.isNotEmpty()) {
+            val aryIds = playlists.map { it.id }.toSet()
+            coroutineScope {
+                extras.map { extra ->
+                    async {
+                        val pls = try {
+                            channelPlaylists(extra.url).filter { it.id !in aryIds }
+                        } catch (e: Exception) {
+                            Log.w(TAG, "extra channel '${extra.label}' failed: ${e.message}")
+                            emptyList()
+                        }
+                        pls to extra
+                    }
+                }.awaitAll().forEach { (pls, extra) ->
+                    homeFromTitled(pls, "قناة ${extra.label}", lists)
+                }
+            }
+        }
         return newHomePageResponse(lists)
     }
 
-    /**
-     * صف المسلسلات (بعد إزالة الملحقات العامة)، ثم صف «إعلانات المسلسلات
-     * وتشويقاتها» بعدها. إعلان المسلسل له قائمة مستقلة (قد تتجاوز الحلقات
-     * نفسها عدداً)، وتحمل عنواناً مميزاً «إعلان ترويجي / تشويقي»، فلا
-     * يختلط بمجموعة `dedupe` الخاصة بالمسلسل.
-     */
-    private fun homeFrom(playlists: List<PlaylistInfo>, lists: MutableList<HomePageList>) {
+    /** نسخة مُسمّاة لصنف قناةٍ إضافية: تستدعي homeFrom بعنوان مخصص. */
+    private fun homeFromTitled(
+        playlists: List<PlaylistInfo>,
+        rowTitle: String,
+        lists: MutableList<HomePageList>
+    ) = homeFrom(playlists, lists, rowTitle)
+
+    private fun homeFrom(playlists: List<PlaylistInfo>, lists: MutableList<HomePageList>, rowTitle: String = "مسلسلات ARY العربية") {
         val series = dedupe(playlists.filter { !isPromo(it.title) })
         val cards = series.map { p ->
             newTvSeriesSearchResponse(bareName(p.title), playlistUrl(p.id)) {
@@ -529,7 +696,7 @@ class AryProvider(
             }
         }
         if (cards.isNotEmpty())
-            lists.add(HomePageList("مسلسلات ARY العربية", cards))
+            lists.add(HomePageList(rowTitle, cards))
 
         // إعلان المسلسل قد يكون «ترويجياً» و«تشويقياً» في آنٍ — كلاهما قائمة
         // مستقلة يريد المستخدم رؤيتها، فلا ندمجهما (`dedupe` يوحّد اسميهما).
@@ -666,7 +833,7 @@ class AryProvider(
             // الحلقة تُمرّر عبر link حقيقي لكي لا يلصق fixUrl عليه mainUrl
             // (مثل ary://pl/ تماماً)، وloadLinks يقبل الرابط أو المعرّف النقي.
             newEpisode("https://www.youtube.com/watch?v=${l.id}") {
-                this.name = l.title.ifBlank { "الحلقة $num" }
+                this.name = episodeLabel(num, l.title).ifBlank { "الحلقة $num" }
                 this.episode = num
                 this.posterUrl = l.thumb ?: posterOf(l.id)
             }
