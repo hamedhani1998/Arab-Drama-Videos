@@ -6,14 +6,17 @@ import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.GlobalScope
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeoutOrNull
 import org.json.JSONArray
 import org.json.JSONObject
 import org.schabi.newpipe.extractor.ServiceList
 import org.schabi.newpipe.extractor.services.youtube.extractors.YoutubeStreamExtractor
 import org.schabi.newpipe.extractor.services.youtube.linkHandler.YoutubeStreamLinkHandlerFactory
-import java.net.URLEncoder
 
 /**
  * «دراما قصيرة» — اثنتا عشرة قناة يوتيوب مدبلجة/مترجمة، ونفس نمط مصدر ARY
@@ -45,10 +48,12 @@ import java.net.URLEncoder
  * حلقة واحدة. فنُرقّم بترتيب القائمة كما نشرها الناشر — وهو نفس الترتيب
  * الذي تعتمده يوتيوب أصلاً، والأصحّ في كل الحالتين.
  *
- * **4) الجلب مسلسّ لا متوازٍ.** ARY قناة واحدة طلبان. هنا 12 قناة = ~24
- * طلباً. متوازياً يردّ يوتيوب صفر قوائم بسهولة تحت الضغط (وهو ما أبطأ ARY
- * وخدم سابقاً)، والنتيجة تُخزَّن خمس دقائق، والمستخدم لا يفتح الإضافة مرة
- * ثانية ليؤكد. فالتسلسل هنا أمانٌ لا بطء.
+ * **4) الجلب على دفعاتٍ مقتصرة، لا دفعةً واحدة ولا تسلسلاً تاماً.**
+ * ARY قناة واحدة طلبان. هنا 12 قناة = ~24 طلباً. دفعةً واحدة يردّ يوتيوب
+ * صفر قوائم بسهولة تحت الضغط، وتسلسلاً تاماً تتأخر الصفحة الرئيسة إلى ما
+ * بعد نصف دقيقة. فنجلب أربعاً في اللحظة، ولكل قناة سقفٌ زمني، ولكل الصفحة
+ * ميزانيةٌ تُعيد ما وصل عندها. (انظر `FETCH_BATCH` و`CHANNEL_TIMEOUT_MS`
+ * و`HOME_BUDGET_MS`.)
  */
 class ShortDramaProvider(
     private val prefs: SharedPreferences? = null
@@ -59,15 +64,12 @@ class ShortDramaProvider(
         prefs?.getString(ShortDramaSettings.KEY_PLAYBACK_MODE, "newpipe") ?: "newpipe"
 
     /**
-     * لغة الترجمة المطلوبة، أو `SUB_LANG_AUTO` للترجمة التلقائية بلا طلبٍ
-     * إضافي (وهو السلوك الافتراضي).
+     * أي ملف صوتي مع كل جودة.
+     *
+     * ★ لا إعدادَ لهذا: حُذف «الملف الصوتي» من إعدادات ARY مع قسم الترجمة
+     * والصوت، فصار الاختيار داخلياً — أعلى بت/ث متوافق.
      */
-    private fun subLanguage(): String =
-        prefs?.getString(ShortDramaSettings.KEY_SUB_LANG, SUB_LANG_AUTO) ?: SUB_LANG_AUTO
-
-    /** أي ملف صوتي مع كل جودة ("best" الافتراضي = أعلى بت/ث متوافق). */
-    private fun audioPref(): String =
-        prefs?.getString(ShortDramaSettings.KEY_AUDIO_PREF, "best") ?: "best"
+    private fun audioPref(): String = "best"
 
     /** يستخرج كوديك حقيقي من mimeType («video/mp4; codecs="avc1.640028"») إن وُجد. */
     private fun codecFromMime(mime: String?): String? {
@@ -126,14 +128,6 @@ class ShortDramaProvider(
                 "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
 
         private const val BOM = "﻿"
-
-        /**
-         * القيمة الافتراضية لـ«لغة الترجمة»: بلا `tlang`، أي بلا طلبٍ
-         * إضافي — السلوك نفسه تماماً كما في ARY. الفرق دلاليّ فقط: القنوات
-         * هنا **مدبلجة**، فالعربية التلقائية هي **الصوت الأصلي** لا ترجمة،
-         * ولهذا عُرفت في الإعدادات بـ«مصهر (تلقائي)» لا «العربية».
-         */
-        private const val SUB_LANG_AUTO = "auto"
 
         /**
          * إعلانات وتشويقات المسلسلات — صفٌّ منفصل، مطابق لما يفعله ARY.
@@ -597,7 +591,76 @@ class ShortDramaProvider(
      */
     private val FRESH_MS = 5 * 60 * 1000L
 
-    /** جلبٌ واحد لكل قناة: الاثنتا عشرة المدمجة ثم إضافات المستخدم، مسلسّلة. */
+    /**
+     * سقف زمني لقناةٍ واحدة.
+     *
+     * كان نداء الصفحة الرئيسية ينتظر 12 قناة × طلبين (~24 طلباً) **بالكامل**
+     * قبل أن يُظهر شيئاً، فكانت الصفحة «تأخّر» كل مرة، وأسوأ: قناةٌ واحدة
+     * بطيئة كانت تجمّدها دقيقةً كاملة. ARY قناةٌ واحدة فلم يظهر عنده هذا.
+     * القطع عند هذا الحد يجعل الأسوأ انتظاراً محدوداً: القناة البطيئة
+     * تُتخطّى وتُحاول لاحقاً (انظر `failed` في `SourceLists`).
+     */
+    private val CHANNEL_TIMEOUT_MS = 12_000L
+
+    /**
+     * كم قناة نجلبها في اللحظة الواحدة.
+     *
+     * 12 دفعةً واحدة = ضغطٌ على يوتيوب يعيد صفر قوائم (وهو ما دفعنا
+     * للتسلسل أصلاً)، و2 لكل دفعة = 6 أدوار تسلسلية. أربعٌ توازن بينهما.
+     */
+    private val FETCH_BATCH = 4
+
+    /**
+     * ميزانية الصفحة الرئيسية كلّها.
+     *
+     * سقف القناة (12 ث) × ثلاث دفعات = 36 ث أسوأ حالة، وهذا ما زال
+     * «تأخّراً» يقنع المستخدم أن التطبيق معلّق. فبعد هذه الميزانية
+     * **نُعيد ما وصل** ونترك الباقي للدفعة التالية: الصف يظهر بما في
+     * يده فوراً، والقنوات المتبقية تظهر عند التحديث التالي.
+     */
+    private val HOME_BUDGET_MS = 22_000L
+
+    /**
+     * قوائم مجموعة قنوات: `url -> null` يعني «لم تصل» (فشل أو تجاوز
+     * السقف الزمني أو تجاوز الميزانية)، والفرق بين الفشل والنجاح مقصود:
+     * الفشل يُعاد محاولته لاحقاً، ولا يُثبَّت فراغاً أبداً.
+     */
+    private suspend fun fetchChannels(
+        targets: List<Pair<String, String>>
+    ): Map<String, List<PlaylistInfo>?> = coroutineScope {
+        val out = HashMap<String, List<PlaylistInfo>?>()
+        val startedAt = System.currentTimeMillis()
+
+        // دفعات: متوازٍ داخلها، تسلسلي بينها.
+        for (batch in targets.chunked(FETCH_BATCH)) {
+            // تجاوزنا الميزانية: ما لم يُجلب بعد يُبقى `null` = يُعاد لاحقاً.
+            if (System.currentTimeMillis() - startedAt > HOME_BUDGET_MS) {
+                Log.w(
+                    TAG,
+                    "home budget spent after ${batch.firstOrNull()?.first ?: "?"} — " +
+                        "deferring ${targets.size - out.size} channel(s)"
+                )
+                break
+            }
+            batch.map { (label, url) ->
+                async {
+                    val pls = withTimeoutOrNull(CHANNEL_TIMEOUT_MS) {
+                        try {
+                            channelPlaylists(url)
+                        } catch (e: Exception) {
+                            Log.w(TAG, "'$label' failed: ${e.message}")
+                            null
+                        }
+                    }
+                    if (pls == null) Log.w(TAG, "no playlists from '$label'")
+                    url to pls
+                }
+            }.awaitAll().forEach { (url, pls) -> out[url] = pls }
+        }
+        out
+    }
+
+    /** جلبٌ واحد لكل قناة: الاثنتا عشرة المدمجة ثم إضافات المستخدم. */
     private suspend fun loadSourceLists(): SourceLists {
         val extras = extraChannels()
         val builtin = mutableListOf<PlaylistInfo>()
@@ -605,33 +668,15 @@ class ShortDramaProvider(
         val failed = mutableSetOf<String>()
         val seen = HashSet<String>()
 
-        // القنوات المدمجة — كلٌّ منها طلب مستقل، فشلُ واحدة لا يمسّ الباقي.
-        for ((label, url) in BASE_CHANNELS) {
-            val pls = try {
-                channelPlaylists(url)
-            } catch (e: Exception) {
-                Log.w(TAG, "channel '$label' failed: ${e.message}")
-                null
-            }
-            if (pls == null) {
-                failed.add(url)
-            } else {
-                for (p in pls) if (seen.add(p.id)) builtin.add(p)
-            }
-        }
+        val results = fetchChannels(BASE_CHANNELS + extras.map { it.label to it.url })
 
+        for ((_, url) in BASE_CHANNELS) {
+            val pls = results[url]
+            if (pls == null) failed.add(url) else for (p in pls) if (seen.add(p.id)) builtin.add(p)
+        }
         for (ch in extras) {
-            val pls = try {
-                channelPlaylists(ch.url)
-            } catch (e: Exception) {
-                Log.w(TAG, "extra '${ch.label}' failed: ${e.message}")
-                null
-            }
-            if (pls == null) {
-                failed.add(ch.url)
-            } else {
-                for (p in pls) if (seen.add(p.id)) extra.add(p)
-            }
+            val pls = results[ch.url]
+            if (pls == null) failed.add(ch.url) else for (p in pls) if (seen.add(p.id)) extra.add(p)
         }
 
         return SourceLists(builtin + extra, builtin, extra, failed)
@@ -850,8 +895,15 @@ class ShortDramaProvider(
 
         val episodes = eps.map { (num, l) ->
             // الحلقة تُمرّر عبر رابط حقيقي لكي لا يلصق fixUrl عليه mainUrl.
+            //
+            // ★ ااسم الحلقة: عنوان الفيديو (كما نشره الناشر) مع الرقم
+            //   الترتيبي كتمييز. القنوات هنا لا تكتب أرقام في العناوين (انظر
+            //   تعليق الصنف)، فعنوان الفيديو هو ما يميز هذه الحلقة عن غيرها
+            //   من نفس DVR. بدونه تظهر كل الحلقات "الحلقة 1/2/3…" بلا
+            //   فرق، في难 يميزها. فنضع الرقم أولاً ثم الاسم.
+            val title = clean(l.title).ifBlank { "الحلقة $num" }
             newEpisode("https://www.youtube.com/watch?v=${l.id}") {
-                this.name = "الحلقة $num"
+                this.name = "$num - $title"
                 this.episode = num
                 this.posterUrl = l.thumb ?: posterOf(l.id)
             }
@@ -949,12 +1001,17 @@ class ShortDramaProvider(
     }
 
     /**
-     * يصدّر ترجمةً واحدةً للمشغّل.
+     * يصدّر ترجمةً واحدةً للمشغّل — تلقائياً، بلا إعداد (مطابق لـ ARY بعد
+     * حذفه لقسم «الترجمة والصوت»).
      *
      * يوتيوب ينشر على هذه القنوات مسار ترجمةٍ واحداً أو بلا مسار إطلاقاً
      * (المدبلج عربي أصلي)، ويترك الباقي **غير منشور**: يوتيوب يولّدها عند
      * الطلب عبر معامل `tlang` على رابط `timedtext` الموقَّع. ولهذا بنينا
      * الجلب على `timedtext` مباشرةً لا على `getSubtitlesDefault()`.
+     *
+     * 1) الأصلية أولاً: رابط يوتيوب يُسلَّم للمشغّل مباشرةً بلا شرط نجاح
+     *    جلب — فتبقى ظاهرة في القائمة دائماً ولو ردّ يوتيوب فارغاً لها.
+     * 2) ثم العربية عبر `tlang` — تلقائياً بلا اختيار من المستخدم.
      *
      * الجلب عبر `HttpURLConnection` (HTTP/1.1) لا عبر `app.get`، لسبب
      * موثّق في `ShortDramaSubServer`: مكدّس يوتيوب يقتل بعض الطلبات على
@@ -975,33 +1032,35 @@ class ShortDramaProvider(
             // ثلاثاً في قائمة المشغّل.
             if (subsEmittedFor.putIfAbsent(vid, true) != null) return
 
-            val track = runCatching { extractor.subtitlesDefault }
-                .getOrNull()?.filterNotNull()?.firstOrNull() ?: return
-            val base = track.url?.takeIf { it.isNotBlank() } ?: return
+            val tracks = runCatching { extractor.subtitlesDefault }
+                .getOrNull()?.filterNotNull() ?: return
+            if (tracks.isEmpty()) return
 
-            val wanted = subLanguage()
-            val shown = if (wanted == SUB_LANG_AUTO) "ar" else wanted
-            // `fmt=vtt` يجعل يوتيوب يعيد WebVTT مباشرةً. و`tlang` هو
-            // ما يولّد الترجمة بلغة أخرى — يوتيوب لا ينشرها محسوبة.
-            val url = buildString {
-                append(base)
-                append("&fmt=vtt")
-                if (wanted != SUB_LANG_AUTO) {
-                    append("&tlang=")
-                    append(URLEncoder.encode(wanted, "UTF-8"))
-                }
+            // 1) الأصلية — كما في ARY تماماً.
+            val original = tracks.firstOrNull { !it.url.isNullOrBlank() }
+            if (original != null) {
+                subtitleCallback(
+                    newSubtitleFile(original.locale?.language ?: "ar", original.url!!) {
+                        this.headers = mapOf("Referer" to "https://www.youtube.com/")
+                    }
+                )
             }
 
-            val text = fetchSubtitleText(url, "https://www.youtube.com/watch?v=$vid")
+            // 2) ثم العربية التلقائية. يوتيوب لا ينشرها، فتُولَّد عند الطلب.
+            val base = original?.url?.takeIf { it.isNotBlank() } ?: return
+            val text = fetchSubtitleText(
+                "$base&fmt=vtt&tlang=ar",
+                "https://www.youtube.com/watch?v=$vid"
+            )
             if (text.isBlank()) return
 
             val local = ShortDramaSubServer.register(text) ?: return
             subtitleCallback(
-                newSubtitleFile(shown, local) {
+                newSubtitleFile("ar", local) {
                     this.headers = mapOf("Referer" to "https://www.youtube.com/")
                 }
             )
-            Log.d(TAG, "$vid subtitle ok lang=$shown bytes=${text.length}")
+            Log.d(TAG, "$vid subtitle ok lang=ar bytes=${text.length}")
         } catch (e: Exception) {
             Log.w(TAG, "$vid subtitle skipped: ${e.message}")
         }

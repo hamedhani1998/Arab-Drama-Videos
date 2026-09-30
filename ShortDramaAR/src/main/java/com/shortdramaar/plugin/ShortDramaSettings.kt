@@ -25,10 +25,19 @@ import com.google.android.material.bottomsheet.BottomSheetDialogFragment
  * مفتوحة تُقرأ مباشرةً بلا تخزين مركزي، تماماً كما في ARY، فيلتقطها
  * `ShortDramaProvider` عند كل تشغيل.
  *
- * ★ مزامنة مع ARY: الاختلاف الوحيد المتبقي هو **بادئة المفاتيح** (`sd_`
- * بدل `ary_`) واسم ملف التفضيلات (`SHORTDRAMA` بدل `ARY`) — وإلا لاطّلقت
- * الإضافتان على نفس الإعدادات وتغيّر سلوك ARY بلا قصد. أما ما يراه
- * المستخدم في الورقة فيتطابق سطراً بسطر مع ورقة ARY.
+ * ★ مزامنة مع ARY (تحديث v15 وما بعده): حُذف قسم «الترجمة والصوت» من إعدادات
+ * ARY — لا «لغة الترجمة» ولا «الملف الصوتي» ولا قائمة اللغات. وقسم
+ * «قنوات إضافية» صار يستقبل **المدمجَ والإضافي معاً** («كل القنوات
+ * (المدمجة والمضافة) تظهر في قسمٍ واحد»). فما تراه هنا هو ما في ورقة ARY
+ * اليوم سطراً بسطر.
+ *
+ * الاختلاف الوحيد المتبقي هو **بادئة المفاتيح** (`sd_` بدل `ary_`) واسم
+ * ملف التفضيلات (`SHORTDRAMA` بدل `ARY`) — وإلا لاطّلقت الإضافتان على
+ * نفس الإعدادات فتغيّر سلوك ARY بلا قصد.
+ *
+ * الترجمة: تُصدَر تلقائياً بلا اختيار (العربية أو الأصلية كما يوفّرها
+ * يوتيوب) — انظر `emitSubtitle` في المصدر. والسمات الصوتية تُختار
+ * داخلياً (`best`) بلا إعداد.
  */
 class ShortDramaSettings(private val prefs: SharedPreferences) : BottomSheetDialogFragment() {
 
@@ -62,49 +71,11 @@ class ShortDramaSettings(private val prefs: SharedPreferences) : BottomSheetDial
     companion object {
         // ★ اسم ملف التفضيلات — يطابق ما يمرّره ShortDramaArPlugin للمصدر.
         const val PREFS_NAME = "SHORTDRAMA"
-        const val KEY_PLAYBACK_MODE = "sd_playback_mode"       // "newpipe" | "direct" | "extractor"
+        const val KEY_PLAYBACK_MODE = "sd_playback_mode"     // "newpipe" | "direct" | "extractor"
         const val KEY_MAX_QUALITY = "sd_max_quality"         // "all" | "high"
         const val KEY_REDIRECT = "sd_use_redirect"           // Boolean بديل النطاق
         const val KEY_QUALITY_ORDER = "sd_quality_order"     // "default" | "asc" | "desc"
-        const val KEY_EXTRA_CHANNELS = "sd_extra_channels"    // أسطر: رابط قناة، أو «الاسم | الرابط»
-        const val KEY_SUB_LANG = "sd_sub_lang"               // "auto" (المصهر) أو رمز لغة كـ "en"
-        const val KEY_AUDIO_PREF = "sd_audio_pref"           // "best" | "opus" | "aac" | "lowest" | "low" | "high"
-
-        /**
-         * اللغات المقترحة للترجمة — **نفس قائمة ARY تماماً**، مرتّبةً كما هي.
-         *
-         * سبب إبقاء القائمة كاملة رغم أن هذه القنوات مدبلجة (فالعربية صوت
-         * أصلي لا ترجمة): الإعداد يجب أن يتطابق مع ARY سطراً بسطر كما طلب
-         * المستخدم. وبقيّة اللغات يولّدها يوتيوب عند الطلب عبر `tlang` على
-         * رابط `timedtext` — فمن اختارها فقد اختار ترجمة آلية، ومن أراد
-         * المصهر فليترك «تلقائي» بلا طلب إضافي.
-         *
-         * تحفّظ (من قياس على هذا الجهاز، لا افتراض): استدعاء `timedtext`
-         * بتلقائية بلا `tlang` يعيد 404، ومع أي `tlang` يعيد 429 — فاختيار
-         * لغة قد يفشل على هذه الشبكة. «تلقائي» وحده هو المسار الآمن.
-         */
-        val SUB_LANGUAGES = listOf(
-            "auto" to "مصهر (تلقائي)",
-            "en" to "الإنجليزية",
-            "fr" to "الفرنسية",
-            "es" to "الإسبانية",
-            "de" to "الألمانية",
-            "tr" to "التركية",
-            "ru" to "الروسية",
-            "fa" to "الفارسية",
-            "ur" to "الأردية",
-            "hi" to "الهندية",
-            "id" to "الإندونيسية",
-            "ms" to "الماليزية",
-            "zh-Hans" to "الصينية المبسّطة",
-            "ja" to "اليابانية",
-            "ko" to "الكورية",
-            "pt" to "البرتغالية",
-            "it" to "الإيطالية",
-            "nl" to "الهولندية",
-            "sw" to "السواحيلية",
-            "so" to "الصومالية"
-        )
+        const val KEY_EXTRA_CHANNELS = "sd_extra_channels"  // أسطر: رابط قناة، أو «الاسم | الرابط»
 
         fun show(fm: FragmentManager, prefs: SharedPreferences) {
             ShortDramaSettings(prefs).show(fm, "shortdrama_settings")
@@ -131,7 +102,7 @@ class ShortDramaSettings(private val prefs: SharedPreferences) : BottomSheetDial
 
             val aboutPref = Preference(ctx).apply {
                 title = "اثنتا عشرة قناة يوتيوب + قنوات إضافية"
-                summary = "يعرض مسلسلات الدراما القصيرة من اثنتي عشرة قناة يوتيوب (كاملة ومدبلجة)، ويدعم إضافة قنواتٍ يوتيوب إضافية تظهر كلها في قسمٍ واحد «مقترحاتك» وتشملها نتائج البحث."
+                summary = "يعرض مسلسلات دراما قصيرة من اثنتي عشرة قناة يوتيوب (كاملة ومدبلجة)، ويدعم إضافة قنواتٍ يوتيوب إضافية تظهر كلها في قسمٍ واحد «مقترحاتك» وتشملها نتائج البحث."
                 setSelectable(false)
             }
             intro.addPreference(aboutPref)
@@ -145,7 +116,7 @@ class ShortDramaSettings(private val prefs: SharedPreferences) : BottomSheetDial
                 title = "قنوات يوتيوب إضافية"
                 summary = "أضف قناةً لتظهر مسلسلاتها ضمن قسم «مقترحاتك» وضمن البحث. لتسمية القناة بنفسك اكتب الاسم ثم | ثم الرابط: الاسم | الرابط"
                 dialogTitle = "قنوات يوتيوب إضافية"
-                dialogMessage = "رابطٌ أو معرّفُ قناة في كل سطر:\n  https://youtube.com/@xxx\n  @xxx\n  UC…\n\nلتسمية القناة بنفسك اكتب الاسم ثم | ثم الرابط:\n  قناة القصص | https://youtube.com/@xxx\n\nكل القنوات المضافة تظهر في قسمٍ واحد «مقترحاتك» مهما زادت، حتى لا تتقلّب الواجهة. القنوات الاثنتا عشرة الأولى مدمجة في الإضافة ولا تحتاج إضافتها هنا."
+                dialogMessage = "رابطٌ أو معرّفُ قناة في كل سطر:\n  https://youtube.com/@xxx\n  @xxx\n  UC…\n\nلتسمية القناة بنفسك اكتب الاسم ثم | ثم الرابط:\n  قناة القصص | https://youtube.com/@xxx\n\nكل القنوات (المدمجة والمضافة) تظهر في قسمٍ واحد «مقترحاتك» مهما زادت، حتى لا تتقلّب الواجهة."
                 setOnPreferenceChangeListener { _, newVal ->
                     (newVal as? String)?.isNotBlank() == false || newVal != null
                 }
@@ -183,7 +154,7 @@ class ShortDramaSettings(private val prefs: SharedPreferences) : BottomSheetDial
             playbackCategory.addPreference(qualityPref)
 
             // ترتيب الجودات عند البث — الافتراضي = ترتيب اليوم تماماً؛
-            // التصاعدي/التنازلي يعيدان ترتيب روابط التشغيل فقط.
+            // التصاعدي/التنازلي يعيدان ترتيب روابط التشغيل فقط (بلا حذف/تكرار).
             val orderPref = ListPreference(ctx).apply {
                 key = KEY_QUALITY_ORDER
                 title = "ترتيب الجودات"
@@ -208,42 +179,6 @@ class ShortDramaSettings(private val prefs: SharedPreferences) : BottomSheetDial
             }
             playbackCategory.addPreference(redirectPref)
 
-            // ===================== الترجمة والصوت =====================
-            val mediaCategory = PreferenceCategory(ctx)
-            mediaCategory.title = "الترجمة والصوت"
-            preferenceScreen.addPreference(mediaCategory)
-
-            val subLangPref = ListPreference(ctx).apply {
-                key = KEY_SUB_LANG
-                title = "لغة الترجمة"
-                summaryProvider = ListPreference.SimpleSummaryProvider.getInstance()
-                entryValues = SUB_LANGUAGES.map { it.first }.toTypedArray()
-                entries = SUB_LANGUAGES.map { it.second }.toTypedArray()
-                setDefaultValue("auto")
-            }
-            mediaCategory.addPreference(subLangPref)
-
-            // ملاحظة مقصودة: هذه القنوات لا تملك مسارات صوتية بديلة (لا
-            // نسخة إنجليزية من الصوت الأصلي)، فـ`audioTracks` في CloudStream
-            // لا مكان له هنا. ما نتيحه اختيار أيٍّ من تنسيقاتها الصوتية مع
-            // كل جودة.
-            val audioPref = ListPreference(ctx).apply {
-                key = KEY_AUDIO_PREF
-                title = "الملف الصوتي"
-                summaryProvider = ListPreference.SimpleSummaryProvider.getInstance()
-                entryValues = arrayOf("best", "opus", "aac", "high", "low", "lowest")
-                entries = arrayOf(
-                    "الأفضل (موصى به)",
-                    "Opus (أصغر حجماً)",
-                    "AAC (توافق أوسع)",
-                    "العالي",
-                    "المتوسط",
-                    "الأصغر حجماً"
-                )
-                setDefaultValue("best")
-            }
-            mediaCategory.addPreference(audioPref)
-
             // زر إعادة تسجيل بيانات — احتياطي.
             val resetPref = Preference(ctx).apply {
                 key = "sd_reset_prefs"
@@ -253,7 +188,6 @@ class ShortDramaSettings(private val prefs: SharedPreferences) : BottomSheetDial
                     prefs.edit().apply {
                         remove(KEY_PLAYBACK_MODE); remove(KEY_MAX_QUALITY); remove(KEY_REDIRECT)
                         remove(KEY_QUALITY_ORDER); remove(KEY_EXTRA_CHANNELS)
-                        remove(KEY_SUB_LANG); remove(KEY_AUDIO_PREF)
                     }.apply()
                     Toast.makeText(ctx, "تمت إعادة الضبط", Toast.LENGTH_SHORT).show()
                     true
