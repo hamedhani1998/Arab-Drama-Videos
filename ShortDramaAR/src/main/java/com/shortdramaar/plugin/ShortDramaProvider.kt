@@ -31,7 +31,7 @@ import org.schabi.newpipe.extractor.services.youtube.linkHandler.YoutubeStreamLi
  *
  * **1) لا قناة أساسية.** ARY قناة واحدة وصفٌّ لها + صفُّ «المقترحات». هنا
  * اثنتا عشرة قناة كلها مُدمجة في صفٍّ واحد «مسلسلات دراما قصيرة»، وصفٌّ
- * منفصل «إعلانات وتشويقات» ( playlists宣传ية مستقلة)، وصفٌّ ثالث «مقترحاتك»
+ * منفصل «إعلانات وتشويقات» (قوائم ترويجية مستقلة)، وصفٌّ ثالث «مقترحاتك»
  * لما يضيفه المستخدم من الإعدادات. ثلاثة صفوف ثابتة مهما زادت القنوات.
  *
  * **2) لا اسمَ قناة على الكارت.** في ARY كان عنوان الكارت «المسلسل · القناة»
@@ -624,9 +624,14 @@ class ShortDramaProvider(
      * ميزانية الدفعة الأولى فقط — وهي ما يظهر عند أول فتح.
      *
      * الهدف أن **الصف يظهر بسرعة** كصفحة ARY: عند أول فتح لا يوجد
-     * شيء مخزّن بعد، فنجلب الدفعة الأولى وحدها (≈7 ث) ونعرض ما وصل، ثم
-     * تكمل البقية في الخلفية (انظر `refreshSourceListsAsync`). بعد أول
-     * فتح، كل الفتحات التالية ترجع فوراً من الذاكرة بلا أي انتظار.
+     * شيء مخزّن بعد، فنجلب ما يكفي ونعرض ما وصل، ثم تكمل البقية في
+     * الخلفية (انظر `refreshSourceListsAsync`). بعد أول فتح، كل الفتحات
+     * التالية ترجع فوراً من الذاكرة بلا أي انتظار.
+     *
+     * ★ وهي الآن 7 ث عمداً: كانت تُغطّي «دفعة» كاملة، فلم يكن في
+     *   المقدار مفرٌ للدفعة الثانية بعد قضاء 7 ث، والانتظار صار 12+.
+     *   الآن الميزانية تقطع الدفعة الجارية (انظر `fetchChannels`)، فـ7 ث
+     *   تعني: أربع قنوات تكفي لصفٍّ مفيد، والباقي يأتي بعد فتحٍ آخر.
      */
     private val FIRST_BATCH_BUDGET_MS = 7_000L
 
@@ -653,20 +658,39 @@ class ShortDramaProvider(
                 )
                 break
             }
-            batch.map { (label, url) ->
-                async {
-                    val pls = withTimeoutOrNull(CHANNEL_TIMEOUT_MS) {
-                        try {
-                            channelPlaylists(url)
-                        } catch (e: Exception) {
-                            Log.w(TAG, "'$label' failed: ${e.message}")
-                            null
+            // ★ الميزانية تُلغي الدفعة **الجارية**، لا التي تليها فقط.
+            //
+            //   كان الفحص في أعلى الحلقة، فالدفعة الأولى كانت تُكمل حتى لو
+            //   تجاوزت الميزانية بكثير — أي أن النداء انتظر 12 قناة قبل
+            //   أي صف، ولهذا بقيت الصفحة «تأخّر» بعد كل تعديل للميزانية.
+            //   الآن `remaining` هو السقف الحقيقي المتبقي، وحين ينتهي يُقطع
+            //   الانتظار فوراً وتبقى قنواتُ هذه الدفعة `null` = يُعاد لاحقاً.
+            val remaining = budgetMs - (System.currentTimeMillis() - startedAt)
+            val got = withTimeoutOrNull(remaining.coerceAtLeast(1L)) {
+                batch.map { (label, url) ->
+                    async {
+                        val pls = withTimeoutOrNull(CHANNEL_TIMEOUT_MS) {
+                            try {
+                                channelPlaylists(url)
+                            } catch (e: Exception) {
+                                Log.w(TAG, "'$label' failed: ${e.message}")
+                                null
+                            }
                         }
+                        if (pls == null) Log.w(TAG, "no playlists from '$label'")
+                        url to pls
                     }
-                    if (pls == null) Log.w(TAG, "no playlists from '$label'")
-                    url to pls
-                }
-            }.awaitAll().forEach { (url, pls) -> out[url] = pls }
+                }.awaitAll()
+            }
+            if (got == null) {
+                Log.w(
+                    TAG,
+                    "budget cut an in-flight batch — ${out.size} channel(s) kept, " +
+                        "${targets.size - out.size} deferred"
+                )
+                break
+            }
+            got.forEach { (url, pls) -> out[url] = pls }
         }
         out
     }
@@ -702,17 +726,18 @@ class ShortDramaProvider(
         val now = System.currentTimeMillis()
         cachedSource?.let { if (now - cachedAt < FRESH_MS) return it }
 
-        // ★ ما تُخزّن من قبل؟ رجّعه فوراً وحدّث في الخلفية — النمط نفسه في
-        //   ARY، وهو ما جعل page الرئيسية تظهر سريعاً. بدونه كان نداء
-        //   `getMainPage` يُexpect 12 channel (~2s كل واحدة) قبل أن يُظهر
-        //   أي صف، فكانت Page الرئيسية «تأخّر» كل فتحة.
+        // ★ ما تُخزّن من قبل؟ رجّعه فوراً وحدّث في الخلفية. هذا الفرع مُرضٍ
+        //   ولا يُصلح المشكلة من جذرها: سطر «أول تحميل» بالأسفل يمرّ عليه
+        //   أولُ فتحٍ بعد التثبيت، وهو ما كان يُبطئ الصفحة كلها.
         val stale = lastPartial ?: cachedSource
         if (stale != null) {
             refreshSourceListsAsync()
             return stale
         }
 
-        // أول تحميل: لا شيء مخزّن، فاستخدم الميزانية المحدودة (الدفعة الأولى).
+        // ★ أول تحميل — وهو السبب الوحيد المتبقي للتأخير. لا شيء مخزّن، فنجلب
+        //   بميزانية **قاطعة** (انظر `fetchChannels`): ترجع بما ينتهي في
+        //   7 ث مهما تأخّرت القنوات، وتُرجَع البقية للجولة التالية.
         val src = loadSourceLists(budgetMs = FIRST_BATCH_BUDGET_MS)
         Log.d(
             TAG,
@@ -959,11 +984,11 @@ class ShortDramaProvider(
         val episodes = eps.map { (num, l) ->
             // الحلقة تُمرّر عبر رابط حقيقي لكي لا يلصق fixUrl عليه mainUrl.
             //
-            // ★ ااسم الحلقة: عنوان الفيديو (كما نشره الناشر) مع الرقم
+            // ★ اسم الحلقة: عنوان الفيديو (كما نشره الناشر) مع الرقم
             //   الترتيبي كتمييز. القنوات هنا لا تكتب أرقام في العناوين (انظر
             //   تعليق الصنف)، فعنوان الفيديو هو ما يميز هذه الحلقة عن غيرها
             //   من نفس DVR. بدونه تظهر كل الحلقات "الحلقة 1/2/3…" بلا
-            //   فرق، في难 يميزها. فنضع الرقم أولاً ثم الاسم.
+            //   فرق، فيميزها. فنضع الرقم أولاً ثم الاسم.
             val title = clean(l.title).ifBlank { "الحلقة $num" }
             newEpisode("https://www.youtube.com/watch?v=${l.id}") {
                 this.name = "$num - $title"
