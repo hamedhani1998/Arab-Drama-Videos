@@ -1248,21 +1248,37 @@ class AryProvider(
             //    يوتيوب لا ينشر غير العربية، فهي تُولَّد عند الطلب عبر
             //    معامل tlang على رابط timedtext الموقّع، فلا يراها NewPipe.
             val base = original?.url?.takeIf { it.isNotBlank() } ?: return
-            val url = buildString {
-                append(base)
-                append("&fmt=vtt&tlang=ar")
-            }
+            val referer = "https://www.youtube.com/watch?v=$vid"
 
-            val text = fetchSubtitleText(url, "https://www.youtube.com/watch?v=$vid")
-            if (text.isBlank()) return
+            // ★ الصيغة الموقَّعة أولاً، بلا `fmt` ولا `tlang`.
+            //
+            //   كان الكود يبني `base + "&fmt=vtt&tlang=ar"` دائماً. هذا
+            //   خطأ مقيس: `sparams` في الرابط الموقَّع لا تشمل `fmt`، فـ
+            //   `fmt` تُهمَل أو تُرفض، و`tlang` يُرجع 429 من شبكة محجوبة.
+            //   النتيجة أن الجسد فارغ دائماً، فلا تُصدَر ترجمة عربية
+            //   أبداً — وهو ما رآه المستخدم: «الترجمة لا تظهر».
+            //   الآن: محاولات بالترتيب، والأول الذي يردّ بجسد غير فارغ
+            //   يُستخدم. التحقق من الجسد شرط، لا نتيجة جانبية.
+            val text = fetchSubtitleText("$base&tlang=ar", referer)
+                .takeIf { it.isNotBlank() }
+                ?: fetchSubtitleText(base, referer)
+                    .takeIf { it.isNotBlank() }
+                    ?: fetchSubtitleText("$base&fmt=vtt", referer)
+                ?: return
 
-            val local = ArySubServer.register(text) ?: return
+            // صيغة يوتيوب الافتراضية `xml`، والمشغّل يريد WebVTT، و`toVtt` في
+            // `ArySubServer` لا يقرأ XML ولا json3 — فبلا هذا التحويل كان
+            // يُقدَّم XML تحت ترويسة `WEBVTT`، وهو ملف يرفضه المشغّل.
+            val vtt = toWebVtt(text)
+            if (vtt.isBlank()) return
+
+            val local = ArySubServer.register(vtt) ?: return
             subtitleCallback(
                 newSubtitleFile("ar", local) {
                     this.headers = mapOf("Referer" to "https://www.youtube.com/")
                 }
             )
-            Log.d(TAG, "$vid subtitle ok lang=ar bytes=${text.length}")
+            Log.d(TAG, "$vid subtitle ok lang=ar bytes=${vtt.length}")
         } catch (e: Exception) {
             Log.w(TAG, "$vid subtitle skipped: ${e.message}")
         }
@@ -1286,6 +1302,106 @@ class AryProvider(
             Log.w(TAG, "timedtext failed: ${e.message}")
             ""
         }
+
+    /**
+     * يحوّل نص يوتيوب إلى WebVTT — وهو ما يقبله المشغّل.
+     *
+     * ★ الفخّ: `timedtext` يردّ **200 بجسد صفري** عند الحجب على الشبكة.
+     *   كودٌ يفحص `responseCode` فقط يعدّ ذلك نجاحاً ويسجّل ترجمةً
+     *   فارغة — فيظهر الملف في القائمة ولا يعرض شيئاً. لذلك نرفض
+     *   الجسد الفارغ هنا، في الموضع الذي تنشأ فيه المشكلة، لا عند
+     *   الاستعمال.
+     *
+     * الصيغ المحتملة: `xml` (الافتراضية)، `json3`، `srv3`، أو `vtt`
+     * مباشرةً. نتعامل مع الثلاث الأولى، و`vtt` يعبر كما هو.
+     */
+    private fun toWebVtt(raw: String): String {
+        val t = raw.trim().removePrefix(BOM).trim()
+        if (t.isEmpty()) return ""
+
+        // WebVTT جاهز — يسبقه BOM أحياناً.
+        if (t.startsWith("WEBVTT")) return if (t.contains("-->")) t else ""
+
+        return try {
+            when {
+                t.startsWith("{") -> json3ToVtt(t)
+                t.startsWith("<") -> xmlToVtt(t)
+                // `srv3` نصّي: سطر `-->` لكل لقطة، فنحوّله بتنظيف بسيط.
+                t.contains("-->") -> t
+                else -> ""
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "vtt convert failed: ${e.message}")
+            ""
+        }
+    }
+
+    /** `json3`: `events[].segs[].utf8` مع `tStartMs`/`dDurationMs`. */
+    private fun json3ToVtt(raw: String): String {
+        val root = org.json.JSONObject(raw)
+        val events = root.optJSONArray("events") ?: return ""
+        val sb = StringBuilder("WEBVTT\n\n")
+        for (i in 0 until events.length()) {
+            val ev = events.optJSONObject(i) ?: continue
+            val segs = ev.optJSONArray("segs") ?: continue
+            val line = StringBuilder()
+            for (j in 0 until segs.length()) {
+                line.append(segs.optJSONObject(j)?.optString("utf8", "").orEmpty())
+            }
+            val text = line.toString().trim()
+            if (text.isEmpty()) continue
+            val start = ev.optDouble("tStartMs", 0.0).toLong()
+            val dur = ev.optDouble("dDurationMs", 0.0).toLong().coerceAtLeast(1L)
+            sb.append(ts(start)).append(" --> ").append(ts(start + dur)).append('\n')
+            sb.append(text).append("\n\n")
+        }
+        return if (sb.length <= 8) "" else sb.toString()
+    }
+
+    /** `xml`: `<text start="0.5" dur="1.2">…</text>`. */
+    private fun xmlToVtt(raw: String): String {
+        val sb = StringBuilder("WEBVTT\n\n")
+        // نعتمد على <text …> ثم نقرأ الخصائص بالاسم، لا بترتيبها: يوتيوب
+        // لا يضمن أن `start` تسبق `dur`.
+        val tagRe = Regex("""<text\b([^>]*)>([\s\S]*?)</text>""")
+        var found = false
+        for (m in tagRe.findAll(raw)) {
+            val attrs = m.groupValues[1]
+            val body = unescapeXml(m.groupValues[2]).replace('\n', ' ').trim()
+            if (body.isEmpty()) continue
+            val start = attrDouble(attrs, "start") ?: 0.0
+            val dur = attrDouble(attrs, "dur") ?: 2.0
+            sb.append(ts(start.toLong())).append(" --> ").append(ts((start + dur).toLong()))
+                .append('\n')
+            sb.append(body).append("\n\n")
+            found = true
+        }
+        return if (found) sb.toString() else ""
+    }
+
+    /** يقرأ خاصية رقمية من نص الخصائص، بهامش مسافةٍ اختياري حول `=`. */
+    private fun attrDouble(attrs: String, name: String): Double? =
+        Regex("""\b$name\s*=\s*"([\d.]+)"""").find(attrs)
+            ?.groupValues?.get(1)?.toDoubleOrNull()
+
+    /**
+     * WebVTT timecode: `HH:MM:SS.mmm`.
+     *
+     * ★ `Locale.US` مقصود: بلاه يخرج `String.format` بأرقام عربية-هندية
+     *   على هاتف عربي (`٠٥:٠٣:١٢`)، والـtimecode لا يقبلها المشغّل ولا
+     *   يعرض الترجمة أصلاً.
+     */
+    private fun ts(ms: Long): String {
+        val h = ms / 3_600_000
+        val m = (ms % 3_600_000) / 60_000
+        val s = (ms % 60_000) / 1000
+        val msec = ms % 1000
+        return String.format(java.util.Locale.US, "%02d:%02d:%02d.%03d", h, m, s, msec)
+    }
+
+    private fun unescapeXml(s: String): String = s
+        .replace("&amp;", "&").replace("&lt;", "<").replace("&gt;", ">")
+        .replace("&quot;", "\"").replace("&#39;", "'").replace("&apos;", "'")
 
     /**
      * مسار تشغيل مطابق لسيرفرات إضافة «يوتيوب» في re-3arabi (التي تعمل على
