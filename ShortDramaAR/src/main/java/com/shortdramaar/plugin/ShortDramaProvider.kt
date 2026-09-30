@@ -599,16 +599,24 @@ class ShortDramaProvider(
      * بطيئة كانت تجمّدها دقيقةً كاملة. ARY قناةٌ واحدة فلم يظهر عنده هذا.
      * القطع عند هذا الحد يجعل الأسوأ انتظاراً محدوداً: القناة البطيئة
      * تُتخطّى وتُحاول لاحقاً (انظر `failed` في `SourceLists`).
+     *
+     * 25 ثانية لا 12: على شبكةٍ بطيئة كانت القناة تُقطع قبل أن يردّ
+     * يوتيوب، فترجع `null` = «فشل»، تُحسب ضمن `failed` فلا تُحفظ، وتظهر
+     * الصفحة ناقصة بلا سبب ظاهر. السقف موجود ليقطع القناة المعلّقة فعلاً،
+     * لا ليقطع القناة البطيئة.
      */
-    private val CHANNEL_TIMEOUT_MS = 12_000L
+    private val CHANNEL_TIMEOUT_MS = 25_000L
 
     /**
      * كم قناة نجلبها في اللحظة الواحدة.
      *
-     * 12 دفعةً واحدة = ضغطٌ على يوتيوب يعيد صفر قوائم (وهو ما دفعنا
-     * للتسلسل أصلاً)، و2 لكل دفعة = 6 أدوار تسلسلية. أربعٌ توازن بينهما.
+     * ★ 12 = جولة واحدة، لا ثلاث. كان 4، فمع عدم قطع الدفعة الأولى كان
+     *   إقلاع بارد يحتاج ثلاث دورات تسلسلية (نحو 75 ثانية أسوأ حالة).
+     *   ابتداءً من هنا القنوات كلها في دفعة واحدة: انتظار واحد، وكل
+     *   الميزانيات بعدها بلا معنى لأنها لا تقاطَع إلا حين يكون باليد
+     *   شيء يعرض.
      */
-    private val FETCH_BATCH = 4
+    private val FETCH_BATCH = 12
 
     /**
      * ميزانية الصفحة الرئيسية كلّها.
@@ -647,45 +655,43 @@ class ShortDramaProvider(
         val out = HashMap<String, List<PlaylistInfo>?>()
         val startedAt = System.currentTimeMillis()
 
+        // دفعة واحدة: متوازٍ داخلها.
+        suspend fun fetchBatch(batch: List<Pair<String, String>>) = batch.map { (label, url) ->
+            async {
+                val pls = withTimeoutOrNull(CHANNEL_TIMEOUT_MS) {
+                    try {
+                        channelPlaylists(url)
+                    } catch (e: Exception) {
+                        Log.w(TAG, "'$label' failed: ${e.message}")
+                        null
+                    }
+                }
+                if (pls == null) Log.w(TAG, "no playlists from '$label'")
+                url to pls
+            }
+        }.awaitAll()
+
         // دفعات: متوازٍ داخلها، تسلسلي بينها.
         for (batch in targets.chunked(FETCH_BATCH)) {
-            // تجاوزنا الميزانية: ما لم يُجلب بعد يُبقى `null` = يُعاد لاحقاً.
-            if (System.currentTimeMillis() - startedAt > budgetMs) {
-                Log.w(
-                    TAG,
-                    "home budget spent after ${batch.firstOrNull()?.first ?: "?"} — " +
-                        "deferring ${targets.size - out.size} channel(s)"
-                )
-                break
-            }
-            // ★ الميزانية تُلغي الدفعة **الجارية**، لا التي تليها فقط.
-            //
-            //   كان الفحص في أعلى الحلقة، فالدفعة الأولى كانت تُكمل حتى لو
-            //   تجاوزت الميزانية بكثير — أي أن النداء انتظر 12 قناة قبل
-            //   أي صف، ولهذا بقيت الصفحة «تأخّر» بعد كل تعديل للميزانية.
-            //   الآن `remaining` هو السقف الحقيقي المتبقي، وحين ينتهي يُقطع
-            //   الانتظار فوراً وتبقى قنواتُ هذه الدفعة `null` = يُعاد لاحقاً.
             val remaining = budgetMs - (System.currentTimeMillis() - startedAt)
-            val got = withTimeoutOrNull(remaining.coerceAtLeast(1L)) {
-                batch.map { (label, url) ->
-                    async {
-                        val pls = withTimeoutOrNull(CHANNEL_TIMEOUT_MS) {
-                            try {
-                                channelPlaylists(url)
-                            } catch (e: Exception) {
-                                Log.w(TAG, "'$label' failed: ${e.message}")
-                                null
-                            }
-                        }
-                        if (pls == null) Log.w(TAG, "no playlists from '$label'")
-                        url to pls
-                    }
-                }.awaitAll()
+
+            // ★ القطع يُطبَّق فقط حين يكون في اليد شيء يُعرض.
+            //
+            //   قبل هذا كان القطع عند 7 ث يُلغي الدفعة الأولى كلها، وترجع
+            //   `out` فارغة: 12 قناة تفشل، ويُخزَّن فراغٌ، فيظهر صفحةً بلا
+            //   صف ولا رسالة — أبطأُ ما كنا، صار أسرعَ ما كنا وبلا محتوى.
+            //   على إقلاع بارد لا توجد دفعة ثانية: إما أن تكتمل أو لا
+            //   شيء. فالدفعة الأولى تُركض بلا سقف زمني.
+            val got = if (out.isEmpty()) {
+                fetchBatch(batch)
+            } else {
+                withTimeoutOrNull(remaining.coerceAtLeast(1L)) { fetchBatch(batch) }
             }
+
             if (got == null) {
                 Log.w(
                     TAG,
-                    "budget cut an in-flight batch — ${out.size} channel(s) kept, " +
+                    "budget cut a later batch — ${out.size} channel(s) kept, " +
                         "${targets.size - out.size} deferred"
                 )
                 break
