@@ -621,12 +621,23 @@ class ShortDramaProvider(
     private val HOME_BUDGET_MS = 22_000L
 
     /**
+     * ميزانية الدفعة الأولى فقط — وهي ما يظهر عند أول فتح.
+     *
+     * الهدف أن **الصف يظهر بسرعة** كصفحة ARY: عند أول فتح لا يوجد
+     * شيء مخزّن بعد، فنجلب الدفعة الأولى وحدها (≈7 ث) ونعرض ما وصل، ثم
+     * تكمل البقية في الخلفية (انظر `refreshSourceListsAsync`). بعد أول
+     * فتح، كل الفتحات التالية ترجع فوراً من الذاكرة بلا أي انتظار.
+     */
+    private val FIRST_BATCH_BUDGET_MS = 7_000L
+
+    /**
      * قوائم مجموعة قنوات: `url -> null` يعني «لم تصل» (فشل أو تجاوز
      * السقف الزمني أو تجاوز الميزانية)، والفرق بين الفشل والنجاح مقصود:
      * الفشل يُعاد محاولته لاحقاً، ولا يُثبَّت فراغاً أبداً.
      */
     private suspend fun fetchChannels(
-        targets: List<Pair<String, String>>
+        targets: List<Pair<String, String>>,
+        budgetMs: Long = HOME_BUDGET_MS
     ): Map<String, List<PlaylistInfo>?> = coroutineScope {
         val out = HashMap<String, List<PlaylistInfo>?>()
         val startedAt = System.currentTimeMillis()
@@ -634,7 +645,7 @@ class ShortDramaProvider(
         // دفعات: متوازٍ داخلها، تسلسلي بينها.
         for (batch in targets.chunked(FETCH_BATCH)) {
             // تجاوزنا الميزانية: ما لم يُجلب بعد يُبقى `null` = يُعاد لاحقاً.
-            if (System.currentTimeMillis() - startedAt > HOME_BUDGET_MS) {
+            if (System.currentTimeMillis() - startedAt > budgetMs) {
                 Log.w(
                     TAG,
                     "home budget spent after ${batch.firstOrNull()?.first ?: "?"} — " +
@@ -661,14 +672,14 @@ class ShortDramaProvider(
     }
 
     /** جلبٌ واحد لكل قناة: الاثنتا عشرة المدمجة ثم إضافات المستخدم. */
-    private suspend fun loadSourceLists(): SourceLists {
+    private suspend fun loadSourceLists(budgetMs: Long = HOME_BUDGET_MS): SourceLists {
         val extras = extraChannels()
         val builtin = mutableListOf<PlaylistInfo>()
         val extra = mutableListOf<PlaylistInfo>()
         val failed = mutableSetOf<String>()
         val seen = HashSet<String>()
 
-        val results = fetchChannels(BASE_CHANNELS + extras.map { it.label to it.url })
+        val results = fetchChannels(BASE_CHANNELS + extras.map { it.label to it.url }, budgetMs)
 
         for ((_, url) in BASE_CHANNELS) {
             val pls = results[url]
@@ -690,8 +701,19 @@ class ShortDramaProvider(
     private suspend fun sourceLists(): SourceLists {
         val now = System.currentTimeMillis()
         cachedSource?.let { if (now - cachedAt < FRESH_MS) return it }
-        if (now - lastFailedAt < RETRY_COOLDOWN_MS && lastPartial != null) return lastPartial!!
-        val src = loadSourceLists()
+
+        // ★ ما تُخزّن من قبل؟ رجّعه فوراً وحدّث في الخلفية — النمط نفسه في
+        //   ARY، وهو ما جعل page الرئيسية تظهر سريعاً. بدونه كان نداء
+        //   `getMainPage` يُexpect 12 channel (~2s كل واحدة) قبل أن يُظهر
+        //   أي صف، فكانت Page الرئيسية «تأخّر» كل فتحة.
+        val stale = lastPartial ?: cachedSource
+        if (stale != null) {
+            refreshSourceListsAsync()
+            return stale
+        }
+
+        // أول تحميل: لا شيء مخزّن، فاستخدم الميزانية المحدودة (الدفعة الأولى).
+        val src = loadSourceLists(budgetMs = FIRST_BATCH_BUDGET_MS)
         Log.d(
             TAG,
             "playlists: builtin=${src.builtin.size} extra=${src.extra.size} " +
@@ -706,6 +728,47 @@ class ShortDramaProvider(
             lastPartial = src
         }
         return src
+    }
+
+    /**
+     *حدّث القواعد في الخلفية دون إيقاف Page الرئيسية: يُشغّل
+     * `loadSourceLists` على IO، وعند نجاحه يُخزّن النتيجة (`cachedSource`
+     * أو `lastPartial`) فيُظهرها الفتحة التالية فوراً.
+     *
+     * حارس تكرار: دعوة متزامنة تُشغّل وظيفة واحدة فقط، ولا تُضاعف
+     * number of طلبات يوتيوب.
+     */
+    @Volatile private var refreshing = false
+    private val cacheLock = Any()
+
+    private fun refreshSourceListsAsync() {
+        if (refreshing) return
+        refreshing = true
+        GlobalScope.launch(Dispatchers.IO) {
+            try {
+                val src = loadSourceLists()
+                val now = System.currentTimeMillis()
+                synchronized(cacheLock) {
+                    if (src.failed.isEmpty() && src.all.isNotEmpty()) {
+                        cachedSource = src
+                        cachedAt = now
+                        lastPartial = null
+                    } else {
+                        lastFailedAt = now
+                        lastPartial = src
+                    }
+                }
+                Log.d(
+                    TAG,
+                    "background refresh: builtin=${src.builtin.size} " +
+                        "extra=${src.extra.size} failed=${src.failed.size}"
+                )
+            } catch (e: Exception) {
+                Log.w(TAG, "background refresh failed: ${e.message}")
+            } finally {
+                refreshing = false
+            }
+        }
     }
 
     private suspend fun allPlaylists(): List<PlaylistInfo> = sourceLists().all
