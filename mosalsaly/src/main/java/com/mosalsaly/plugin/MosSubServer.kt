@@ -37,6 +37,7 @@ object MosSubServer {
         val url: String,
         val headers: Map<String, String>,
         val kind: Kind,
+        val seq: Long,          // ترتيب زمني — لاختيار الأقدم عند التشذيب
     )
     private data class Established(
         val body: InputStream?,
@@ -47,6 +48,7 @@ object MosSubServer {
     )
 
     private val jobs = ConcurrentHashMap<String, Job>()
+    private val nextSeq = java.util.concurrent.atomic.AtomicLong(0)
     private var server: ServerSocket? = null
     @Volatile private var port = 0
 
@@ -83,9 +85,21 @@ object MosSubServer {
     private fun register(url: String, headers: Map<String, String>, kind: Kind): String? {
         ensureStarted()
         if (port == 0) return null
+        // كل تشغيل حلقة ينتج مُعرّفاً جديداً؛ بلا حدّ تتضخّم الخريطة بلا سقف
+        // عبر جلسة المشاهدة (مئات الحلقات × 18 منصة). نقصّها إلى الأحدث بعد كل تسجيل.
         val id = UUID.randomUUID().toString()
-        jobs[id] = Job(url, headers, kind)
+        jobs[id] = Job(url, headers, kind, nextSeq.getAndIncrement())
+        trimJobs()
         return "http://127.0.0.1:$port/$id.${kind.ext}"
+    }
+
+    /** يُبقي أحدث MAX_JOBS مُعرّفاً فقط — الأقدم لم يعد للاعب العودة إليه. */
+    private fun trimJobs() {
+        val MAX_JOBS = 40
+        if (jobs.size <= MAX_JOBS) return
+        for (key in jobs.entries.sortedBy { it.value.seq }.take(jobs.size - MAX_JOBS)) {
+            jobs.remove(key.key)
+        }
     }
 
     private fun handle(client: java.net.Socket) {
@@ -199,13 +213,15 @@ object MosSubServer {
             val out = s.getOutputStream()
             out.write(head.toByteArray(Charsets.ISO_8859_1))
             out.flush()
+            // كان يُدعى flush بعد كل 64KB: مقبس الشبكة غير مخزَّن (unbuffered) فيمرّر
+            // كل كتابة مباشرة — فالتعبير الإضافي لا يقدّم شيئاً ويسهّم على الجهاز.
             val buf = ByteArray(64 * 1024)
             while (true) {
                 val n = body.read(buf)
                 if (n < 0) break
                 out.write(buf, 0, n)
-                out.flush()
             }
+            out.flush()
             body.close()
         } catch (e: Exception) {
             // عميل أُغلق mid-stream — طبيعي عند السيك

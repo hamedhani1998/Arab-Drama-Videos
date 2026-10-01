@@ -56,6 +56,29 @@ private fun cleanDecryptedUrl(u: String?): String? {
         .takeIf { it.startsWith("http") || it.startsWith("https") }
 }
 
+/**
+ * CloudStream يبني قائمة الجودة من الحقل `quality` (Int) لا من `name`، فلا يفلح اسمٌ
+ * صحيح إن كانت القيمة Unknown — تظهر كل الجودات سطراً واحداً بلا تمييز ولا ترتيب.
+ * تسمية encByQuality تأتي بأشكال متباينة: "1080" و"1080p" و"720 HD". نستخرج الرقم
+ * ثم نقرّبه لأقرب اسم معروف، كـ Reelree تماماً (وإلا فبقيت كل الجودات Unknown).
+ */
+private fun qualityOfLabel(label: String): Int {
+    val digits = Regex("""(\d{3,4})""").find(label)?.groupValues?.get(1)?.toIntOrNull()
+        ?: return Qualities.Unknown.value
+    return getQualityFromName(
+        when {
+            digits >= 2160 -> "2160p"
+            digits >= 1440 -> "1440p"
+            digits >= 1080 -> "1080p"
+            digits >= 720 -> "720p"
+            digits >= 480 -> "480p"
+            digits >= 360 -> "360p"
+            digits >= 240 -> "240p"
+            else -> "144p"
+        }
+    )
+}
+
 // عندما يعيد mosalsaly back-end رابط ترجمة بـ auth_key قديم/منتهي الصلاحية (تركتُ
 // netshort يتأثر: sub auth يجلس أياماً قديماً بينما auth الفيديو طازج → الترجمة 403)،
 // نستبدل auth الترجمة بـ auth الفيديو الأساسي الطازج — auth_key على هذه الأقراص عام لكل
@@ -151,20 +174,22 @@ class MosalsalyProvider(
     // كان يبتلع كل استثناء ويُعيد "" — وهو ما جعل فشل الشبكة يبدو كـ«لا نتائج».
     // الآن نسجّل السبب ونُعيد null ليميزه المستدعي عن الفراغ الحقيقي.
     private suspend fun getWithRetry(url: String, referer: String?, attempts: Int = 3, backoffMs: Long = 300): String? {
-        var last: String? = null
         for (i in 0 until attempts) {
             try {
                 val text = app.get(url, headers = mapOf("User-Agent" to MOS_UA), referer = referer).text
                 if (text.isNotBlank()) return text
-                last = null
                 Log.w(TAG, "attempt $i blank body from $url")
             } catch (e: Exception) {
-                last = null
                 Log.w(TAG, "attempt $i failed: ${e.message}")
             }
-            try { Thread.sleep(backoffMs) } catch (e: Exception) {}
+            // لا ننتظر بعد آخر محاولة: الانتظار بعدها لا يخدم شيئاً ويضيف تأخيراً
+            // محسوساً إلى فشل مبكّر. ولا ننتظر بعد نجاح — return يخرج قبل بلوغ
+            // هذا السطر أصلاً (كان المنتظر يُنفَّذ بعد كل دورة بما فيها الناجحة).
+            if (i < attempts - 1) {
+                try { Thread.sleep(backoffMs * (i + 1)) } catch (e: Exception) {}
+            }
         }
-        return last
+        return null
     }
 
     // البطاقات: <article class="group "><a ... aria-label="Title" href="/mosalsal/slug"><img ... src="POSTER">...
@@ -401,8 +426,13 @@ class MosalsalyProvider(
     //       نفحص فعليًا النص الصغير #EXTM3U → M3U8.
     //    2) كل الأنواع الأخرى (hls/hls-enc/storyreel/...) → حمل أول جزء فقط (Range صغير)؛ إن كان #EXTM3U
     //       فعمر × M3U8، وإلا استبعاد (404/403/HTML ميت).
-    // رابط منتهٍ مؤكداً؟ نرفضه قبل العرض متى حمل Expires= صريحاً في الماضي
+    // رابط منتهٍ مؤكد؟ نرفضه قبل العرض متى حمل Expires= صريحاً في الماضي
     // (مثل encByQuality من netshort الذي يبقي mosalsaly linkاً قديماً → على الجهاز 403 حتى مع Referer).
+    // «صريحاً» هو الشرط: مقياس الحسم هو الحالة التي يردّ بها الخادم نفسه، لا ساعة داخل الرابط.
+    // auth_key لـ netshort يُقارَن بالساعة المحلية بينما صادره خادم Mosalsaly/CDN بساعة
+    // تتأخّر — فكان رابط يردّ 200/206 يُحذف لمجرّد أن auth_key أقدم بعشرة أيام.
+    // الفحص يسبق العرض، وprobeMedia/probeQualityUrlHttp11 يبقيان الرابط عند 2xx/206
+    // فتبقى السليمة وتُسقَط الميتة فعلاً.
     private fun isExplicitlyExpired(url: String): Boolean {
         return Regex("expires=(\\d+)", RegexOption.IGNORE_CASE)
             .find(url)?.groupValues?.get(1)?.toLongOrNull()
@@ -522,12 +552,21 @@ class MosalsalyProvider(
         val alive = ArrayList<CLink>()
         // رابط الفيديو الأساسي (auth طازج) — يُستخدم لتجديد auth الترجمة عند انتهائه
         var primaryVideoUrl: String? = null
+        // netshort: الخادم يضع refreshAfter في واصف الحلقة. إن كان في الماضي فالمصادر
+        // المُعادة هي نسخة مُخزَّنة لم تنتهِ صلاحيتها بعد — والفحص يردّ 403 «time expire».
+        // نتخطى فحص الشبكة حينها (وهي لن تنجح على أي حال) ونبقي الروابط لتُعرض؛ فشلُ
+        // التشغيل عندها أبلغ من إخفاء الرابط، وCloudStream يعرض «أعد المحاولة».
+        var descriptorStale = false
         for (item in chain) {
             val ch = item as? ObjectNode ?: continue
             val type = ch.get("type")?.asText()?.lowercase()
             val baseEnc = ch.get("enc")?.asText()
             val baseUrl = if (baseEnc != null) cleanDecryptedUrl(decryptMosEnc(baseEnc)) else null
             if (primaryVideoUrl == null) primaryVideoUrl = baseUrl
+            if (ch.get("refresh")?.asBoolean(true) == true) {
+                val after = ch.get("refreshAfter")?.asLong(0L) ?: 0L
+                if (after > 0 && after * 1000L < System.currentTimeMillis()) descriptorStale = true
+            }
 
             // اجمع المرشحين: الأساس + كل الجودات المتاحة (encByQuality)
             val candidates = LinkedHashMap<String, String>()  // url -> quality label ("" للأساس)
@@ -551,7 +590,11 @@ class MosalsalyProvider(
                     continue
                 }
 
-                val kind = if (q.isNotBlank()) probeQualityUrl(url, type) else probeMedia(url, type)
+                val kind = if (descriptorStale) {
+                    // نعرف أنها ستُرفض؛ نصنّفها نمطياً بدل انتظار فحصٍ لن ينجح
+                    Log.i(TAG, "descriptor stale ($platform $serial) — emit without probe")
+                    if (url.contains(".m3u8", true)) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
+                } else if (q.isNotBlank()) probeQualityUrl(url, type) else probeMedia(url, type)
                 if (kind == null) {
                     Log.w(TAG, "skip dead/mismatched $platform url=${url.take(80)}")
                     continue
@@ -584,7 +627,10 @@ class MosalsalyProvider(
                 // من ExtractorLink.referer وليس headers، وCDNs (مثل netshort) ترفض 403
                 // عندما يصل الطلب بلا Referer → "Source error" / فشل التشغيل.
                 this.referer = mainUrl
-                if (lnk.q.isNotBlank()) this.quality = getQualityFromName(lnk.q)
+                // encByQuality يرسل أرقاماً مجرّدة ("540" و"720" و"1080") في أكثر المنصات،
+                // و"720p" في غيرها. getQualityFromName يتوقّف على لاحقة p، فبلاها كانت كل
+                // الجودات quality=Unknown فتظهر في التطبيق باسم واحد بلا تمييز ولا ترتيب.
+                if (lnk.q.isNotBlank()) this.quality = qualityOfLabel(lnk.q)
             })
         }
         val order = MosalsalySettings.qualityOrder(prefs)
