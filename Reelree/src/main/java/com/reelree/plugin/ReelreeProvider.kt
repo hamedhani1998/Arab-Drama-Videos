@@ -289,6 +289,7 @@ class ReelreeProvider(private val prefs: SharedPreferences? = null) : MainAPI() 
     /** يفحص master ويعرّف جوداته عبر nil #EXT-X-STREAM-INF، ويرجع قائمة (url, qualityLabel). */
     private fun extractVariants(masterText: String, baseUrl: String): List<Pair<String, Int>> {
         val out = mutableListOf<Pair<String, Int>>()
+        val seen = HashSet<String>()
         val lines = masterText.split("\n")
         val resRe = Regex("""RESOLUTION=(\d+x(\d+))""")
         val idxRe = Regex("""BANDWIDTH=(\d+)""")
@@ -300,16 +301,19 @@ class ReelreeProvider(private val prefs: SharedPreferences? = null) : MainAPI() 
                 val resMatch = resRe.find(line)
                 var uri = next
                 if (!uri.startsWith("http")) uri = baseUrl.substringBeforeLast("/") + "/" + uri
-                val q = resMatch?.groupValues?.get(2)?.toIntOrNull()
-                    ?: idxRe.find(line)?.groupValues?.get(1)?.toIntOrNull()?.let { bw ->
-                        when {
-                            bw >= 4000000 -> 1080
-                            bw >= 2000000 -> 720
-                            else -> 480
+                // نفس الـURI مرتين = مُدخل مكرر في الـmaster — يُسقط بدل تكراره في القائمة
+                if (uri.isNotBlank() && seen.add(uri)) {
+                    val q = resMatch?.groupValues?.get(2)?.toIntOrNull()
+                        ?: idxRe.find(line)?.groupValues?.get(1)?.toIntOrNull()?.let { bw ->
+                            when {
+                                bw >= 4000000 -> 1080
+                                bw >= 2000000 -> 720
+                                else -> 480
+                            }
                         }
-                    }
-                    ?: 720
-                out.add(uri to q)
+                        ?: 720
+                    out.add(uri to q)
+                }
                 i++
             }
             i++
@@ -382,7 +386,7 @@ class ReelreeProvider(private val prefs: SharedPreferences? = null) : MainAPI() 
                             if (prefs?.getBoolean(ReelreeSettingsBottomSheet.KEY_SHOW_AUDIO_TRACKS, true) != false) {
                                 callback(newExtractorLink(name, "صوت: ${t.lang}", t.uri, ExtractorLinkType.M3U8) {
                                     referer = mainUrl
-                                    quality = getQualityFromName("720p")
+                                    quality = Qualities.Unknown.value
                                 })
                             }
                         }
@@ -532,7 +536,7 @@ class ReelreeProvider(private val prefs: SharedPreferences? = null) : MainAPI() 
                     callback(newExtractorLink(name, "الحلقة $ep${if (clarity.isBlank()) "" else " · $clarity"}",
                         voucher, ExtractorLinkType.VIDEO) {
                         referer = mainUrl
-                        quality = getQualityFromName(if (clarity.isBlank()) "720p" else clarity)
+                        quality = qualityOfLabel(clarity)
                     })
                 }
                 if (showSubs && !episodeId.isNullOrBlank()) {
@@ -568,7 +572,7 @@ class ReelreeProvider(private val prefs: SharedPreferences? = null) : MainAPI() 
                     callback(newExtractorLink(name, "الحلقة $ep · ${qLabel.ifBlank { "جودة إضافية" }}",
                         qUrl, if (qUrl.endsWith(".m3u8")) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO) {
                         referer = mainUrl
-                        quality = getQualityFromName(if (qLabel.isBlank()) "720p" else qLabel)
+                        quality = qualityOfLabel(qLabel)
                     })
                 }
             }
@@ -583,5 +587,29 @@ class ReelreeProvider(private val prefs: SharedPreferences? = null) : MainAPI() 
             .trim()
         if (s.length < 2) s = t.trim()
         return s
+    }
+
+    /**
+     * CloudStream يبني قائمة الجودة من الحقل `quality` (Int) لا من `name`، وكل روابط
+     * Reelree كانت تمرّر `getQualityFromName("720p")` — فتظهر كلها بنفس الرقم وتختفي
+     * الأسماء الحقيقية للموقع. هنا نُخرج الرقم الحقيقي من التسمية.
+     * تسمية بلا رقم (مثل «جودة إضافية») → Unknown كي لا تصطدم بجودة رابط الحلقة.
+     */
+    private fun qualityOfLabel(label: String?): Int {
+        val raw = label?.trim().orEmpty()
+        val digits = Regex("""(\d{3,4})""").find(raw)?.groupValues?.get(1)?.toIntOrNull()
+            ?: return Qualities.Unknown.value
+        return getQualityFromName(
+            when {
+                digits >= 2160 -> "2160p"
+                digits >= 1440 -> "1440p"
+                digits >= 1080 -> "1080p"
+                digits >= 720 -> "720p"
+                digits >= 480 -> "480p"
+                digits >= 360 -> "360p"
+                digits >= 240 -> "240p"
+                else -> "144p"
+            }
+        )
     }
 }

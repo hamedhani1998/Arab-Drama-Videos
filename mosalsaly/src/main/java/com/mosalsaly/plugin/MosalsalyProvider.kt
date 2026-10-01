@@ -746,7 +746,10 @@ class MosalsalyProvider(
                 true
             }
             else -> {
-                Log.w(TAG, "platform $platform descriptor failed (no links)")
+                // المنصّات خارج goodshort/reelshort ترسل رابطاً مشفّراً (enc) لا رابطاً
+                // يمكن قراءته — ومفتاح فكّه على خادم Mosalsaly وغير منشور، فلا سبيل لتحويله هنا.
+                // نسجّلها صراحةً ليعرف المستخدم أن المشكلة في المنصّة لا في الشبكة.
+                Log.w(TAG, "platform '$platform' not supported (encrypted descriptor, no public resolver) serial=$serial")
                 false
             }
         }
