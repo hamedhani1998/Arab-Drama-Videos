@@ -287,8 +287,9 @@ class MosalsalyProvider(
         val objRe = Regex("""\{[^{}]*chapter_id[^{}]*\}""")
         for (m in objRe.findAll(block)) {
             val obj = m.value
+            // نفس التنظيف في bookId: النص المهرّب يُبقي شرطة مائلة عكسية لاصقة
             val chId = Regex("""(?:\\")?chapter_id(?:\\")?:\s*(?:\\")?([^"\\<>/\s]{1,})(?:\\")?""")
-                .find(obj)?.groupValues?.get(1) ?: continue
+                .find(obj)?.groupValues?.get(1)?.trim('\\', '"', '/') ?: continue
             val ser = Regex("""(?:\\")?serial_number(?:\\")?:\s*(\d+)""")
                 .find(obj)?.groupValues?.get(1)?.toIntOrNull() ?: continue
             // ReelShort يبدأ serial من 0 — لا نفيلتر هنا
@@ -334,8 +335,11 @@ class MosalsalyProvider(
         val episodes = parseEpisodes(html)
         // bookId قد يكون مهرّباً أو عادياً، وقد يحمل معرّفات لأصيلة (مثل stardust = اسم العمل العربي
         // `حب-بدأ-بكذبة` يحتوي شرطات وأحرف عربية) — نقبل أي مجموعة ما عدا علامات الإغلاق/الهروب.
+        // ثم نشيل أي شرطة مائلة عكسية/علامة اقتباس لاصقة: المُهرِّب ينتج
+        // bookId\":\"2062073462919725058\" وقد التقط النمط الشرطة فصار المُعرّف
+        // 20 خانة لا 19 → طلب /api/episode-source يردّ descriptor=null بلا سبب ظاهر.
         val bookId = Regex("""(?:\\")?bookId(?:\\")?:\s*(?:\\")?([^"\\<>/\s]{3,})(?:\\")?""")
-            .find(html)?.groupValues?.get(1) ?: return null
+            .find(html)?.groupValues?.get(1)?.trim('\\', '"', '/') ?: return null
         if (episodes.isEmpty()) return null
         val platform = extractPlatform(html)?.lowercase() ?: return null
         Log.i(TAG, "load ok slug=$slug bookId=$bookId platform=$platform eps=${episodes.size}")
