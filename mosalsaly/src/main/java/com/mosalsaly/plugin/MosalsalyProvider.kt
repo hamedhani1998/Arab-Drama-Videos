@@ -147,14 +147,21 @@ class MosalsalyProvider(
 
     override val mainPage by lazy { mainPageOf(*homeSections.toTypedArray()) }
 
-    // جلب مع إعادة محاولة — الموقع بطيء/unstable؛ نفس نمط ReelShort
-    private suspend fun getWithRetry(url: String, referer: String?, attempts: Int = 3, backoffMs: Long = 300): String {
-        var last = ""
+    // جلب مع إعادة محاولة — الموقع بطيء/unstable؛ نفس نمط ReelShort.
+    // كان يبتلع كل استثناء ويُعيد "" — وهو ما جعل فشل الشبكة يبدو كـ«لا نتائج».
+    // الآن نسجّل السبب ونُعيد null ليميزه المستدعي عن الفراغ الحقيقي.
+    private suspend fun getWithRetry(url: String, referer: String?, attempts: Int = 3, backoffMs: Long = 300): String? {
+        var last: String? = null
         for (i in 0 until attempts) {
             try {
                 val text = app.get(url, headers = mapOf("User-Agent" to MOS_UA), referer = referer).text
                 if (text.isNotBlank()) return text
-            } catch (e: Exception) { last = "" }
+                last = null
+                Log.w(TAG, "attempt $i blank body from $url")
+            } catch (e: Exception) {
+                last = null
+                Log.w(TAG, "attempt $i failed: ${e.message}")
+            }
             try { Thread.sleep(backoffMs) } catch (e: Exception) {}
         }
         return last
@@ -198,20 +205,29 @@ class MosalsalyProvider(
         val isSection = EXTRA_SECTIONS.any { it.first == slug }
         val base = if (isSection) "$mainUrl/tasnif/$slug" else "$mainUrl/masdar/$slug"
         val url = if (page <= 1) base else "$base/page/$page"
-        val html = try { getWithRetry(url, mainUrl, 3, 300) } catch (e: Exception) { "" }
-        Log.i(TAG, "getMainPage slug=$slug len=${html.length}")
-        if (html.isEmpty()) return null
-        val items = parseCards(html)
+        val fetched = try { getWithRetry(url, mainUrl, 3, 300) } catch (e: Exception) { null }
+        Log.i(TAG, "getMainPage slug=$slug len=${fetched?.length ?: -1}")
+        if (fetched.isNullOrBlank()) return null
+        val items = parseCards(fetched)
         Log.i(TAG, "getMainPage slug=$slug cards=${items.size}")
         return if (items.isEmpty()) null else newHomePageResponse(request.name, items)
     }
 
-    override suspend fun search(query: String): List<SearchResponse>? {
+    // hasQuickSearch = true (سطر 136) بلا تنفيذ quickSearch: صندوق البحث في
+    // التطبيق يبقى فارغاً ولا يستدعي search() أصلاً. aryarabia/lodynet/
+    // ShortDramaAR يوفّرونه صراحةً — وهذا الفرق مُثبَت في المستودع لا مُخمَّن.
+    override suspend fun quickSearch(query: String): List<SearchResponse> = search(query)
+
+    override suspend fun search(query: String): List<SearchResponse> {
         if (query.trim().length < 3) return emptyList()
         val q = java.net.URLEncoder.encode(query.trim(), "UTF-8").replace("+", "%20")
         val html = try {
             getWithRetry("$mainUrl/search?q=$q", mainUrl, 3, 300)
-        } catch (e: Exception) { return emptyList() }
+        } catch (e: Exception) { null }
+        // getWithRetry كان يبتلع كل استثناء ويُعيد "" — جولة فاشلة تظهر للمستخدم
+        // كـ«لا نتائج». صار يُعيد null ليميزه عن الفراغ الحقيقي.
+        Log.i(TAG, "search '$query' len=${html?.length ?: -1}")
+        if (html.isNullOrBlank()) return emptyList()
         return parseCards(html)
     }
 
@@ -304,9 +320,10 @@ class MosalsalyProvider(
     override suspend fun load(url: String): LoadResponse? {
         val slug = url.substringAfter("/mosalsal/").substringBefore("?")
         if (slug.isBlank()) return null
-        val html = try { getWithRetry("$mainUrl/mosalsal/$slug", mainUrl, 4, 400) }
-        catch (e: Exception) { return null }
-        if (html.isEmpty()) return null
+        val fetched = try { getWithRetry("$mainUrl/mosalsal/$slug", mainUrl, 4, 400) }
+        catch (e: Exception) { null }
+        if (fetched.isNullOrBlank()) return null
+        val html = fetched
 
         // meta title h1
         val h1 = Regex("""<h1[^>]*>\s*([^<]{2,})\s*</h1>""").find(html)?.groupValues?.get(1)?.trim()
@@ -357,7 +374,7 @@ class MosalsalyProvider(
         val url = "$mainUrl/api/episode-source/$bookId/$serial?lang=ar&refresh=$refreshFlag"
         return try {
             val text = getWithRetry(url, mainUrl, 3, 400)
-            if (text.isBlank()) { Log.w(TAG, "no descriptor text serial=$serial"); return null }
+            if (text.isNullOrBlank()) { Log.w(TAG, "no descriptor text serial=$serial"); return null }
             val node = mosMapper.readTree(text)
             runCatching {
                 val d = node.get("descriptor") as? ObjectNode
@@ -676,8 +693,8 @@ class MosalsalyProvider(
                 val m3u8 = "$GOOD_BASE/$chapterId?bookId=$bookId&q=720p"
                 try {
                     val master = getWithRetry(m3u8, mainUrl, 4, 400)
-                    if (master.isBlank() || !master.contains("#EXTM3U")) {
-                        Log.w(TAG, "goodshort no master bookId=$bookId ch=$chapterId len=${master.length}")
+                    if (master.isNullOrBlank() || !master.contains("#EXTM3U")) {
+                        Log.w(TAG, "goodshort no master bookId=$bookId ch=$chapterId len=${master?.length ?: -1}")
                         return false
                     }
                     callback(newExtractorLink(name, "GoodShort $serial", cleanM3u8(m3u8), ExtractorLinkType.M3U8) {
@@ -702,6 +719,10 @@ class MosalsalyProvider(
                 val epUrl = "$REEL_MAIN/ar/episodes/episode-$serial-$slugEnc-$bookId-$chapterId"
                 val html = try { getWithRetry(epUrl, REEL_MAIN, 5, 400) } catch (e: Exception) {
                     Log.w(TAG, "reelshort fetch except ${e.message}")
+                    return false
+                }
+                if (html.isNullOrBlank()) {
+                    Log.w(TAG, "reelshort blank html url=$epUrl")
                     return false
                 }
                 val root = Regex("""<script[^>]*id="__NEXT_DATA__"[^>]*type="application/json"[^>]*>\s*([\s\S]*?)\s*</script>""")
