@@ -74,27 +74,10 @@ class MosalsalySettings(private val prefs: SharedPreferences) : BottomSheetDialo
         /** بادئة مفاتيح تفعيل المنصات — لكل منصة مفتاح مستقل. */
         const val KEY_PLATFORM_PREFIX = "mos_platform_"
 
-        // المنصات (تتطابق مع PLATFORMS في MosalsalyProvider)
-        val PLATFORM_KEYS = listOf(
-            "goodshort" to "GoodShort",
-            "reelshort" to "Reelshort",
-            "dotdrama" to "DotDrama",
-            "dramabite" to "DramaBite",
-            "dramabox" to "DramaBox",
-            "flickreels" to "FlickReels",
-            "happyshort" to "HappyShort",
-            "joyreels" to "JoyReels",
-            "kalostv" to "KalosTV",
-            "moboreels" to "MoboReels",
-            "moreshort" to "MoreShort",
-            "mydramawave" to "MyDramaWave",
-            "netshort" to "NetShort",
-            "petadrama" to "PetaDrama",
-            "shorttv" to "ShortTV",
-            "shortwave" to "ShortWave",
-            "stardust" to "Stardust",
-            "storyreel" to "StoryReel",
-        )
+        // المنصات — المصدر الوحيد هو PLATFORMS في MosalsalyProvider. كانت هنا نسخة
+        // منفصلة (18) تُنسَخ يدوياً، فأي إضافة لمنصة في المزوّد لا تظهر في الإعدادات
+        // ولا في الواجهة؛ وحذفها هنا يمنع ذلك من التكرار.
+        internal val PLATFORM_KEYS: List<Pair<String, String>> = PLATFORMS
 
         fun isPlatformEnabled(prefs: SharedPreferences?, key: String): Boolean =
             prefs?.getBoolean(KEY_PLATFORM_PREFIX + key, true) ?: true

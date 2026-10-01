@@ -115,15 +115,20 @@ private fun refreshSubtitleAuth(subUrl: String, videoUrl: String?): String {
         Regex("auth_key=([^&\\s]+)").find(videoUrl)!!.groupValues[1])
 }
 
-// المنصات الثمانية عشر (كما في /sources) — كلها قابلة للتشغيل عبر /api/episode-source
-private val PLATFORMS = listOf(
-    "goodshort" to "GoodShort",
-    "reelshort" to "Reelshort",
+// المنصات الثلاث والعشرون (كما في الصفحة الرئيسية للموقع) — كلها قابلة للتشغيل
+// عبر /api/episode-source الموحّد. القائمة مقروءة من /masdar/ في الموقع لا من تخميننا:
+// bibishort/bilitv/idrama/pinedrama/playlet أُضيفت بعد ظهورها هناك.
+// PLATFORM_BY_DISPLAY و homeSections مشتقّتان من هذه القائمة فيتّسعان معها تلقائياً.
+internal val PLATFORMS = listOf(
+    "bibishort" to "BibiShort",
+    "bilitv" to "BiliTV",
     "dotdrama" to "DotDrama",
     "dramabite" to "DramaBite",
     "dramabox" to "DramaBox",
     "flickreels" to "FlickReels",
+    "goodshort" to "GoodShort",
     "happyshort" to "HappyShort",
+    "idrama" to "IDrama",
     "joyreels" to "JoyReels",
     "kalostv" to "KalosTV",
     "moboreels" to "MoboReels",
@@ -131,6 +136,9 @@ private val PLATFORMS = listOf(
     "mydramawave" to "MyDramaWave",
     "netshort" to "NetShort",
     "petadrama" to "PetaDrama",
+    "pinedrama" to "PineDrama",
+    "playlet" to "Playlet",
+    "reelshort" to "Reelshort",
     "shorttv" to "ShortTV",
     "shortwave" to "ShortWave",
     "stardust" to "Stardust",
