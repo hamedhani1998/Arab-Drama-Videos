@@ -349,6 +349,13 @@ class MosalsalyProvider(
                 Log.w(TAG, "attempt $i blank body from $url")
             } catch (e: Exception) {
                 Log.w(TAG, "attempt $i failed: ${e.message}")
+                // التطبيق يُلغي النداء الذي لم يعد الأحدث عند مغادرة المستخدم
+                // الحلقة. ابتلاع الإلغاء يعني ثلاث محاولات ميتة وأربع نوم
+                // إضافية بعد أن قرّرنا التوقّف. قِسناه على الجهاز:
+                //   attempt 1 failed: Job was cancelled
+                //   attempt 2 failed: Job was cancelled
+                // ثم «no descriptor» بعد ١٦ ثانية من تركه المستخدم.
+                if (e is kotlinx.coroutines.CancellationException) throw e
             }
             if (i < attempts - 1) {
                 try { Thread.sleep(backoffMs * (1L shl i)) } catch (e: Exception) {}
@@ -654,9 +661,16 @@ class MosalsalyProvider(
      * وقِسنا أنّه فعلاً قائمة: ‎200‎ ونوعه ‎application/vnd.apple.mpegurl‎
      * ويبدأ بـ ‎#EXTM3U‎ وفيه ٥١ قطعة. فنخرج المسار من «الملف المباشر».
      */
-    private fun kindByName(url: String): ExtractorLinkType =
+    private fun kindByName(url: String, declaredType: String? = null): ExtractorLinkType =
         if (url.contains(".m3u8", true) || url.contains(".m3u", true) ||
-            HLS_PATH_RE.containsMatchIn(url)
+            HLS_PATH_RE.containsMatchIn(url) ||
+            // storyreel بلا امتداد ولا حتى مسار hls: الرابط ‎/e/m/<base64>‎ —
+            // ‏type=storyreel يعني قائمة تشغيل، فالاسم وحده لا يميّزه عن ملف mp4.
+            // قِسنا على الجهاز خطأ 3003 (UnrecognizedInputFormatException) من
+            // رابط storyreel وُسم VIDEO: الجسد ليس فيديو. وقِسنا كذلك أنّ
+            // ‏probeMedia كان سيُسقطه بجواب 200 من serverه (invalid or expired
+            // token) — لكن «الروابط الحيّة فقط» مُطفأة فلا فحص يقع أصلاً.
+            (declaredType?.lowercase() == "storyreel")
         ) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
 
     private suspend fun probeMedia(url: String, declaredType: String?): ExtractorLinkType? {
@@ -836,11 +850,11 @@ class MosalsalyProvider(
                 val kind = when {
                     // «الروابط الحيّة فقط» مُطفأ: نصنّف نمطياً من الامتداد ونعرض كما وردت
                     // بلا فحص شبكة — أسرع، ويصلح حين يعجز فحصنا عن قراءة CDN.
-                    !probeOn -> kindByName(url)
+                    !probeOn -> kindByName(url, type)
                     descriptorStale -> {
                         // نعرف أنها ستُرفض؛ نصنّفها نمطياً بدل انتظار فحصٍ لن ينجح
                         Log.i(TAG, "descriptor stale ($platform $serial) — emit without probe")
-                        kindByName(url)
+                        kindByName(url, type)
                     }
                     q.isNotBlank() -> probeQualityUrl(url, type)
                     else -> probeMedia(url, type)
