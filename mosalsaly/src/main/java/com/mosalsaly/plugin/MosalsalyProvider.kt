@@ -534,7 +534,11 @@ class MosalsalyProvider(
         // ثم نشيل أي شرطة مائلة عكسية/علامة اقتباس لاصقة: المُهرِّب ينتج
         // bookId\":\"2062073462919725058\" وقد التقط النمط الشرطة فصار المُعرّف
         // 20 خانة لا 19 → طلب /api/episode-source يردّ descriptor=null بلا سبب ظاهر.
-        val bookId = Regex("""(?:\\")?bookId(?:\\")?:\s*(?:\\")?([^"\\<>/\s]{3,})(?:\\")?""")
+        // الحدّ الأدنى حرفان لا ثلاثة: بعض المنصات تكتب معرّفاً رمزياً قصيراً،
+        // و«عدو» (bilitv) مثاله — الـbookId عنده حرفي «dw» لا رقم. وقِسنا أنّ
+        // ‎/api/episode-source/dw/1‎ يردّ بواصف كامل من 1136 بايت، فالمعرّف
+        // صحيح، وكنا نرفضه لقِصَره وحده.
+        val bookId = Regex("""(?:\\")?bookId(?:\\")?:\s*(?:\\")?([^"\\<>/\s]{2,})(?:\\")?""")
             .find(html)?.groupValues?.get(1)?.trim('\\', '"', '/') ?: return null
         if (episodes.isEmpty()) return null
         val platform = extractPlatform(html)?.lowercase() ?: return null
