@@ -36,8 +36,9 @@ private const val UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/53
  * القائمة كسرٌ صامت يُرجع صفراً بلا خطأ. والترجمات في مكانين منفصلين:
  *   · `/api/v2/{code}.json` → `subs[]` (ترجمةٌ واحدة للمسلسل كلّه، حتّى 25 لغة)
  *   · `/api/subtitles` (ns) → `data.subtitleList[]` (ترجمة لكل حلقة)
- * وكلاهما يُقدَّم للاعب عبر `/api/subtitle-proxy?url=…` لأن DramaWave يكتب
- * `.srt` خاماً (نصٌّ بفواصل) والمشغّل لا يقبله — الوسيط يحوّله WebVTT.
+ * وكلاهما يُقدَّم للمشغّل مباشرةً لأن الملفات جاهزة WebVTT سلفاً
+ * (`text/vtt`، وتوقيتات بنقاط) — لا عبر وسيط الموقع، فشهادة reelree.com منتهية.
+ * وللتفصيل انظر `subtitleUrl`.
  */
 class ReelreeProvider(private val prefs: SharedPreferences? = null) : MainAPI() {
     override var name = "Reelree"
@@ -344,8 +345,8 @@ class ReelreeProvider(private val prefs: SharedPreferences? = null) : MainAPI() 
                 if (!uri.startsWith("http")) uri = baseUrl.substringBeforeLast("/") + "/" + uri
                 // نفس الـURI مرتين = مُدخل مكرر في الـmaster — يُسقط بدل تكراره في القائمة
                 if (uri.isNotBlank() && seen.add(uri)) {
-                    // الضلع القصير هو رقم الجودة: مسلسلاتنا رأسية 1080×1920，وقراءة البعد الثاني (1920) تخدعنا فيعطي 1440p لحلقة 1080.
-                    // للبعد الثاني (1920) كان يخدعنا فيعطي 1440p لحلقة 1080.
+                    // الضلع القصير هو رقم الجودة: مسلسلاتنا رأسية 1080×1920، وقراءة
+                    // البعد الثاني (1920) كانت تخدعنا فيعطي 1440p لحلقة عرضها 1080.
                     val q = resMatch?.groupValues?.get(1)?.toIntOrNull()
                         ?.let { w ->
                             val h = resMatch.groupValues.get(2).toIntOrNull() ?: w
@@ -606,15 +607,24 @@ private fun langCodeOf(raw: String?): String {
 }
 
 /**
- * مشغّل CloudStream يرفض ملفّات SRT الخام (نصٌّ بفواصل) ويقبل WebVTT فقط،
- * وDramaWave يكتب `.srt` خاماً. فنمرّر كل ترجمةٍ عبر وسيط الموقع
- * `/api/subtitle-proxy?url=…` الذي يحوّل SRT←VTT ويمرّر VTT كما هو (مقيس).
+ * وهنا مكمنُ علّةٍ قِسْتُها اليوم: **شهادة `reelree.com` منتهية** (مقيس 2026-10-02،
+ * `certificate has expired`). المشغّل يتحقّق من الشهادات ولا يملك مُمرِّراً معطوباً
+ * كـ`app.get`، فكان كل ترجمةٍ نمُرّها عبر `/api/subtitle-proxy` تظهر في القائمة
+ * ثم تفشل عند الاختيار.
+ *
+ * والوسيطُ لا لزوم له أصلاً: ملفات DramaWave وNetShort **جاهزة WebVTT** سلفاً
+ * `text/vtt`، تبدأ `WEBVTT`، توقيتاتها بنقاط لا بفواصل — 25 من 25 لغة). فالمسار
+ * المباشر يقود إلى مضيفٍ بشهادة سليمة ويصل أضمن وأسرع. ونُبقي الوسيط فقط فيما
+ * كان الامتداد `.srt` فعلاً، وهي حالة لم ترد في القياس لكنها قد ترد.
  */
 private val SITE = "https://reelree.com"
 
-private fun subtitleUrl(raw: String): String =
-    if (raw.startsWith("/api/")) SITE + raw
+private fun subtitleUrl(raw: String): String {
+    if (raw.startsWith("/api/")) return SITE + raw
+    val tail = raw.substringBefore('?').substringAfterLast('/').lowercase()
+    return if (tail.endsWith(".vtt")) raw
     else "$SITE/api/subtitle-proxy?url=" + java.net.URLEncoder.encode(raw, "UTF-8")
+}
 
 /** نصّف قائمة ترجمات المصدر (حقول كما في normalizeSubs بموقع Reelree) إلى SubtitleFile. */
     private suspend fun normalizeSubs(node: com.fasterxml.jackson.databind.JsonNode?): List<SubtitleFile> {
