@@ -238,12 +238,16 @@ class MosalsalyProvider(
     }
 
     override val mainPage by lazy {
-        val page = mainPageOf(*homeSections.toTypedArray())
-        // إحماء مسبق: أول ما تفتح الواجهة نبدأ جلب كل الأقسام في الخلفية، فتلحق
-        // CloudStream لاحقاً بنفس الجلب المعلّق (Deferred مشترك) بدل أن تبدأ من الصفر.
-        //Launcher يبتلع أكثرها قبل أن يمرّر المستخدم إلى الصفحة أصلاً.
-        sectionStore.warm(homeSections.map { it.first })
-        page
+        // نبدأ الإحماء قبل حساب الصفحة لا بعده. الصفحة تُحسب كلها قبل
+        // بلوغ أي سطر بعدها، فكان سطر warm لا يُنفَّذ إلا عند انتهاء الحساب
+        // كلّه — أي بعد أن تكون قد ظهرت أقسام فارغة لانقضاء مهلة الانتظار.
+        sectionStore.warm(homeSections.map { it.first }) { slug ->
+            if (EXTRA_SECTIONS.any { it.first == slug })
+                fetchCards("$mainUrl/tasnif/$slug")
+            else
+                fetchCards("$mainUrl/masdar/$slug")
+        }
+        mainPageOf(*homeSections.toTypedArray())
     }
 
     // بطاقات قسم واحد: جلب + تحليل. تُستدعى من SectionStore (متزامن أو خلفي)
@@ -314,8 +318,8 @@ class MosalsalyProvider(
             }
         }
 
-        fun warm(slugs: List<String>) {
-            for (s in slugs) scope.launch { runCatching { await(s, { emptyList() }, 0) } }
+        fun warm(slugs: List<String>, fetchFor: suspend (String) -> List<SearchResponse>) {
+            for (s in slugs) scope.launch { runCatching { await(s, { fetchFor(s) }, 0L) } }
         }
 
         companion object { const val TTL_MS = 30 * 60 * 1000L }
