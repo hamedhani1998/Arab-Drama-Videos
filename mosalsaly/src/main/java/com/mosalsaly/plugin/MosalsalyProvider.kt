@@ -94,7 +94,7 @@ private fun qualityOfLabel(label: String): Int {
  *
  * القوائم الأم (master) تحمل بجوار جوداتها مسارات الصوت: EXT-X-MEDIA:TYPE=AUDIO…URI="a.m3u8"
  * نقرؤها ونمرّرها في ExtractorLink.audioTracks فيظهر اختيار الصوت في المشغّل.
- * ничего يُقرأ إن لم تكن القائمة أم أو لم تحمل صوتاً — وقِسنا أن موقع Mosalsaly
+ * لا يُقرأ شيء إن لم تكن القائمة أم أو لم تحمل صوتاً — وقِسنا أن موقع Mosalsaly
  * لا يرسل أي مسار صوت في واصف الحلقة إطلاقاً، فهذه هي الطريق الوحيد.
  */
 private suspend fun audioTracksOf(masterUrl: String, mainUrl: String): List<AudioFile> {
@@ -399,9 +399,9 @@ class MosalsalyProvider(
         return if (items.isEmpty()) null else newHomePageResponse(request.name, items)
     }
 
-    // hasQuickSearch = true (سطر 136) بلا تنفيذ quickSearch: صندوق البحث في
-    // التطبيق يبقى فارغاً ولا يستدعي search() أصلاً. aryarabia/lodynet/
-    // ShortDramaAR يوفّرونه صراحةً — وهذا الفرق مُثبَت في المستودع لا مُخمَّن.
+    // hasQuickSearch = true بلا تنفيذ quickSearch كان يجعل صندوق البحث في
+    // التطبيق يرمي NotImplementedError بدل أن يبحث، فالافتراضي في MainAPI
+    // يرمي ولا يفرض شيئاً. التوجيه هنا يجعله يمرّ إلى search() نفسه.
     override suspend fun quickSearch(query: String): List<SearchResponse> = search(query)
 
     override suspend fun search(query: String): List<SearchResponse> {
@@ -755,7 +755,7 @@ class MosalsalyProvider(
             }
             // مفتاح «default» ليس جودة بل قائمة تشغيل أم (master): petadrama يُرجع
             // default=master.m3u8 مع 540/720/1080 بجواره، والأم تحمل الثلاثة داخلها
-            // عبر EXT-X-STREAM-INF. نرفع الأم إلى Videos[] — ExoPlayer يختار منها
+            // عبر EXT-X-STREAM-INF. نرفع الأم سطراً مستقلاً — ExoPlayer يختار منها
             // تلقائياً ويعرض كل الجودات في قائمة جودة المشغّل — ونبقي المتغيّرات
             // كروابط مستقلة فتبقى الجودات مسمّاة لا مجهولة.
             val masterKey = candidates.keys.firstOrNull { it.equals("default", true) }
@@ -849,7 +849,7 @@ class MosalsalyProvider(
                 if (lnk.q.isNotBlank()) this.quality = qualityOfLabel(lnk.q)
                 // مسارات الصوت: قائمة الأم تحمّل EXT-X-MEDIA:TYPE=AUDIO بجوار جوداتها،
                 // فنقرأها ونمرّرها في audioTracks فيختارها المستخدم من قائمة الصوت
-                // داخل المشغّل. بلاها كان الصوت outsider مفقوداً في المنصات HLS.
+                // داخل المشغّل. وبلاها كان الصوت مفقوداً في المنصات HLS.
                 // الواصف نفسه لا يحمل أي حقل صوت (قِسنا 13 منصة: chain/source/subtitle
                 // فقط) — فالمصدر الوحيد لهذه المسارات هو قائمة الأم.
                 if (lnk.variants.isNotEmpty() && MosalsalySettings.showAudio(prefs)) {
@@ -936,8 +936,11 @@ class MosalsalyProvider(
     ): Boolean {
         val p = data.split("||")
         if (p.size < 4) return false
-        // أول حقل يحمل بادئة نصية "id:" وربما يصل مدمجاً مع mainUrl — ننظّفه دائماً
-        var bookId = p[0].substringAfterLast("/").removePrefix("id:")
+        // أول حقل هو bookId مسبوقاً بـ"id:" — وهذا ما يبنيه المزوّد في loadContent
+        // مباشرةً بلا شرطة مائلة، فنكتفي بحذف البادئة. أما قصّ آخر «/» فبقيّة
+        // من بنية كانت المعرّفات فيها مسارات، وهو الآن يبتلع أي bookId فيه
+        // «/» بدل أن يمرّره كما هو.
+        val bookId = p[0].removePrefix("id:").trim()
         val chapterId = p[1]
         val serial = p[2].toIntOrNull() ?: return false
         val platform = p[3].lowercase()

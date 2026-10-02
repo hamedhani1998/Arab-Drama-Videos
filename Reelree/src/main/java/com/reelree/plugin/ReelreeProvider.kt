@@ -219,9 +219,9 @@ class ReelreeProvider(private val prefs: SharedPreferences? = null) : MainAPI() 
         }
     }
 
-    // hasQuickSearch = true بلا تنفيذ quickSearch: صندوق البحث السريع في التطبيق
-    // يبقى فارغاً ولا يستدعي search() أصلاً عند بعض الشاشات. aryarabia/mosalsaly/
-    // lodynet يوفّرونه صراحةً — نفس النمط هنا.
+    // hasQuickSearch = true بلا تنفيذ quickSearch كان يترك صندوق البحث السريع
+    // فارغاً: الافتراضي في MainAPI يرمي NotImplementedError، والتطبيق لا
+    // يستدعي search() عند بعض الشاشات. التوجيه يجعله يمرّ إلى search().
     override suspend fun quickSearch(query: String): List<SearchResponse> = search(query)
 
     /** يحلل data-rr-server2 (HTML-entities) إلى RrServer. */

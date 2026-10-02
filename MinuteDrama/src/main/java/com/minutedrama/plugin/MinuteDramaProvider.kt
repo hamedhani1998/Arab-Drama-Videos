@@ -191,9 +191,8 @@ class MinuteDramaProvider(private val prefs: SharedPreferences? = null) : MainAP
         } catch (e: Exception) { null }
     }
 
-    // MinuteDrama يعلن hasQuickSearch = true بلا أن يوفّر quickSearch، والافتراضي في
-    // MainAPI يرمي NotImplementedError — فيبقى صندوق البحث في التطبيق يرمي بدل
-    // أن يبحث. التوجيه سطر واحد، نفس ما يفعله mosalsaly/reelree/aryarabia/lodynet.
+    // hasQuickSearch = true بلا تنفيذ quickSearch كان يجعل صندوق البحث يرمي
+    // NotImplementedError (الافتراضي في MainAPI) بدل أن يبحث. التوجيه سطر واحد.
     override suspend fun quickSearch(query: String): List<SearchResponse> = search(query) ?: emptyList()
 
     override suspend fun load(url: String): LoadResponse? {
