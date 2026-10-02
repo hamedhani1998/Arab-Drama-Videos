@@ -643,14 +643,27 @@ class OnShortProvider(private val prefs: SharedPreferences? = null) : MainAPI() 
         val subs = node.get("subtitles")
         if (subs != null && subs.isArray) {
             val seen = mutableSetOf<String>()
+            var sent = 0
             for (s in subs) {
                 val su = s.get("url")?.asText() ?: continue
                 if (su.isBlank()) continue
                 if (!seen.add(su)) continue
                 val langRaw = s.get("lang")?.asText() ?: s.get("label")?.asText() ?: "ar"
+                // لا نمرّر التسمية العربية الواردة في label: قِسنا على الـAPI أنّ
+                // SubtitleHelper.fromCodeToLangTagIETF("اليابانية") = null، فالتطبيق
+                // وفي المقابل التطبيق يترجم الرمز
+                // بنفسه: fromTagToLanguageName("ja","ar") = «اليابانية»
+                // — أي التسمية العربية تُشتقّ منه لا تُمرَّر. فنُبقي الرمز القصير.
                 val lang = normalizeLang(langRaw)
-                try { subtitleCallback(newSubtitleFile(lang, su)) } catch (_: Exception) {}
+                try {
+                    subtitleCallback(newSubtitleFile(lang, su))
+                    sent++
+                } catch (e: Exception) {
+                    // ابتلاؤه كان صامتاً تماماً: استثناء في واحدة يُخفي الفهم
+                    logE("OnShort.emitNode subtitle $lang failed: ${e.message}")
+                }
             }
+            logD("OnShort.emitNode($labelSource) subtitles sent=$sent of ${subs.size()}")
         }
     }
 

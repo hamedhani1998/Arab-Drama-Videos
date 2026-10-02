@@ -98,11 +98,15 @@ private fun qualityOfLabel(label: String): Int {
  * لا يرسل أي مسار صوت في واصف الحلقة إطلاقاً، فهذه هي الطريق الوحيد.
  */
 private suspend fun audioTracksOf(masterUrl: String, mainUrl: String): List<AudioFile> {
+    // مهلة قصيرة: هذه الدالة تُستدعى لكل رابط مصنَّف قائمة أم، فمن بلا حدّ
+    // تضاعف زمن التشغيل بعدد الروابط، لموت رابط واحد يوقف كل شيء.
     val text = try {
-        app.get(masterUrl, headers = mapOf("User-Agent" to MOS_UA, "Referer" to mainUrl), referer = mainUrl).text
+        withTimeoutOrNull(2500L) {
+            app.get(masterUrl, headers = mapOf("User-Agent" to MOS_UA, "Referer" to mainUrl), referer = mainUrl).text
+        }
     } catch (e: Exception) {
         Log.w(TAG, "audioTracks fetch fail ${e.message}"); return emptyList()
-    }
+    } ?: return emptyList()
     if (!text.trimStart().startsWith("#EXT")) return emptyList()
     val out = mutableListOf<AudioFile>()
     val seen = HashSet<String>()
@@ -695,16 +699,24 @@ class MosalsalyProvider(
         }
 
         return try {
-            val resp = app.get(
-                url,
-                headers = mapOf(
-                    "User-Agent" to MOS_UA,
-                    "Referer" to mainUrl,
-                    "Range" to "bytes=0-65535",
-                ),
-                referer = mainUrl,
-            )
-            val text = resp.text
+            // مهلة صريحة قصيرة. app.get بلا timeoutMillis ينتظر عشر ثوانٍ كاملة
+            // على رابط ميت، وهي أطول من مهلة loadLinks عندها يفشل التطبيق ويعرض
+            // «لا روابط» — فالفحص كان يزيد البطء ولا يصلحه. نستعمل
+            // HttpURLConnection كالنمط السائد في الملفّ (probeQualityUrlHttp11):
+            // طلب واحد برأس صغير، ومهلة 2.5/3.5 ثانية تكفي لقراءة #EXTM3U.
+            val conn = java.net.URL(url).openConnection() as java.net.HttpURLConnection
+            conn.requestMethod = "GET"
+            conn.connectTimeout = 2500
+            conn.readTimeout = 3500
+            conn.instanceFollowRedirects = true
+            conn.setRequestProperty("User-Agent", MOS_UA)
+            conn.setRequestProperty("Referer", mainUrl)
+            conn.setRequestProperty("Range", "bytes=0-65535")
+            val code = conn.responseCode
+            val stream = if (code in 200..299) conn.inputStream else conn.errorStream
+            val text = stream?.bufferedReader(Charsets.UTF_8)?.use { it.readText() }.orEmpty()
+            stream?.close()
+            conn.disconnect()
             if (text.isNotBlank() && text.trimStart().startsWith("#EXTM3U")) {
                 ExtractorLinkType.M3U8
             } else {
@@ -838,27 +850,34 @@ class MosalsalyProvider(
             // يبعد الروابط الميتة (404/403/HTML) ويصحّح التصنيف الكاذب (moboreels m3u8 كـ mp4 → 3003).
             // التصنيف من امتداد الرابط أيضاً هنا: بعض المنصات تعلن type=hls وتخدم mp4 فعلياً.
             val probeOn = MosalsalySettings.onlyAlive(prefs)
-            for ((url, q) in candidates) {
-                if (!seen.add(url)) continue
 
+            // الفحص متوازٍ لا متسلسل. قِسنا على جهازك ثلاث محاولات × عشر ثوانٍ
+            // لكل رابط ميت، أي ثلاثين ثانية قبل «لا روابط»، لأنّها كانت متتابعة.
+            // الروابط مستقلّة عن بعضها، فنطلقها معاً عبر async: ثلاث روابط
+            // تُفحص في زمن رابط واحد. الترتيب حافظ عليه await-all ثم المرور.
+            val toProbe = candidates.entries.filter { (_, q) ->
                 // إعداد «الجودات»: "high" = الأعلى فقط — يعرض رابطاً واحداً (الأساس غالباً)
-                if (MosalsalySettings.qualityMode(prefs) == "high" && q.isNotBlank()) {
-                    Log.i(TAG, "qualityMode=high, skipping $platform $q")
-                    continue
-                }
+                !(MosalsalySettings.qualityMode(prefs) == "high" && q.isNotBlank())
+            }
 
-                val kind = when {
-                    // «الروابط الحيّة فقط» مُطفأ: نصنّف نمطياً من الامتداد ونعرض كما وردت
-                    // بلا فحص شبكة — أسرع، ويصلح حين يعجز فحصنا عن قراءة CDN.
-                    !probeOn -> kindByName(url, type)
-                    descriptorStale -> {
-                        // نعرف أنها ستُرفض؛ نصنّفها نمطياً بدل انتظار فحصٍ لن ينجح
-                        Log.i(TAG, "descriptor stale ($platform $serial) — emit without probe")
-                        kindByName(url, type)
+            // seen يُحدَّث هنا أيضاً: الروابط المكرّرة في هذه السلسلة تُقفز قبل الفحص.
+            val fresh = toProbe.filter { seen.add(it.key) }
+            val probed: List<Pair<Pair<String, String>, ExtractorLinkType?>> =
+                if (!probeOn || descriptorStale) {
+                    if (descriptorStale) Log.i(TAG, "descriptor stale ($platform $serial) — emit without probe")
+                    fresh.map { (url, q) -> (url to q) to kindByName(url, type) }
+                } else {
+                    kotlinx.coroutines.coroutineScope {
+                        val jobs = fresh.map { (url, q) ->
+                            async(Dispatchers.IO) {
+                                url to q to (if (q.isNotBlank()) probeQualityUrl(url, type) else probeMedia(url, type))
+                            }
+                        }
+                        jobs.map { it.await() }
                     }
-                    q.isNotBlank() -> probeQualityUrl(url, type)
-                    else -> probeMedia(url, type)
                 }
+            for ((entry, kind) in probed) {
+                val (url, q) = entry
                 if (kind == null) {
                     Log.w(TAG, "skip dead/mismatched $platform url=${url.take(80)}")
                     continue
