@@ -331,6 +331,12 @@ class MosalsalyProvider(
     // جلب مع إعادة محاولة — الموقع بطيء/unstable؛ نفس نمط ReelShort.
     // كان يبتلع كل استثناء ويُعيد "" — وهو ما جعل فشل الشبكة يبدو كـ«لا نتائج».
     // الآن نسجّل السبب ونُعيد null ليميزه المستدعي عن الفراغ الحقيقي.
+    //
+    // الانتظار بين المحاولات متصاعد (300 ثم 600 ثم 1200…) لا ثابت: على شبكة
+    // الجوّال قِسنا SocketTimeoutException عند أول محاولة مباشرةً — أي أن
+    // الطلب نفسه هو البطيء لا المزدحم، فالمحاولة التالية بعد جزء من الثانية
+    // كانت تخسر الجولة كلها. ولا ننتظر بعد آخر محاولة: الانتظار بعدها لا
+    // يخدم شيئاً ويضيف تأخيراً محسوساً إلى فشل مبكّر.
     private suspend fun getWithRetry(url: String, referer: String?, attempts: Int = 3, backoffMs: Long = 300): String? {
         for (i in 0 until attempts) {
             try {
@@ -340,11 +346,8 @@ class MosalsalyProvider(
             } catch (e: Exception) {
                 Log.w(TAG, "attempt $i failed: ${e.message}")
             }
-            // لا ننتظر بعد آخر محاولة: الانتظار بعدها لا يخدم شيئاً ويضيف تأخيراً
-            // محسوساً إلى فشل مبكّر. ولا ننتظر بعد نجاح — return يخرج قبل بلوغ
-            // هذا السطر أصلاً (كان المنتظر يُنفَّذ بعد كل دورة بما فيها الناجحة).
             if (i < attempts - 1) {
-                try { Thread.sleep(backoffMs * (i + 1)) } catch (e: Exception) {}
+                try { Thread.sleep(backoffMs * (1L shl i)) } catch (e: Exception) {}
             }
         }
         return null
@@ -936,11 +939,14 @@ class MosalsalyProvider(
     ): Boolean {
         val p = data.split("||")
         if (p.size < 4) return false
-        // أول حقل هو bookId مسبوقاً بـ"id:" — وهذا ما يبنيه المزوّد في loadContent
-        // مباشرةً بلا شرطة مائلة، فنكتفي بحذف البادئة. أما قصّ آخر «/» فبقيّة
-        // من بنية كانت المعرّفات فيها مسارات، وهو الآن يبتلع أي bookId فيه
-        // «/» بدل أن يمرّره كما هو.
-        val bookId = p[0].removePrefix("id:").trim()
+        // أول حقل هو bookId مسبوقاً بـ"id:". وقد يبنيه التطبيق نفسه بصيغة
+        // «<mainUrl>/id:<bookId>» لا «id:<bookId>» — وهذا ما نسجّله فعلاً في
+        // سطر raw= على الجهاز. فنؤخذ ما بعد «id:» حين يكون الحقل مُلصَقاً،
+        // وإلا نعود للقصّ على «/» الذي كان يغطّي الحالة الأولى.
+        val bookId = p[0].let { f ->
+            val i = f.indexOf("id:")
+            if (i >= 0) f.substring(i + 3) else f.substringAfterLast("/")
+        }.trim()
         val chapterId = p[1]
         val serial = p[2].toIntOrNull() ?: return false
         val platform = p[3].lowercase()

@@ -503,12 +503,27 @@ class ReelreeProvider(private val prefs: SharedPreferences? = null) : MainAPI() 
         return true
     }
 
-    /** نصّف قائمة ترجمات المصدر (حقول كما في normalizeSubs بموقع Reelree) إلى SubtitleFile. */
+    /**
+ * هل السلسلة رمز لغة قياسي؟ CloudStream يعرض الاسم مقروءاً (العربية، English)
+ * حين يجد الرمز في جدول ISO-639، ويعرض السلسلة نفسها حين لا يجده — فمهمّتنا
+ * ألا نرسل ما لا معنى له مثل «sub0».
+ */
+private fun isLangCode(s: String): Boolean =
+    s.length in 2..8 && s.matches(Regex("^[A-Za-z]{2,3}([-_][A-Za-z0-9]{2,4})?$"))
+
+/**
+ * ar_AE وar-SA وen-US كلها تشير إلى العربية/الإنجليزية، وقائمة الجودة في
+ * التطبيق تبني أسماء لغاتها من ISO-639-1 (رقمان) لا من الرمز الإقليمي.
+ * فنقصّ إلى الجزء الأول: ar_AE ← ar. والرمز القياسي بحروف صغيرة.
+ */
+private fun normalizeLangCode(s: String): String =
+    s.replace('_', '-').substringBefore('-').lowercase()
+
+/** نصّف قائمة ترجمات المصدر (حقول كما في normalizeSubs بموقع Reelree) إلى SubtitleFile. */
     private suspend fun normalizeSubs(node: com.fasterxml.jackson.databind.JsonNode?): List<SubtitleFile> {
         val out = mutableListOf<SubtitleFile>()
         if (node == null || !node.isArray) return out
         val seen = HashSet<String>()
-        var i = 0
         for (s in node) {
             val url = s.get("url")?.asText()
                 ?: s.get("subtitleUrl")?.asText()
@@ -525,11 +540,18 @@ class ReelreeProvider(private val prefs: SharedPreferences? = null) : MainAPI() 
                 ?: s.get("display_name")?.asText()
                 ?: s.get("title")?.asText()
                 ?: ""
-            val lang = (code ?: label).ifBlank { "sub$i" }.trim()
+            val raw = (label.ifBlank { code.orEmpty() }).trim()
+            if (raw.isEmpty()) {
+                android.util.Log.i("Reelree", "subtitle has no lang/label, skipping")
+                continue
+            }
+            // نمرّر رمز اللغة حين هو رمز فعلًا، فيطابقه CloudStream على جدول
+            // ISO-639 فيعرض «العربية». وأما الاسم المقروء فنمرّره حرفيًا
+            // لغيره، فـ«الترجمة» تظهر كما كتبها الموقع وهو أوضح للمستخدم.
+            val lang = if (isLangCode(raw)) normalizeLangCode(raw) else raw
             val key = "$lang|${label.orEmpty()}"
             if (!seen.add(key)) continue
             out.add(newSubtitleFile(lang, url))
-            i++
         }
         return out
     }
