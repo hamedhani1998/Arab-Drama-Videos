@@ -476,6 +476,20 @@ class OnShortProvider(private val prefs: SharedPreferences? = null) : MainAPI() 
     }
 
     // ---------- تحليل الماستر (كل الجودات + الأصوات) ----------
+    //
+    // ملاحظة قياس (٢٠٢٦-١٠-٠٢): هذه الدوال مكتوبةٌ لكنها غيرُ مستعملة، وأقرّر
+    // ألّا أربطها عمداً. قِستُ ماسترات OnShort على تسع منصّات:
+    //   dramawave, freereels → ماستر حقيقي: ٦ جودات (RESOLUTION=…) و
+    //     #EXT-X-MEDIA:TYPE=AUDIO واحدٌ فقط، GROUP-ID="default-audio-g…" بلا
+    //     LANGUAGE — أي مسارُ صوتٍ واحدٌ بلا لغة.
+    //   reelshort, shortswave, stardusttv → الرابط ينتهي ‎.m3u8‎ لكن الجسد
+    //     قائمة وسائط واحدة لا ماستراً: جودة واحدة، بلا صوت منفصل.
+    //   dramabox, microdrama, dotdrama → روابط مباشرة (mp4) لا ماستر أصلاً،
+    //     جوداتها في candidates لا في playlist.
+    // فالمسار المنفصل الوحيد موجودٌ مرة واحدة وبلا تسمية لغة، وAudioFile في
+    // الـAPI حقلان فقط (url, headers) بلا اسم — فلا اسم يُعرض ولا فائدة منه،
+    // وكلفته طلبُ شبكة لكل حلقة على مسار التشغيل. نُبقيها مكتوبةً للمرجع،
+    // ونمرّر الماستر كاملاً للمشغّل الذي يحلّ الصوت والجودة بنفسه.
     private data class HlsVariant(val height: Int, val uri: String)
     private data class HlsAudio(val group: String, val name: String, val uri: String)
 

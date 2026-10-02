@@ -123,6 +123,13 @@ private suspend fun audioTracksOf(masterUrl: String, mainUrl: String): List<Audi
         })
         Log.i(TAG, "audio track: $name")
     }
+    // قرار المستخدم: لا نعرض ملف صوت منفصل، بل الأصوات بلغات مختلفة فقط.
+    // مسار واحد (أو عدة مسارات لا لغات مختلفة بينها) لا قيمة لعرضه: يختاره
+    // المشغّل تلقائياً أصلاً، وAudioFile في الـAPI بلا حقل اسم فلا يُعرف أيّها.
+    if (out.size <= 1) {
+        Log.i(TAG, "audioTracks: مسار واحد فقط — لا يُعرض (قرار: أصوات بلغات مختلفة فقط)")
+        return emptyList()
+    }
     return out
 }
 
