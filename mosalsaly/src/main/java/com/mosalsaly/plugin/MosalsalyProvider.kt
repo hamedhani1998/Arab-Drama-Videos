@@ -612,10 +612,39 @@ class MosalsalyProvider(
             ?: false
     }
 
+    /**
+     * هل «لا مصدر لهذه الحلقة» فعلاً، أم أنّ الطلب فشل فقط؟
+     *
+     * fetchEpisodeDescriptor يُرجع null للحالتين معاً: مرّة لأنّ الموقع أجاب
+     * ‎{"descriptor":null}‎ — وهو جوابٌ صحيح يقول إنّه لا مصدر — ومرة حين
+     * معك طلب 403 أو 404 أو مهلة، وهي أخطاء شبكة. ولا يفرّق بينهما الإرجاع
+     * المجرّد، فنعيد الطلب مرّة واحدة ونقرأ الجواب:
+     *  - واصف موجود      ⇒ الفشل الأول كان شبكة، والموقع عنده مصدر.
+     *  - ‎"descriptor":null‎ ⇒ لا مصدر عنده، حقيقة لا عطل.
+     *  - فشل من جديد     ⇒ شبكة. نترك loadLinks يتعامل معه كالمعتاد.
+     */
+    private suspend fun emptyDescriptor(bookId: String, serial: Int): Boolean {
+        val url = "https://mosalsaly.com/api/episode-source/$bookId/$serial?lang=ar&refresh=1"
+        val text = getWithRetry(url, mainUrl, 1, 0) ?: return false
+        return try {
+            mosMapper.readTree(text).get("descriptor") == null
+        } catch (e: Exception) {
+            Log.w(TAG, "emptyDescriptor parse fail ${e.message}")
+            false
+        }
+    }
+
     private suspend fun probeMedia(url: String, declaredType: String?): ExtractorLinkType? {
         val idU = url.lowercase()
-        val isDirect = declaredType == "mp4" || declaredType == "mpd" || declaredType == "dash" ||
-            idU.contains(".mp4") || idU.contains(".m4v") || idU.contains("videoplayback")
+        // goodshort يخدم قائمة تشغيل تحت مسار ‎/hls/‎ بلا امتداد ولا لاحقة
+        // (‎/hls/61370306?bookId=…&q=origin1‎) — فالرابط لا يقول m3u8 ولا mp4.
+        // وكنا نظنّه ملفاً مباشراً فنصنّفه VIDEO، واللاعب يعامله كملف فيفشل
+        // بخطأ 3003. قِسنا أنّ الجسم #EXTM3U. فنخرج المسار من «المباشر»
+        // ليقرأه فحص المحتوى فيصنّفه M3U8 صحيحاً.
+        val pathLooksHls = Regex("/hls(/|\\?|$)", RegexOption.IGNORE_CASE).containsMatchIn(url)
+        val isDirect = !pathLooksHls &&
+            (declaredType == "mp4" || declaredType == "mpd" || declaredType == "dash" ||
+                idU.contains(".mp4") || idU.contains(".m4v") || idU.contains("videoplayback"))
 
         if (isExplicitlyExpired(url)) {
             Log.w(TAG, "probeMedia expires-in-past skip $url")
@@ -961,6 +990,18 @@ class MosalsalyProvider(
         // المسار الموحّد عبر /api/episode-source — يخدم كل المنصات الـ 18
         // يعيد واصفاً مشفّراً يُفك بمفتاح AES-GCM الثابت إلى رابط مباشر جاهز
         val descriptor = fetchEpisodeDescriptor(bookId, serial)
+        if (descriptor == null && emptyDescriptor(bookId, serial)) {
+            // قِسنا على bilitv: الحلقات ١-٥ ترجع واصفاً من 1136 بايت،
+            // والحلقات ٦ فصاعداً ترجع 19 بايت لا غير:
+            //   {"descriptor":null}
+            // أي أنّ الموقع يجيب، لكنه لا مصدر عنده للحلقة. websites()
+            // يعرض ما=BiliTV وMedia3 هذه الحلقة بينما لا صفحة روابط تصعد.
+            // التطبيق لا يعرض في هذه الحالة شيئاً — فنُبقي التمييز في السجلّ
+            // ونُعيد false كما كان.
+            Log.w(TAG, "site has no source for episode (descriptor:null) " +
+                "platform=$platform serial=$serial")
+            return false
+        }
         if (descriptor != null) {
             val emitted = emitDescriptorLinks(descriptor, platform, serial, subtitleCallback, callback)
             if (emitted) {

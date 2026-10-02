@@ -211,6 +211,18 @@ class ReelreeProvider(private val prefs: SharedPreferences? = null) : MainAPI() 
             val cards = parseCards(doc)
             android.util.Log.i("Reelree", "search '$q' -> ${cards.size} cards")
             cards
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            // التطبيق يُلغي النداءات التي لم تعد أحدثَ: عند فتح بطاقة يشغّل
+            // CloudStream بحثاً تلقائياً باسم المسلسل، فإذا كتب المستخدم حرفاً
+            // جديداً أُلغي البحث السابق. سجّلنا على الجهاز:
+            //   ‹طريق› -> 36 cards          (نجح)
+            //   ‹طريق الاسرار› fail StandaloneCoroutine was cancelled
+            // فالطلب لم يفشل — قِسنا صفحة البحث تردّ في 1.2 ثانية بـ194 بطاقة.
+            // وكنا نلتقط الاستثناء بالـ catch التالي ونُعيد قائمة فارغة،
+            // فيظنّ التطبيق «المزوّد لم يجد شيئاً» ويعرض «لا نتائج».
+            // نُعيده كما هو: الإلغاء قرارُ التطبيق، ونتيجته تُهمَل عمداً.
+            android.util.Log.i("Reelree", "search '$q' cancelled by host — discarding")
+            throw e
         } catch (e: Exception) {
             // نُعيد قائمة فارغة لا null: null في CloudStream يعني «المزوّد فشل» فتُعرض
             // رسالة خطأ، والقائمة الفارغة تعني «لا نتائج» وهو ما يُرجّحه هذا الفشل.
