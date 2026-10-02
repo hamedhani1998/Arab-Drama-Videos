@@ -27,12 +27,17 @@ private const val UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/53
  *      data-title, data-poster, data-episodes, data-series, data-source, data-orientation
  *      data-media  → قالب الحلقات: يُستبدل %EP% برقم الحلقة (m3u8 أو mp4)
  *      data-rr-server2 → JSON { code, direct, embed, offsets[] } = "السيرفر الكامل"
- *          ملف merged واحد يضم كل الحلقات، بجودات متعددة (+ ترجمات/أصوات إن وُجدت في master).
- *          direct = https://reelree.com/api/v2/{code}.m3u8  ← master متعدد الجودات
+ *          ملف merged واحد يضم كل الحلقات، بجودات متعددة (master بـ STREAM-INF فقط).
+ *          direct = https://reelree.com/api/v2/{code}.m3u8
  *
- * loadLinks يقدّم سيرفرين لكل حلقة:
- *  1) "الحلقات"        ← عبر data-media / %EP% (الحلقة المستقلة)
- *  2) "السيرفر الكامل" ← عبر data-rr-server2.direct (الملف المدمج بكل الجودات/الترجمات/الأصوات)
+ * ⚠️ **الترجمات لا تُقرأ من master أبداً** (مقيس 2026-10-02): قوائم
+ * `/api/v2/‹code›.m3u8` المقيسة تحمل `#EXT-X-STREAM-INF` و**صفر** `#EXT-X-MEDIA`
+ * — ولا `EXT-X-SUBTITLES` ولا `#EXT-X-MEDIA:TYPE=AUDIO`. فالمسح عنهما في
+ * القائمة كسرٌ صامت يُرجع صفراً بلا خطأ. والترجمات في مكانين منفصلين:
+ *   · `/api/v2/{code}.json` → `subs[]` (ترجمةٌ واحدة للمسلسل كلّه، حتّى 25 لغة)
+ *   · `/api/subtitles` (ns) → `data.subtitleList[]` (ترجمة لكل حلقة)
+ * وكلاهما يُقدَّم للاعب عبر `/api/subtitle-proxy?url=…` لأن DramaWave يكتب
+ * `.srt` خاماً (نصٌّ بفواصل) والمشغّل لا يقبله — الوسيط يحوّله WebVTT.
  */
 class ReelreeProvider(private val prefs: SharedPreferences? = null) : MainAPI() {
     override var name = "Reelree"
@@ -291,15 +296,16 @@ class ReelreeProvider(private val prefs: SharedPreferences? = null) : MainAPI() 
             // بـ "|" وبعدها السيرفر الكامل: data = "https://reelree.com/full|{fullMaster}".
             val eps = mutableListOf<Episode>()
             val fullMaster = rrServer?.direct.orEmpty()
+            val srvCode = rrServer?.code.orEmpty()
             if (fullMaster.startsWith("http")) {
-                eps.add(newEpisode("$mainUrl/full|$fullMaster") {
+                eps.add(newEpisode("$mainUrl/full|$fullMaster|$srvCode") {
                     episode = 0
                     name = "الحلقة كاملة"
                 })
             }
             if (mediaTemplate.isNullOrBlank() || !mediaTemplate.startsWith("http")) {
                 if (eps.isEmpty() && fullMaster.startsWith("http")) {
-                    eps.add(newEpisode("$mainUrl/full|$fullMaster") {
+                    eps.add(newEpisode("$mainUrl/full|$fullMaster|$srvCode") {
                         episode = 0
                         name = "الحلقة"
                     })
@@ -338,7 +344,13 @@ class ReelreeProvider(private val prefs: SharedPreferences? = null) : MainAPI() 
                 if (!uri.startsWith("http")) uri = baseUrl.substringBeforeLast("/") + "/" + uri
                 // نفس الـURI مرتين = مُدخل مكرر في الـmaster — يُسقط بدل تكراره في القائمة
                 if (uri.isNotBlank() && seen.add(uri)) {
-                    val q = resMatch?.groupValues?.get(2)?.toIntOrNull()
+                    // الضلع القصير هو رقم الجودة: مسلسلاتنا رأسية 1080×1920，وقراءة البعد الثاني (1920) تخدعنا فيعطي 1440p لحلقة 1080.
+                    // للبعد الثاني (1920) كان يخدعنا فيعطي 1440p لحلقة 1080.
+                    val q = resMatch?.groupValues?.get(1)?.toIntOrNull()
+                        ?.let { w ->
+                            val h = resMatch.groupValues.get(2).toIntOrNull() ?: w
+                            minOf(w, h)
+                        }
                         ?: idxRe.find(line)?.groupValues?.get(1)?.toIntOrNull()?.let { bw ->
                             when {
                                 bw >= 4000000 -> 1080
@@ -387,35 +399,59 @@ class ReelreeProvider(private val prefs: SharedPreferences? = null) : MainAPI() 
         // والسيرفر الكامل يأتي بعد أول "|".
         val firstPipe = data.indexOf('|')
         if (firstPipe > 0 && data.substring(0, firstPipe) == "$mainUrl/full") {
-            val fullMaster = data.substring(firstPipe + 1).trim()
+            val rest = data.substring(firstPipe + 1)
+            val secondPipe = rest.indexOf('|')
+            val fullMaster = if (secondPipe > 0) rest.substring(0, secondPipe) else rest
+            val v2Code = if (secondPipe > 0) rest.substring(secondPipe + 1).trim() else ""
             if (!fullMaster.startsWith("http")) return false
 
-
-            // الترجمات والأصوات من master السيرفر الكامل — نجلب master بمرونة (مهلات/أعد)
-            // حتى لا نعتمد على رحلة واحدة قد تهلة (السيرفر بطيء). نستخرج tracks إن نجحنا،
-            // وإن فشلنا نبقى على master المسلّم أصلًا (المشغّل قد يحلّها هو أيضًا).
-            var masterText: String? = null
-            for (i in 0 until 3) {
-                masterText = runCatching {
-                    app.get(fullMaster, referer = mainUrl, headers = mapOf("User-Agent" to UA)).text
-                }.getOrNull()
-                if (!masterText.isNullOrBlank()) break
-                try { Thread.sleep(800L * (i + 1)) } catch (_: InterruptedException) {}
+            // ⚠️ **الترجمات والجودات لا تأتي من master إطلاقاً** (مقيس 2026-10-02):
+            // قوائم `/api/v2/‹code›.m3u8` تحمل `#EXT-X-STREAM-INF` وصفر `#EXT-X-MEDIA` —
+            // فلا `EXT-X-MEDIA:TYPE=SUBTITLES` ولا `TYPE=AUDIO`. فكان المسح عنها
+            // فيها يعود بصفرٍ بلا خطأ، ولا تظهر للمشاهد أي ترجمة.
+            // المصدر الوحيد الذي يحملها هو `/api/v2/{code}.json` ← `subs[]`.
+            val showSubs = prefs?.getBoolean(ReelreeSettingsBottomSheet.KEY_SHOW_SUBTITLES, true) != false
+            var subs: List<SubtitleFile> = emptyList()
+            var directMaster: String? = null
+            if (v2Code.isNotBlank()) {
+                var meta: com.fasterxml.jackson.databind.JsonNode? = null
+                for (i in 0 until 2) {
+                    meta = runCatching {
+                        mapper.readTree(app.get("$mainUrl/api/v2/$v2Code.json", referer = mainUrl,
+                            headers = mapOf("User-Agent" to UA, "Origin" to mainUrl,
+                                "X-Requested-With" to "XMLHttpRequest")).text)
+                    }.getOrNull()
+                    if (meta != null) break
+                    try { Thread.sleep(600L * (i + 1)) } catch (_: InterruptedException) {}
+                }
+                if (meta != null) {
+                    // رابط الأصل (vidara) أثبت من وسيط reelree: أسرع وأضمن للمشغّل
+                    directMaster = meta.get("url")?.asText()?.takeIf { it.startsWith("http") }
+                    if (showSubs) subs = normalizeSubs(meta.get("subs"))
+                    android.util.Log.i("Reelree", "v2 $v2Code subs=${subs.size} default=${meta.get("defaultSub")?.asText()}")
+                } else {
+                    android.util.Log.e("Reelree", "v2 $v2Code meta unavailable — no subtitles")
+                }
             }
-            // نبعث رابط «الحلقة كاملة» بعد جلب قائمة الأم مباشرةً لا قبله: الجودات
-            // الحقيقية تُقرأ منها (1080p/720p/…)، والتسمية كانت 1080p دائماً
-            // بينما قِسنا أن قائمة الأم في Reelree تحمل متغيّراً واحداً 540x960.
-            val realQual = masterText?.takeIf { it.startsWith("#EXT") }
-                ?.let { extractVariants(it, fullMaster).maxByOrNull { it.second }?.second }
-                ?: 0
+
+            // الجودات تُقرأ من master الذي سنبثّه فعلاً — وهو رابط vidara مباشرةً
+            // حين توفّر في /api/v2/{code}.json، فتكون أرقامها هي أرقام البثّ.
+            val playUrl = directMaster ?: fullMaster
+            val masterText = runCatching {
+                app.get(playUrl, referer = mainUrl, headers = mapOf("User-Agent" to UA)).text
+            }.getOrNull()
+            val variants = masterText?.takeIf { it.startsWith("#EXT") }
+                ?.let { extractVariants(it, playUrl) }.orEmpty()
+            // أعلى جودة موجودة في قائمة الأم
+            val best = variants.maxByOrNull { it.second }?.second ?: 0
             val audioFiles = masterText?.takeIf { it.startsWith("#EXT") }
-                ?.let { mt -> extractTracks(mt, fullMaster).filter { it.kind == "AUDIO" } }
+                ?.let { mt -> extractTracks(mt, playUrl).filter { it.kind == "AUDIO" } }
                 ?: emptyList()
-            android.util.Log.i("Reelree", "full master ${fullMaster.take(60)} quality=$realQual audio=${audioFiles.size}")
-            callback(newExtractorLink(name, "الحلقة كاملة", fullMaster, ExtractorLinkType.M3U8) {
+            android.util.Log.i("Reelree", "full ${playUrl.take(70)} variants=${variants.size} q=$best audio=${audioFiles.size}")
+            callback(newExtractorLink(name, "الحلقة كاملة", playUrl, ExtractorLinkType.M3U8) {
                 referer = mainUrl
-                // الجودة الحقيقية من الـmaster — 0 يعني «غير معروف» فيظهر بلا رقم
-                quality = if (realQual > 0) realQual else Qualities.Unknown.value
+                // الجودة الحقيقية من master — 0 يعني «غير معروف» فيظهر بلا رقم
+                quality = if (best > 0) best else Qualities.Unknown.value
                 // المسارات الصوتية على audioTracks لا كروابط فيديو: كروابط كانت
                 // تظهر في قائمة الجودة وكأنها جودات فيديو، فيختارها المستخدم خطأً.
                 if (audioFiles.isNotEmpty()) {
@@ -426,19 +462,16 @@ class ReelreeProvider(private val prefs: SharedPreferences? = null) : MainAPI() 
                     }
                 }
             })
-            if (!masterText.isNullOrBlank() && masterText.startsWith("#EXT")) {
-                for (t in extractTracks(masterText, fullMaster)) {
-                    try {
-                        if (t.kind == "SUBTITLES") {
-                            // إظهار الترجمة — الافتراضي true = سلوك اليوم حرفياً؛ إطفاؤه
-                            // يتخطى ملف الترجمة فقط، ولا يمسّ رابط الفيديو إطلاقاً.
-                            if (prefs?.getBoolean(ReelreeSettingsBottomSheet.KEY_SHOW_SUBTITLES, true) != false) {
-                                subtitleCallback(newSubtitleFile(t.lang, t.uri))
-                            }
-                        }
-                        // فرع AUDIO لم يعد يبثّ رابطاً: صار على audioTracks في رابط
-                        // «الحلقة كاملة» أعلاه (إعداد «مسارات الصوت» يتحكم به).
-                    } catch (_: Exception) {}
+            // ✅ ترجمة «الحلقة كاملة»: واحدةٌ لكل لغات الملفّ المدمج — ما كان مفقوداً تماماً
+            for (sf in subs) {
+                try { subtitleCallback(sf) } catch (_: Exception) {}
+            }
+            // والبديل: إن أضاف الـmaster يوماً ما سطر `EXT-X-MEDIA` نقرأه هنا أيضاً (بلا تعارض).
+            if (masterText != null && masterText.startsWith("#EXT") && subs.isEmpty()) {
+                for (t in extractTracks(masterText, playUrl)) {
+                    if (t.kind == "SUBTITLES") {
+                        try { subtitleCallback(newSubtitleFile(t.lang, subtitleUrl(t.uri))) } catch (_: Exception) {}
+                    }
                 }
             }
             return true
@@ -502,10 +535,11 @@ class ReelreeProvider(private val prefs: SharedPreferences? = null) : MainAPI() 
                 t.startsWith("#EXT") || t.startsWith("#EXTM3U") || t.contains("#EXT-X-")
             }
         }.getOrDefault(epUrl.endsWith(".m3u8"))
+        val hls = isHls
         callback(newExtractorLink(name, "الحلقة $ep", playUrl,
-            if (isHls) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO) {
+            if (hls) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO) {
             referer = mainUrl
-            quality = getQualityFromName("720p")
+            quality = perEpQuality(playUrl, hls)
         })
         // الجودات والترجمات الإضافية (إن وُجدت) — بعد بثّ رابط الحلقة أصلًا حتى لا
         // يتأخر التشغيل إطلاقًا؛ أي فشل هنا لا يمسّ الرابط الأساسي (المشغّل يتجاهله).
@@ -531,6 +565,57 @@ private fun isLangCode(s: String): Boolean =
 private fun normalizeLangCode(s: String): String =
     s.replace('_', '-').substringBefore('-').lowercase()
 
+/**
+ * Reelree لا يرسل رموز لغة في أغلب المصادر بل **أسماءً بالإنجليزية**:
+ * `subs[].lang` = "Arabic"/"Polish"/"Filipino"، و`subtitleList[].subtitleLanguage`
+ * = "en_US". وقبل هذا الجدول كان `isLangCode` يرفض الأسماء فيمرّرها حرفية،
+ * فظهر للمستخدم «Arabic» و«Polish» بلا ترجمةٍ ولا رمز.
+ *
+ * فنستعمل جدول `NAME_TO_CODE` نفسه الذي في `player.js` بالموقع، ونحوّل الاسم
+ * إلى رمزٍ قياسي فيطابقه CloudStream على جدول ISO-639 فيعرض الاسم الصحيح.
+ */
+private val NAME_TO_CODE: Map<String, String> = mapOf(
+    "arabic" to "ar", "english" to "en", "french" to "fr", "spanish" to "es",
+    "espanol" to "es", "portuguese" to "pt", "german" to "de", "italian" to "it",
+    "turkish" to "tr", "russian" to "ru", "japanese" to "ja", "korean" to "ko",
+    "thai" to "th", "vietnamese" to "vi", "indonesian" to "id", "indonesia" to "id",
+    "malay" to "ms", "hindi" to "hi", "filipino" to "fil", "tagalog" to "fil",
+    "polish" to "pl", "polski" to "pl", "romanian" to "ro", "rumania" to "ro",
+    "bengali" to "bn", "telugu" to "te", "tamil" to "ta", "czech" to "cs",
+    "ceko" to "cs", "chinese" to "zh", "dutch" to "nl", "ukrainian" to "uk",
+    "greek" to "el", "norwegian" to "no", "swedish" to "sv", "danish" to "da",
+    "finnish" to "fi", "hungarian" to "hu", "hebrew" to "he", "persian" to "fa",
+    "urdu" to "ur", "nepali" to "ne", "punjabi" to "pa", "gujarati" to "gu",
+    "marathi" to "mr", "kannada" to "kn", "malayalam" to "ml", "sinhala" to "si",
+    "burmese" to "my", "khmer" to "km", "lao" to "lo", "mongolian" to "mn",
+    // DramaWave ترسل 25 اسماًً لا 23 (مقيس 2026-10-02): «Yunani» هي «Greek»
+    // بالحروف العربية، و«Traditional Chinese» هي الصينية التقليدية.
+    "yunani" to "el", "traditional chinese" to "zh", "simplified chinese" to "zh",
+    "mandarin" to "zh", "cantonese" to "zh", "brazilian portuguese" to "pt",
+)
+
+/** «Arabic» ← "ar"، و«en_US» ← "en"، وما لا نعرفه يُرجَع كما هو. */
+private fun langCodeOf(raw: String?): String {
+    val s = raw?.trim()?.lowercase().orEmpty()
+    if (s.isEmpty()) return ""
+    NAME_TO_CODE[s]?.let { return it }
+    val first = s.split('-', '_', ' ').first()
+    NAME_TO_CODE[first]?.let { return it }
+    if (isLangCode(first)) return first
+    return raw?.trim().orEmpty()
+}
+
+/**
+ * مشغّل CloudStream يرفض ملفّات SRT الخام (نصٌّ بفواصل) ويقبل WebVTT فقط،
+ * وDramaWave يكتب `.srt` خاماً. فنمرّر كل ترجمةٍ عبر وسيط الموقع
+ * `/api/subtitle-proxy?url=…` الذي يحوّل SRT←VTT ويمرّر VTT كما هو (مقيس).
+ */
+private val SITE = "https://reelree.com"
+
+private fun subtitleUrl(raw: String): String =
+    if (raw.startsWith("/api/")) SITE + raw
+    else "$SITE/api/subtitle-proxy?url=" + java.net.URLEncoder.encode(raw, "UTF-8")
+
 /** نصّف قائمة ترجمات المصدر (حقول كما في normalizeSubs بموقع Reelree) إلى SubtitleFile. */
     private suspend fun normalizeSubs(node: com.fasterxml.jackson.databind.JsonNode?): List<SubtitleFile> {
         val out = mutableListOf<SubtitleFile>()
@@ -543,27 +628,26 @@ private fun normalizeLangCode(s: String): String =
                 ?: s.get("vtt")?.asText()
                 ?: s.get("srt")?.asText()
             if (url.isNullOrBlank()) continue
-            val code = s.get("lang")?.asText()
-                ?: s.get("language")?.asText()
-                ?: s.get("subtitleLanguage")?.asText()
-                ?: s.get("code")?.asText()
             val label = s.get("label")?.asText()
                 ?: s.get("name")?.asText()
                 ?: s.get("display_name")?.asText()
                 ?: s.get("title")?.asText()
                 ?: ""
-            val raw = (label.ifBlank { code.orEmpty() }).trim()
-            if (raw.isEmpty()) {
+            val code = s.get("lang")?.asText()
+                ?: s.get("language")?.asText()
+                ?: s.get("subtitleLanguage")?.asText()
+                ?: s.get("code")?.asText()
+            // الاسم الإنجليزي (DramaWave/v2) فيه «Arabic» لا «ar_AE»، فهو أدقّ
+            val resolved = langCodeOf(label.ifBlank { code })
+            if (resolved.isEmpty()) {
                 android.util.Log.i("Reelree", "subtitle has no lang/label, skipping")
                 continue
             }
-            // نمرّر رمز اللغة حين هو رمز فعلًا، فيطابقه CloudStream على جدول
-            // ISO-639 فيعرض «العربية». وأما الاسم المقروء فنمرّره حرفيًا
-            // لغيره، فـ«الترجمة» تظهر كما كتبها الموقع وهو أوضح للمستخدم.
-            val lang = if (isLangCode(raw)) normalizeLangCode(raw) else raw
-            val key = "$lang|${label.orEmpty()}"
-            if (!seen.add(key)) continue
-            out.add(newSubtitleFile(lang, url))
+            // رمزٌ قياسي ⇒ يعرضه CloudStream باسمه الصحيح («العربية»).
+            // واسمٌ مجهول يُمرَّر حرفياً فهو أوضح من «sub0».
+            val lang = if (isLangCode(resolved)) normalizeLangCode(resolved) else resolved
+            if (!seen.add(lang)) continue
+            out.add(newSubtitleFile(lang, subtitleUrl(url)))
         }
         return out
     }
@@ -582,6 +666,7 @@ private fun normalizeLangCode(s: String): String =
             "Content-Type" to "application/json",
             "Origin" to mainUrl,
             "Referer" to mainUrl,
+            "X-Requested-With" to "XMLHttpRequest",
         )
         if (source == "ns") {
             // ===== NetShort: POST /api/episode/play → قائمة الحلقات المرتبة (voucher لكل جودة)،
@@ -602,14 +687,15 @@ private fun normalizeLangCode(s: String): String =
                 val episodeId = ent?.get("episodeId")?.asText()?.takeIf { it.isNotBlank() }
                 val voucher = ent?.get("playVoucher")?.asText()?.takeIf { it.isNotBlank() }
                 if (!voucher.isNullOrBlank()) {
-                    val clarity = ent.get("playClarity")?.asText()?.trim().orEmpty()
-                    callback(newExtractorLink(name, "الحلقة $ep${if (clarity.isBlank()) "" else " · $clarity"}",
-                        voucher, ExtractorLinkType.VIDEO) {
+                    // رابط التشغيل الأساسي بلا تسمية جودة: playClarity في قائمة
+                    // التشغيل **null دائماً** (مقيس 2026-10-02) — الجودات الحقيقية تأتي
+                    // من /api/subtitles أدناه باسمها الصحيح.
+                    callback(newExtractorLink(name, "الحلقة $ep", voucher, ExtractorLinkType.VIDEO) {
                         referer = mainUrl
-                        quality = qualityOfLabel(clarity)
+                        quality = getQualityFromName("720p")
                     })
                 }
-                if (showSubs && !episodeId.isNullOrBlank()) {
+                if (!episodeId.isNullOrBlank()) {
                     val subBody = mapper.writeValueAsString(mapOf(
                         "shortPlayId" to seriesId,
                         "episodeId" to episodeId,
@@ -619,19 +705,43 @@ private fun normalizeLangCode(s: String): String =
                     val subNode = runCatching { mapper.readTree(app.post("$mainUrl/api/subtitles",
                         requestBody = subBody.toRequestBody("application/json; charset=utf-8".toMediaType()),
                         headers = jsonHeaders, referer = mainUrl).text) }.getOrNull() ?: return
-                    val subs = subNode.get("data")?.get("subtitleList")
-                    for (sf in normalizeSubs(subs)) subtitleCallback(sf)
+                    val data = subNode.get("data")
+                    // ✅ **الجودات هنا لا في /api/episode/play** (مقيس 2026-10-02):
+                    // قائمة التشغيل تُعيد episodeId + playVoucher فقط وplayClarity فيها null،
+                    // بينما data.episodePlayList[] في /api/subtitles فيه 540p و 720p و 1080p vouchers مستقلة؛
+                    // وهي التي كانت تُظهر أسماء جودات فارغةً في القائمة.
+                    val qList = data?.get("episodePlayList")
+                    if (qList != null && qList.isArray) {
+                        val seenQ = HashSet<String>()
+                        for (q in qList) {
+                            val qUrl = q.get("playVoucher")?.asText()?.takeIf { it.isNotBlank() } ?: continue
+                            val clarity = q.get("playClarity")?.asText()?.trim().orEmpty()
+                            if (clarity.isBlank()) continue
+                            val label = "الحلقة $ep · $clarity"
+                            if (!seenQ.add(label)) continue
+                            callback(newExtractorLink(name, label, qUrl, ExtractorLinkType.VIDEO) {
+                                referer = mainUrl
+                                quality = qualityOfLabel(clarity)
+                            })
+                        }
+                    }
+                    if (showSubs) {
+                        for (sf in normalizeSubs(data?.get("subtitleList"))) subtitleCallback(sf)
+                    }
                 }
             }
         } else if (source in setOf("dw", "dx", "sm", "fr", "ft") && seriesId.isNotBlank()) {
             // ===== سواها (DramaBox/Swan/FullTV...): GET /api/{src}/{seriesId}/{n}.json
             // يحمل subs و qualities في النداء نفسه =====
             val node = runCatching { mapper.readTree(app.get("$mainUrl/api/$source/$seriesId/$ep.json", referer = mainUrl,
-                headers = mapOf("User-Agent" to UA)).text) }.getOrNull() ?: return
+                headers = mapOf("User-Agent" to UA, "Origin" to mainUrl,
+                    "X-Requested-With" to "XMLHttpRequest")).text) }.getOrNull() ?: return
             if (showSubs) {
                 val subs = node.get("subs") ?: node.get("data")?.get("subs")
                 for (sf in normalizeSubs(subs)) subtitleCallback(sf)
             }
+            // مقيس 2026-10-02: هذا الحقل قائمة فارغة [] في سواها دائماً، والجودات
+            // تظهر في الماستر لا في الـJSON. فنقرأها من النص في perEpQuality أعلاه.
             val quals = node.get("qualities") ?: node.get("data")?.get("qualities")
             if (quals != null && quals.isArray) {
                 val seenUrls = HashSet<String>()
@@ -665,6 +775,37 @@ private fun normalizeLangCode(s: String): String =
      * الأسماء الحقيقية للموقع. هنا نُخرج الرقم الحقيقي من التسمية.
      * تسمية بلا رقم (مثل «جودة إضافية») → Unknown كي لا تصطدم بجودة رابط الحلقة.
      */
+    /**
+     * أعلى دقّة في ماستر HLS.
+     *
+     * مسلسلات Reelree *رأسية*: 1080×1920 لا 1920×1080. والضلع الذي يحدّد رقم
+     * الجودة هو **القصير** (1080) لا الطويل (1920): لو أخذنا الأكبر لقُلنا 1440p
+     * لحلقة عرضُها 1080 بكسل لا غير. فنقرأ `RESOLUTION=w×h` ونأخذ
+     * `min(w, h)` — وهو معيار الجودة في HLS أصلاً — فتبقى 1080 و720 و540
+     * و480 و360 و240 كما يعلنها الموقع.
+     */
+    private fun bestResolutionOf(masterText: String): Int? =
+        Regex("RESOLUTION=(\\d{3,4})x(\\d{3,4})")
+            .findAll(masterText)
+            .map { minOf(it.groupValues[1].toInt(), it.groupValues[2].toInt()) }
+            .maxOrNull()
+
+    /**
+     * جودة رابط الحلقة كما يعلنها الماستر، لا كما نفترضه. كان كل رابط يُبثّ
+     * بـ`getQualityFromName("720p")` مفترضةً، فظهرت «720p» على حلقات 1080
+     * وعلى سلاسل لا تملك إلا 240. الرابط الذي ليس HLS (بصمة MP4) لا يعلن شيئاً
+     * فيرجع `Unknown` بدل اختراع رقم.
+     */
+    private suspend fun perEpQuality(playUrl: String, isHls: Boolean): Int {
+        if (!isHls) return Qualities.Unknown.value
+        val text = runCatching {
+            app.get(playUrl, referer = mainUrl, headers = mapOf("User-Agent" to UA)).text
+        }.getOrNull() ?: return Qualities.Unknown.value
+        if (!text.startsWith("#EXT")) return Qualities.Unknown.value
+        val best = bestResolutionOf(text) ?: return Qualities.Unknown.value
+        return qualityOfLabel("${best}p")
+    }
+
     private fun qualityOfLabel(label: String?): Int {
         val raw = label?.trim().orEmpty()
         val digits = Regex("""(\d{3,4})""").find(raw)?.groupValues?.get(1)?.toIntOrNull()
