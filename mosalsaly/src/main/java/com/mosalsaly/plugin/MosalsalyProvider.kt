@@ -561,7 +561,15 @@ class MosalsalyProvider(
         val refreshFlag = if (MosalsalySettings.forceRefresh(prefs)) {
             "1&_t=${System.currentTimeMillis()}"   // معرّف عشوائي يكسر ذاكرة التخزين
         } else "1"
-        val url = "$mainUrl/api/episode-source/$bookId/$serial?lang=ar&refresh=$refreshFlag"
+        // bookId ليس رقماً في كل المنصات: stardust تُرجع الاسم العربي نفسه
+        // («حب-بدأ-بكذبة»). وإرساله بلا ترميز يفشل الطلب، فنرمّزه مع إبقاء
+        // «-» كما هو (هو جزء من الاسم لا محرف استثنائي).
+        val bid = try {
+            java.net.URLEncoder.encode(bookId, "UTF-8").replace("+", "%20")
+        } catch (e: Exception) {
+            Log.w(TAG, "bookId encode fail ${e.message}"); return null
+        }
+        val url = "$mainUrl/api/episode-source/$bid/$serial?lang=ar&refresh=$refreshFlag"
         return try {
             val text = getWithRetry(url, mainUrl, 3, 400)
             if (text.isNullOrBlank()) { Log.w(TAG, "no descriptor text serial=$serial"); return null }
