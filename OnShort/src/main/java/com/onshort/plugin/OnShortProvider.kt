@@ -119,7 +119,14 @@ class OnShortProvider(private val prefs: SharedPreferences? = null) : MainAPI() 
             try {
                 val text = app.get(url, referer = referer, headers = headers).text
                 if (!text.isNullOrBlank()) return text
-            } catch (_: Exception) {
+            } catch (e: Exception) {
+                // التطبيق يُلغي النداء الذي لم يعد الأحدث عند مغادرة المستخدم الحلقة.
+                // ابتلاع الإلغاء يعني ثلاث محاولات ميتة ونوماً متصاعداً بعد أن قرّرنا
+                // التوقّف. قِسناه على الجهاز في هذا المصدر:
+                //   attempt 1 failed: Job was cancelled
+                //   attempt 2 failed: Job was cancelled
+                // ثم «لا مصدر» بعد 16 ثانية من تركه المستخدم.
+                if (e is kotlinx.coroutines.CancellationException) throw e
                 // 504/502/مهلة — أعد المحاولة
             }
             if (i < attempts - 1) Thread.sleep(1200L * (i + 1))

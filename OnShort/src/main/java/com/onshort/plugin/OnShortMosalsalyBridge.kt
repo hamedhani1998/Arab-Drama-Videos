@@ -7,9 +7,14 @@ import com.fasterxml.jackson.databind.node.ObjectNode
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
 import android.util.Base64
+import android.util.Log
 import javax.crypto.Cipher
 import javax.crypto.spec.GCMParameterSpec
 import javax.crypto.spec.SecretKeySpec
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
 
 /**
  * جسر تشغيل إلى محرك Mosalsaly الموحّد (/api/episode-source).
@@ -41,6 +46,7 @@ class OnShortMosalsalyBridge(private val prefs: android.content.SharedPreference
 
     companion object {
         private const val MOS_EP_KEY_B64 = "QC6Ir2trghxRAyyyWZEOEFR4GgLhnfQ4A19I3QBlQkc="
+        private const val BRIDGE_TAG = "OnShortBridge"
         private val DIZI1 = "https://dizi1.dramadizilerim.com/?url="
 
         /** OnShort platform slug → Mosalsaly slug. المنصات المدعومة في Mosalsaly فقط. */
@@ -133,7 +139,9 @@ class OnShortMosalsalyBridge(private val prefs: android.content.SharedPreference
     )
 
     private fun parseSeries(html: String): SeriesMeta? {
-        val bookId = Regex("""(?:\\")?bookId(?:\\")?:\s*(?:\\")?([^"\\<>/\s]{3,})(?:\\")?""")
+        // الحدّ الأدنى محرفان لا ثلاثة: قِسنا bookId الخاصّ بــbilitv = "dw" (سلسلة
+        // قصيرة)، فحدّ {3,} كان يجعل load يُعيد null فلا تظهر صفحة التفاصيل أصلاً.
+        val bookId = Regex("""(?:\\")?bookId(?:\\")?:\s*(?:\\")?([^"\\<>/\s]{2,})(?:\\")?""")
             .find(html)?.groupValues?.get(1)?.trimEnd('\\') ?: return null
         val platform = Regex("""المصدر.{0,500}?/masdar/([a-z]+)""")
             .find(html)?.groupValues?.get(1)?.lowercase()
@@ -178,31 +186,55 @@ class OnShortMosalsalyBridge(private val prefs: android.content.SharedPreference
             .find(url)?.groupValues?.get(1)?.toLongOrNull()
             ?.let { it < System.currentTimeMillis() / 1000 } ?: false
 
+    /**
+     * فحص نوع الرابط بمهلة صريحة قصيرة. app.get بلا timeoutMillis ينتظر عشر ثوانٍ
+     * كاملة على رابط ميت — وهي أطول من مهلة loadLinks عندها يفشل التطبيق ويعرض
+     * «لم يوفّر المصدر روابط». الفحص هنا لزيادة الثقة لا لزيادة البطء.
+     */
+    private fun probeVia(text: String?): ExtractorLinkType? {
+        if (text.isNullOrBlank()) return null
+        return if (text.trimStart().startsWith("#EXTM3U")) ExtractorLinkType.M3U8
+        else ExtractorLinkType.VIDEO
+    }
+
+    private suspend fun probeHead(url: String): String? = try {
+        // HttpURLConnection كالنمط السائد في MosalsalyProvider (probeQualityUrlHttp11):
+        // طلب واحد برأس صغير، ومهلة 2.5/3.5 ثانية تكفي لقراءة #EXTM3U.
+        val conn = java.net.URL(url).openConnection() as java.net.HttpURLConnection
+        conn.requestMethod = "GET"
+        conn.connectTimeout = 2500
+        conn.readTimeout = 3500
+        conn.instanceFollowRedirects = true
+        conn.setRequestProperty("User-Agent", MOS_UA)
+        conn.setRequestProperty("Referer", MOS_MAIN)
+        conn.setRequestProperty("Range", "bytes=0-65535")
+        val code = conn.responseCode
+        val stream = if (code in 200..299) conn.inputStream else conn.errorStream
+        val text = stream?.bufferedReader(Charsets.UTF_8)?.use { it.readText() }.orEmpty()
+        stream?.close()
+        conn.disconnect()
+        text
+    } catch (e: Exception) {
+        Log.w(BRIDGE_TAG, "probeHead fail ${e.message}")
+        null
+    }
+
     private suspend fun probeMedia(url: String, declaredType: String?): ExtractorLinkType? {
         val idU = url.lowercase()
         val isDirect = declaredType == "mp4" || declaredType == "mpd" || declaredType == "dash" ||
             idU.contains(".mp4") || idU.contains(".m4v") || idU.contains("videoplayback")
         if (isExplicitlyExpired(url)) return null
         if (isDirect && !idU.contains(".m3u8") && !idU.contains(".m3u")) return ExtractorLinkType.VIDEO
-        return try {
-            val text = app.get(url, headers = mapOf(
-                "User-Agent" to MOS_UA, "Referer" to MOS_MAIN, "Range" to "bytes=0-65535"
-            ), referer = MOS_MAIN).text
-            if (text.isNotBlank() && text.trimStart().startsWith("#EXTM3U")) ExtractorLinkType.M3U8
-            else null
-        } catch (e: Exception) { null }
+        val text = probeHead(url) ?: return null
+        if (text.isNotBlank() && text.trimStart().startsWith("#EXTM3U")) return ExtractorLinkType.M3U8
+        // غير قائمة تشغيل ⇒ لا نعد به VIDEO: الجسد ليس فيديو، والمشغّل يرمي
+        // Source error 3003 (UnrecognizedInputFormatException). نُسقطه.
+        return null
     }
 
     private suspend fun probeQualityUrl(url: String, declaredType: String?): ExtractorLinkType? {
         if (isExplicitlyExpired(url)) return null
-        return try {
-            val text = app.get(url, headers = mapOf(
-                "User-Agent" to MOS_UA, "Referer" to MOS_MAIN, "Range" to "bytes=0-65535"
-            ), referer = MOS_MAIN).text
-            if (text.isNotBlank() && text.trimStart().startsWith("#EXTM3U")) ExtractorLinkType.M3U8
-            else if (text.isNotBlank()) ExtractorLinkType.VIDEO
-            else null
-        } catch (e: Exception) { null }
+        return probeVia(probeHead(url))
     }
 
     private suspend fun fetchDescriptor(bookId: String, serial: Int): ObjectNode? {
@@ -240,9 +272,18 @@ class OnShortMosalsalyBridge(private val prefs: android.content.SharedPreference
                     if (u != null) candidates[u] = q
                 }
             }
-            for ((url, q) in candidates) {
-                if (!seen.add(url)) continue
-                val kind = if (q.isNotBlank()) probeQualityUrl(url, type) else probeMedia(url, type)
+            // الفحص متوازٍ لا متسلسل. الروابط مستقلّة عن بعضها (encByQuality يعطي
+            // ٣-٤ جودات)، فإطلاقها واحداً واحداً يضاعف زمن الاستجابة بعددها. نُطلقها
+            // معاً عبر async داخل coroutineScope واحد، ثم ننتظر الكل فالترتيب محفوظ.
+            val fresh = candidates.entries.filter { seen.add(it.key) }
+            val probed: List<Triple<String, String, ExtractorLinkType?>> = coroutineScope {
+                fresh.map { (u, qq) ->
+                    async(Dispatchers.IO) {
+                        Triple(u, qq, if (qq.isNotBlank()) probeQualityUrl(u, type) else probeMedia(u, type))
+                    }
+                }.awaitAll()
+            }
+            for ((url, q, kind) in probed) {
                 if (kind == null) continue
                 val label = buildString {
                     append("Mosalsaly $serial")
