@@ -145,8 +145,6 @@ class DeepDramaProvider(private val prefs: SharedPreferences? = null) : MainAPI(
         val directVideo: String?,       // mp4 مباشر
         val extraHls: List<ServerRendition> = emptyList(), // روابط HLS إضافية قابلة للتشغيل (مثل chunklist Rumble)
         val altLabel: String = "",      // تسمية بديلة لوصف الرابط (مثل جودة tar)
-        /** مسار صوتي منفصل إن وفّره الخادم (Rumble يوفّر aac مستقلاً). */
-        val audioUrl: String? = null,
         /** ملاحظة تُعرض للمستخدم تشرح نقص الخادم (جودة واحدة، بلا ترجمة…). */
         val note: String = "",
     )
@@ -211,7 +209,7 @@ class DeepDramaProvider(private val prefs: SharedPreferences? = null) : MainAPI(
         //                                                   → 200، ومقاطعه TS حقيقية
         //                                                     (أول مقطع: 0x47، 3412 حزمة
         //                                                     × 188 بايت = 395364 بايت)
-        //   u.audio.url    = .../Al42A.Gaa.aac                 → مسار صوتي منفصل
+        //   u.audio.url    = .../Al42A.Gaa.aac                 → صوت منفصل (لا يُعرض: الفيديوهات فقط)
         //   u.timeline.url = .../Al42A.Faa.mp4 (180x320)        ← معاينة صغيرة، ليست الفيلم
         //   "cc":[]                                           ← لا ترجمة إطلاقاً في Rumble
         //
@@ -227,9 +225,8 @@ class DeepDramaProvider(private val prefs: SharedPreferences? = null) : MainAPI(
         val tarMeta = uNode?.get("tar")?.get("meta")
         val tarH = tarMeta?.get("h")?.asInt() ?: 0
         val tarW = tarMeta?.get("w")?.asInt() ?: 0
-        // المسار الصوتي المنفصل (يوفّره Rumble صراحةً) — نمرّره كـ AudioFile لا كـ
-        // رابط فيديو، فهو aac خام بلا صورة وبلا مسار فيديو مقابل.
-        val audio = uNode?.get("audio")?.get("url")?.asText()?.takeIf { it.isNotBlank() }
+        // ملاحظة: Rumble يوفّر `u.audio.url` (aac منفصل)، ولا نعرضه رابطاً —
+        //   طلب المستخدم هو الفيديوهات فقط بلا مسار صوتي.
 
         // الترجمات: Rumble يقدّم "cc":{lang:{language,path}} أو مصفوفة [] (بلا ترجمة).
         val subs = mutableListOf<SubtitleTrack>()
@@ -257,7 +254,6 @@ class DeepDramaProvider(private val prefs: SharedPreferences? = null) : MainAPI(
             directVideo = null,  // لا ملف mp4 كامل مباشر عند Rumble — الصحيح هو الـ HLS.
             extraHls = extra,
             altLabel = if (tarW > 0 && tarH > 0) "${tarW}x${tarH}" else "360p",
-            audioUrl = audio,
             note = if (hasDeadMaster && tar == null) "لا مسار قابل للتشغيل"
                 else if (hasDeadMaster) "الجودة المتاحة ${if (tarH > 0) "${tarH}p" else "360p"} فقط — الجودة الأعلى على vidaraa"
                 else "",
@@ -687,18 +683,7 @@ class DeepDramaProvider(private val prefs: SharedPreferences? = null) : MainAPI(
             }
         }
 
-        // 4) المسار الصوتي المنفصل إن وفّره الخادم. Rumble يقدّم `u.audio.url`
-        //    (aac مستقل)، وهو العنصر الوحيد الذي يُسمّى «مسار صوتي» في هذا
-        //    المصدر: جودة vidaraa مدموجة الصوت داخل كل rendition
-        //    (CODECS="avc1.640028,mp4a.40.2") فلا مسار صوت منفصل فيها إطلاقاً.
-        server.audioUrl?.let { a ->
-            sink(newExtractorLink(name, "$tag · صوت فقط (aac)", a, ExtractorLinkType.VIDEO) {
-                this.headers = linkHeaders
-                this.referer = "https://rumble.com/"
-            })
-        }
-
-        // 5) ملفات الترجمة (كل لغة يوفّرها الخادم). نمرّرها برابطها المباشر برؤوس
+        // 4) ملفات الترجمة (كل لغة يوفّرها الخادم). نمرّرها برابطها المباشر برؤوس
         // قياسية صحيحة (User-Agent + Referer/Origin للخادم الصادر) حتى لا يردّ
         // السيرفر بصفحة خطأ 403 تُعرض كرموز.
         server.subtitles.forEach { sub ->
