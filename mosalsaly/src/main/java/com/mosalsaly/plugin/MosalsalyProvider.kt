@@ -364,6 +364,9 @@ class MosalsalyProvider(
     // بدل regex واحد مع [\s\S]*? عبر الصفحة — أكثر مقاومة لتغيّر ترتيب السمات.
     private val articleBlockRe = Regex("""<article class="group ">[\s\S]*?</article>""")
 
+    // مسار قوائم بلا امتداد — goodshort يخدم /hls/<id>?bookId=…&q=<جودة>
+    private val HLS_PATH_RE = Regex("/hls(/|\\?|$)", RegexOption.IGNORE_CASE)
+
     private fun parseCards(html: String): List<SearchResponse> {
         val seen = HashSet<String>()
         val out = mutableListOf<SearchResponse>()
@@ -638,6 +641,20 @@ class MosalsalyProvider(
         }
     }
 
+    /**
+     * نوع الوسيلة من الاسم وحده، بلا أي طلب شبكة — يُستعمل في الفروع التي
+     * تقرّر ألا تفحص («الروابط الحيّة فقط» مُطفأ، أو واصف منتهٍ).
+     *
+     * الامتداد وحده لا يكفي: goodshort يخدم قائمة تشغيل تحت ‎/hls/‎ بلا امتداد
+     * ولا لاحقة، فنُصنّفه ملفاً، وExoPlayer يعامله كملف فيفشل بخطأ 3003.
+     * وقِسنا أنّه فعلاً قائمة: ‎200‎ ونوعه ‎application/vnd.apple.mpegurl‎
+     * ويبدأ بـ ‎#EXTM3U‎ وفيه ٥١ قطعة. فنخرج المسار من «الملف المباشر».
+     */
+    private fun kindByName(url: String): ExtractorLinkType =
+        if (url.contains(".m3u8", true) || url.contains(".m3u", true) ||
+            HLS_PATH_RE.containsMatchIn(url)
+        ) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
+
     private suspend fun probeMedia(url: String, declaredType: String?): ExtractorLinkType? {
         val idU = url.lowercase()
         // goodshort يخدم قائمة تشغيل تحت مسار ‎/hls/‎ بلا امتداد ولا لاحقة
@@ -645,7 +662,7 @@ class MosalsalyProvider(
         // وكنا نظنّه ملفاً مباشراً فنصنّفه VIDEO، واللاعب يعامله كملف فيفشل
         // بخطأ 3003. قِسنا أنّ الجسم #EXTM3U. فنخرج المسار من «المباشر»
         // ليقرأه فحص المحتوى فيصنّفه M3U8 صحيحاً.
-        val pathLooksHls = Regex("/hls(/|\\?|$)", RegexOption.IGNORE_CASE).containsMatchIn(url)
+        val pathLooksHls = HLS_PATH_RE.containsMatchIn(url)
         val isDirect = !pathLooksHls &&
             (declaredType == "mp4" || declaredType == "mpd" || declaredType == "dash" ||
                 idU.contains(".mp4") || idU.contains(".m4v") || idU.contains("videoplayback"))
@@ -815,11 +832,11 @@ class MosalsalyProvider(
                 val kind = when {
                     // «الروابط الحيّة فقط» مُطفأ: نصنّف نمطياً من الامتداد ونعرض كما وردت
                     // بلا فحص شبكة — أسرع، ويصلح حين يعجز فحصنا عن قراءة CDN.
-                    !probeOn -> if (url.contains(".m3u8", true)) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
+                    !probeOn -> kindByName(url)
                     descriptorStale -> {
                         // نعرف أنها ستُرفض؛ نصنّفها نمطياً بدل انتظار فحصٍ لن ينجح
                         Log.i(TAG, "descriptor stale ($platform $serial) — emit without probe")
-                        if (url.contains(".m3u8", true)) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
+                        kindByName(url)
                     }
                     q.isNotBlank() -> probeQualityUrl(url, type)
                     else -> probeMedia(url, type)
