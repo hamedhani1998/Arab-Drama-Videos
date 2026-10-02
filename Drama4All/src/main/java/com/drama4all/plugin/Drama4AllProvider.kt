@@ -149,7 +149,7 @@ class Drama4AllProvider(private val prefs: SharedPreferences? = null) : MainAPI(
                 ?: return null
             val poster = doc.selectFirst("meta[property=og:image]")?.attr("content")
             // ★ تغيّرت الواجهة (r12): صار الوصف في `p.r12-desc` والتصنيفات في
-            //   `span.r12-tag`، وأول وسوم «HD» ليس تصنيفاً.和老 fallbacks القديمة.
+            //   `span.r12-tag`، وأول وسوم «HD» ليس تصنيفاً. مع fallbacks القديمة.
             val description = doc.selectFirst("p.r12-desc")?.text()?.trim()
                 ?: doc.selectFirst("p.synopsis")?.text()?.trim()
                 ?: doc.selectFirst("meta[property=og:description]")?.attr("content")

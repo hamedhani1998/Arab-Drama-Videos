@@ -221,6 +221,11 @@ class ArabShortDramaProvider(private val prefs: SharedPreferences? = null) : Mai
         }
     }
 
+    // ArabShortDrama يعلن hasQuickSearch = true بلا أن يوفّر quickSearch، والافتراضي في
+    // MainAPI يرمي NotImplementedError — فيبقى صندوق البحث في التطبيق يرمي بدل
+    // أن يبحث. التوجيه سطر واحد، نفس ما يفعله mosalsaly/reelree/aryarabia/lodynet.
+    override suspend fun quickSearch(query: String): List<SearchResponse> = search(query) ?: emptyList()
+
     override suspend fun load(url: String): LoadResponse? {
         return try {
             val slug = url.substringAfterLast("/").substringBefore("?").ifBlank { return null }

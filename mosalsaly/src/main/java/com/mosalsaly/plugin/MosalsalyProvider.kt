@@ -8,6 +8,15 @@ import com.fasterxml.jackson.databind.node.ObjectNode
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
 import java.util.Base64
+import java.util.concurrent.ConcurrentHashMap
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CoroutineStart
+import kotlinx.coroutines.Deferred
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.async
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeoutOrNull
 import javax.crypto.Cipher
 import javax.crypto.spec.GCMParameterSpec
 import javax.crypto.spec.SecretKeySpec
@@ -57,10 +66,11 @@ private fun cleanDecryptedUrl(u: String?): String? {
 }
 
 /**
- * CloudStream يبني قائمة الجودة من الحقل `quality` (Int) لا من `name`، فلا يفلح اسمٌ
- * صحيح إن كانت القيمة Unknown — تظهر كل الجودات سطراً واحداً بلا تمييز ولا ترتيب.
- * تسمية encByQuality تأتي بأشكال متباينة: "1080" و"1080p" و"720 HD". نستخرج الرقم
- * ثم نقرّبه لأقرب اسم معروف، كـ Reelree تماماً (وإلا فبقيت كل الجودات Unknown).
+ * رقم الجودة من تسمية encByQuality، وتأتي بأشكال متباينة: "1080" و"1080p" و"720 HD".
+ * CloudStream يبني قائمة الجودة من الحقل `quality` (Int)، وgetQualityFromName يقرأ
+ * الرقم من الاسم بعد حذف "p" — فالاسم رقم خام يمرّ أيضاً. لكن petadrama ترسل
+ * "default" (قائمة أم لا جودة) ونقرأها 144p فيظهر كجودة وهمية — فنُسقط اللفظيات
+ * بلا رقم، ونقرّب ما تبقّى إلى اسم قياسي.
  */
 private fun qualityOfLabel(label: String): Int {
     val digits = Regex("""(\d{3,4})""").find(label)?.groupValues?.get(1)?.toIntOrNull()
@@ -77,6 +87,57 @@ private fun qualityOfLabel(label: String): Int {
             else -> "144p"
         }
     )
+}
+
+/**
+ * مسارات الصوت البديلة من قائمة تشغيل HLS: EXT-X-MEDIA:TYPE=AUDIO.
+ *
+ * القوائم الأم (master) تحمل بجوار جوداتها مسارات الصوت: EXT-X-MEDIA:TYPE=AUDIO…URI="a.m3u8"
+ * نقرؤها ونمرّرها في ExtractorLink.audioTracks فيظهر اختيار الصوت في المشغّل.
+ * ничего يُقرأ إن لم تكن القائمة أم أو لم تحمل صوتاً — وقِسنا أن موقع Mosalsaly
+ * لا يرسل أي مسار صوت في واصف الحلقة إطلاقاً، فهذه هي الطريق الوحيد.
+ */
+private suspend fun audioTracksOf(masterUrl: String, mainUrl: String): List<AudioFile> {
+    val text = try {
+        app.get(masterUrl, headers = mapOf("User-Agent" to MOS_UA, "Referer" to mainUrl), referer = mainUrl).text
+    } catch (e: Exception) {
+        Log.w(TAG, "audioTracks fetch fail ${e.message}"); return emptyList()
+    }
+    if (!text.trimStart().startsWith("#EXT")) return emptyList()
+    val out = mutableListOf<AudioFile>()
+    val seen = HashSet<String>()
+    val re = Regex("""#EXT-X-MEDIA:TYPE=AUDIO[^>]*?NAME="([^"]*)"[^>]*?URI="([^"]+)"""")
+    for (m in re.findAll(text)) {
+        val name = m.groupValues[1].trim()
+        var uri = m.groupValues[2].trim()
+        if (uri.isBlank()) continue
+        if (!uri.startsWith("http")) uri = masterUrl.substringBeforeLast('/') + "/" + uri
+        // same name twice = duplicate entry in the playlist — drop it
+        if (!seen.add(name.ifBlank { uri })) continue
+        out.add(newAudioFile(uri) {
+            this.headers = mapOf("User-Agent" to MOS_UA, "Referer" to mainUrl)
+        })
+        Log.i(TAG, "audio track: $name")
+    }
+    return out
+}
+
+/**
+ * اسم وسيلة التشغيل كما ستراها في التطبيق: mp4 / m3u8 / mpd / أخرى.
+ *
+ * الغرض تمييز المنصات صنفاً كما طلب المستخدم: «ميز بين المنصات الذي تظهر الفيديو
+ * mp4 والمنصات التي تظهر الفيديو m3u8». الرابط وحده لا يفصح عن نوعه في قائمة
+ * CloudStream — كل سطر اسمه «<platform> <serial>» — فنضيف النوع في الاسم ونهتف به
+ * في logcat. الرابط المباشر .mp4 بلا قطع (وهو ما تحمله أغلب المنصات) → mp4؛
+ * قائمة تشغيل #EXTM3U أو امتداد .m3u8/.m3u → m3u8؛ XML داش → mpd.
+ */
+private fun mediaKindName(url: String, type: ExtractorLinkType?): String = when {
+    type == ExtractorLinkType.M3U8 || url.contains(".m3u8", true) || url.contains(".m3u", true) -> "m3u8"
+    type == ExtractorLinkType.DASH || url.contains(".mpd", true) -> "mpd"
+    type == ExtractorLinkType.TORRENT || url.endsWith(".torrent", true) -> "torrent"
+    type == ExtractorLinkType.VIDEO || url.contains(".mp4", true) || url.contains(".m4v", true) ||
+        url.contains("videoplayback", true) -> "mp4"
+    else -> "video"
 }
 
 // عندما يعيد mosalsaly back-end رابط ترجمة بـ auth_key قديم/منتهي الصلاحية (تركتُ
@@ -167,7 +228,7 @@ class MosalsalyProvider(
     override val hasQuickSearch = true
     override val supportedTypes = setOf(TvType.TvSeries)
 
-    // الأقسام الرئيسية: الأكثر شعبية وأحدث الإضافات أولاً، ثم المنصات الثمانية عشر
+    // الأقسام الرئيسية: الأكثر شعبية وأحدث الإضافات أولاً، ثم المنصات
     // (إعداد «أقسام الواجهة» يتحكم بإظهار/إخفاء EXTRA_SECTIONS)
     private val homeSections: List<Pair<String, String>> by lazy {
         val extras = if (MosalsalySettings.showExtra(prefs)) EXTRA_SECTIONS else emptyList()
@@ -176,7 +237,96 @@ class MosalsalyProvider(
         if (extras.isEmpty() && platforms.isEmpty()) EXTRA_SECTIONS + PLATFORMS else extras + platforms
     }
 
-    override val mainPage by lazy { mainPageOf(*homeSections.toTypedArray()) }
+    override val mainPage by lazy {
+        val page = mainPageOf(*homeSections.toTypedArray())
+        // إحماء مسبق: أول ما تفتح الواجهة نبدأ جلب كل الأقسام في الخلفية، فتلحق
+        // CloudStream لاحقاً بنفس الجلب المعلّق (Deferred مشترك) بدل أن تبدأ من الصفر.
+        //Launcher يبتلع أكثرها قبل أن يمرّر المستخدم إلى الصفحة أصلاً.
+        sectionStore.warm(homeSections.map { it.first })
+        page
+    }
+
+    // بطاقات قسم واحد: جلب + تحليل. تُستدعى من SectionStore (متزامن أو خلفي)
+    private suspend fun fetchCards(url: String): List<SearchResponse> {
+        // محاولة واحدة لا ثلاثاً: هذه صفحات فهرسة لا بيانات حسّاسة. ثلاث محاولات ×
+        // مهلة CloudStream = قفلة طويلة على قسم بطيء بينما الخادم يردّ أصلاً ببطء
+        // لا بخطأ (قِسنا 8–32 ثانية للإجابة الواحدة).
+        val fetched = try { getWithRetry(url, mainUrl, 1, 0) } catch (e: Exception) { null }
+        Log.i(TAG, "section fetch ${url.substringAfter("//").take(60)} len=${fetched?.length ?: -1}")
+        if (fetched.isNullOrBlank()) return emptyList()
+        return parseCards(fetched)
+    }
+
+    /**
+     * ذاكرة أقسام الواجهة: تعيد ما جلبناه فوراً وتحدّث في الخلفية.
+     *
+     * قِسنا أن صفحة `/masdar/<platform>` واحدة تاخذ 8–32 ثانية، و`mainPageOf` ينتظر
+     * أبطأ قسم من 25 — فكانت الواجهة الرئيسية لا تظهر إلا بعد أبطأها. هنا:
+     *  - ضربة واحدة معلّقة لكل قسم (Deferred): الإحماء والطلب يشاركانها فلا
+     *    يُطلب القسم مرتين، ولا ينتظر أحدهما الآخر بلا داعٍ.
+     *  - طازج (تحت TTL) → ردّ فوري بلا شبكة.
+     *  - قديم → ردّ فوري بالقديم والتحديث يجري خلفه.
+     *  - بارد → ننتظر، لكن بسقف زمني: ما تجاوزه يُعرض فارغاً هذه المرة ويصل
+     *    لاحقاً لأن الجلب الخلفي يستمر (المهلة تلغي الانتظار لا الجلب).
+     *  - فشل الجلب لا يُخزَّن أبداً: تخزينه كـ«لا نتائج» يجعل القسم يبقى فارغاً صامتاً.
+     */
+    private class SectionStore {
+        private data class Entry(val items: List<SearchResponse>, val at: Long)
+        private val data = ConcurrentHashMap<String, Entry>()
+        private val inflight = ConcurrentHashMap<String, Deferred<List<SearchResponse>>>()
+        private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
+
+        /** القسم المطلوب الآن، أو فارغ إن انقضت مهلة الانتظار. */
+        suspend fun await(slug: String, fetch: suspend () -> List<SearchResponse>, waitMs: Long): List<SearchResponse> {
+            val hit = data[slug]
+            val age = hit?.let { System.currentTimeMillis() - it.at } ?: Long.MAX_VALUE
+            if (hit != null && age < TTL_MS) {
+                Log.i(TAG, "section cache hit $slug n=${hit.items.size} age=${age / 1000}s")
+                return hit.items
+            }
+            var d = inflight[slug]
+            if (d == null) {
+                // LAZY: لا يبدأ الجلب إطلاقاً إن كان هناك طلب مطابق مسبق فائز
+                val nd = scope.async(start = CoroutineStart.LAZY) {
+                    val items = fetch()
+                    if (items.isNotEmpty()) data[slug] = Entry(items, System.currentTimeMillis()) else data.remove(slug)
+                    items
+                }
+                val prev = inflight.putIfAbsent(slug, nd)
+                if (prev == null) {
+                    nd.invokeOnCompletion { inflight.remove(slug, nd) }
+                    d = nd
+                } else {
+                    nd.cancel()
+                    d = prev
+                }
+            }
+            if (hit != null) {
+                // قديم موجود: نعرضه حالاً ونُكمل التحديث خلفه بلا انتظار
+                scope.launch { runCatching { d.await() } }
+                return hit.items
+            }
+            return try {
+                withTimeoutOrNull(waitMs) { d.await() } ?: emptyList()
+            } catch (e: Exception) {
+                Log.w(TAG, "section $slug fail ${e.message}")
+                emptyList()
+            }
+        }
+
+        fun warm(slugs: List<String>) {
+            for (s in slugs) scope.launch { runCatching { await(s, { emptyList() }, 0) } }
+        }
+
+        companion object { const val TTL_MS = 30 * 60 * 1000L }
+    }
+
+    private val sectionStore = SectionStore()
+
+    // سقف انتظار قسم واحد. الموقع 8–32 ثانية للقسم الواحد، وCloudStream ينتظر
+    // getMainPage شاملاً المهلة — فنمنعه من تجاوز هذا. ما تجاوزه يُعرض فارغاً
+    // هذه المرة ويصل لاحقاً، لأن الجلب الخلفي لا يُلغى بالمهلة (بلوغ الذاكرة).
+    private val SECTION_WAIT_MS = 18_000L
 
     // جلب مع إعادة محاولة — الموقع بطيء/unstable؛ نفس نمط ReelShort.
     // كان يبتلع كل استثناء ويُعيد "" — وهو ما جعل فشل الشبكة يبدو كـ«لا نتائج».
@@ -238,11 +388,14 @@ class MosalsalyProvider(
         val isSection = EXTRA_SECTIONS.any { it.first == slug }
         val base = if (isSection) "$mainUrl/tasnif/$slug" else "$mainUrl/masdar/$slug"
         val url = if (page <= 1) base else "$base/page/$page"
-        val fetched = try { getWithRetry(url, mainUrl, 3, 300) } catch (e: Exception) { null }
-        Log.i(TAG, "getMainPage slug=$slug len=${fetched?.length ?: -1}")
-        if (fetched.isNullOrBlank()) return null
-        val items = parseCards(fetched)
-        Log.i(TAG, "getMainPage slug=$slug cards=${items.size}")
+        // ترقيم الصفحات (page>1) لا يدخل الذاكرة: هو جلب نقلة منفصل لا قسم رئيسي،
+        // ومفتاحه الصفحيات نفس slug يلتبس بالقسم الأول.
+        val items = if (page <= 1) {
+            sectionStore.await(slug, { fetchCards(url) }, SECTION_WAIT_MS)
+        } else {
+            fetchCards(url)
+        }
+        Log.i(TAG, "getMainPage slug=$slug page=$page cards=${items.size}")
         return if (items.isEmpty()) null else newHomePageResponse(request.name, items)
     }
 
@@ -554,8 +707,14 @@ class MosalsalyProvider(
         val chain = descriptor.get("chain") as? ArrayNode ?: return false
         var emitted = false
         val seen = HashSet<String>()
-        // رابط حي يمرّ فحص المحتوى؛ llega فقط الحيّ وهو مُصنّف بنوعه الصحيح (M3U8/VIDEO)
-        data class CLink(val url: String, val q: String, val kind: ExtractorLinkType)
+        // رابط حي يمرّ فحص المحتوى؛ لا يبقى إلا الحيّ وهو مُصنّف بنوعه الصحيح (M3U8/VIDEO)
+        data class CLink(
+            val url: String,
+            val q: String,
+            val kind: ExtractorLinkType,
+            // متغيّرات قائمة الأم: (تسمية الجودة، الرابط) — تُملأ لقائمة الأم فقط
+            val variants: List<Pair<String, String>> = emptyList(),
+        )
 
         val alive = ArrayList<CLink>()
         // رابط الفيديو الأساسي (auth طازج) — يُستخدم لتجديد auth الترجمة عند انتهائه
@@ -586,9 +745,20 @@ class MosalsalyProvider(
                     if (u != null) candidates[u] = q
                 }
             }
+            // مفتاح «default» ليس جودة بل قائمة تشغيل أم (master): petadrama يُرجع
+            // default=master.m3u8 مع 540/720/1080 بجواره، والأم تحمل الثلاثة داخلها
+            // عبر EXT-X-STREAM-INF. نرفع الأم إلى Videos[] — ExoPlayer يختار منها
+            // تلقائياً ويعرض كل الجودات في قائمة جودة المشغّل — ونبقي المتغيّرات
+            // كروابط مستقلة فتبقى الجودات مسمّاة لا مجهولة.
+            val masterKey = candidates.keys.firstOrNull { it.equals("default", true) }
+            val masterUrl = masterKey?.let { candidates.remove(it) }
+            val autoEnc = ch.get("encAuto")?.asText()
+            val autoUrl = if (autoEnc != null) cleanDecryptedUrl(decryptMosEnc(autoEnc)) else null
 
             // نصنّف المحتوى (وليس الثقة بحقل type): #EXTM3U ⇒ M3U8؛ mp4 المعلن/الممتد ⇒ VIDEO.
             // يبعد الروابط الميتة (404/403/HTML) ويصحّح التصنيف الكاذب (moboreels m3u8 كـ mp4 → 3003).
+            // التصنيف من امتداد الرابط أيضاً هنا: بعض المنصات تعلن type=hls وتخدم mp4 فعلياً.
+            val probeOn = MosalsalySettings.onlyAlive(prefs)
             for ((url, q) in candidates) {
                 if (!seen.add(url)) continue
 
@@ -598,32 +768,62 @@ class MosalsalyProvider(
                     continue
                 }
 
-                val kind = if (descriptorStale) {
-                    // نعرف أنها ستُرفض؛ نصنّفها نمطياً بدل انتظار فحصٍ لن ينجح
-                    Log.i(TAG, "descriptor stale ($platform $serial) — emit without probe")
-                    if (url.contains(".m3u8", true)) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
-                } else if (q.isNotBlank()) probeQualityUrl(url, type) else probeMedia(url, type)
+                val kind = when {
+                    // «الروابط الحيّة فقط» مُطفأ: نصنّف نمطياً من الامتداد ونعرض كما وردت
+                    // بلا فحص شبكة — أسرع، ويصلح حين يعجز فحصنا عن قراءة CDN.
+                    !probeOn -> if (url.contains(".m3u8", true)) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
+                    descriptorStale -> {
+                        // نعرف أنها ستُرفض؛ نصنّفها نمطياً بدل انتظار فحصٍ لن ينجح
+                        Log.i(TAG, "descriptor stale ($platform $serial) — emit without probe")
+                        if (url.contains(".m3u8", true)) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
+                    }
+                    q.isNotBlank() -> probeQualityUrl(url, type)
+                    else -> probeMedia(url, type)
+                }
                 if (kind == null) {
                     Log.w(TAG, "skip dead/mismatched $platform url=${url.take(80)}")
                     continue
                 }
                 alive.add(CLink(url, q, kind))
             }
+
+            // قائمة الأم: نضيفها سطراً مستقلاً «تلقائي» — هي التي تحمل مسارات الصوت
+            // (EXT-X-MEDIA:TYPE=AUDIO) فتُمرَّر في audioTracks، ولأن ExoPlayer يقرأ
+            // جوداتها من داخلها فيختار الأعلى منها تلقائياً. أمّا المتغيّرات فتبقى
+            // سطوراً مستقلة مسمّاة (540/720/1080) للاختيار اليدوي بجانبها.
+            val auto = masterUrl ?: autoUrl
+            if (auto != null && !seen.contains(auto) && auto.isNotBlank()) {
+                // روابط المتغيّرات مفكوكة أصلاً (فُكّت عند بناء candidates) فلا داعي
+                // لفكّها ثانية — ولا نريد فكّاً ثانياً يختلف بالنتيجة.
+                val variants = candidates.filterValues { it.isNotBlank() }
+                    .map { (u, q) -> q to u }
+                if (variants.isNotEmpty()) {
+                    val autoKind: ExtractorLinkType =
+                        if (probeOn && !descriptorStale) (probeMedia(auto, type) ?: ExtractorLinkType.M3U8)
+                        else ExtractorLinkType.M3U8
+                    alive.add(CLink(auto, "تلقائي", autoKind, variants))
+                    Log.i(TAG, "master playlist $platform ${variants.size} variants")
+                }
+            }
         }
 
         // الروابط السطحية (mp4) أولًا (أسرع استجابة)، ثم m3u8
-        alive.sortBy { it.kind != ExtractorLinkType.VIDEO }
+        alive.sortBy { it.kind.ordinal != ExtractorLinkType.VIDEO.ordinal }
         // نجمع الروابط ثم نبثّها دفعة واحدة: «الافتراضي» يبثّها بنفس ترتيبها
         // تماماً كما كان، و«تصاعدي/تنازلي» يعيدان ترتيبها فقط
         // (فرز مستقر — المتساوية تحتفظ بترتيبها، ولا حذف ولا تكرار).
         val collected = mutableListOf<ExtractorLink>()
         for (lnk in alive) {
+            val kindName = mediaKindName(lnk.url, lnk.kind)
             val label = buildString {
                 if (MosalsalySettings.rawLinks(prefs)) {
                     // «الروابط الخام» (تصحيح): التسمية تصبح الرابط نفسه لو فُعلت
                     append(lnk.url.take(120))
                 } else {
                     append("$platform $serial")
+                    // وسم الوسيلة في الاسم — بلاه كانت كل المنصات تبدو سطراً واحداً
+                    // ولم ميّز المستخدم mp4 من m3u8 إلا بالاسم.
+                    append(" · $kindName")
                     if (lnk.q.isNotBlank() && lnk.q != lnk.url) append(" · ${lnk.q}")
                 }
             }
@@ -639,6 +839,15 @@ class MosalsalyProvider(
                 // و"720p" في غيرها. getQualityFromName يتوقّف على لاحقة p، فبلاها كانت كل
                 // الجودات quality=Unknown فتظهر في التطبيق باسم واحد بلا تمييز ولا ترتيب.
                 if (lnk.q.isNotBlank()) this.quality = qualityOfLabel(lnk.q)
+                // مسارات الصوت: قائمة الأم تحمّل EXT-X-MEDIA:TYPE=AUDIO بجوار جوداتها،
+                // فنقرأها ونمرّرها في audioTracks فيختارها المستخدم من قائمة الصوت
+                // داخل المشغّل. بلاها كان الصوت outsider مفقوداً في المنصات HLS.
+                // الواصف نفسه لا يحمل أي حقل صوت (قِسنا 13 منصة: chain/source/subtitle
+                // فقط) — فالمصدر الوحيد لهذه المسارات هو قائمة الأم.
+                if (lnk.variants.isNotEmpty() && MosalsalySettings.showAudio(prefs)) {
+                    val master = audioTracksOf(lnk.url, mainUrl)
+                    if (master.isNotEmpty()) this.audioTracks = master
+                }
             })
         }
         val order = MosalsalySettings.qualityOrder(prefs)

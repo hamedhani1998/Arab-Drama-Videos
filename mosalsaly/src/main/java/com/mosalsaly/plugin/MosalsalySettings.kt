@@ -69,6 +69,8 @@ class MosalsalySettings(private val prefs: SharedPreferences) : BottomSheetDialo
         const val KEY_SHOW_EXTRA_SECTIONS = "mos_show_extra"         // Boolean الافتراضي true
         const val KEY_RAW_LINKS = "mos_raw_links"                    // Boolean الافتراضي false
         const val KEY_QUALITY_ORDER = "mos_quality_order"            // "default" | "asc" | "desc"
+        const val KEY_SHOW_AUDIO = "mos_show_audio"                  // Boolean الافتراضي true
+        const val KEY_ONLY_ALIVE = "mos_only_alive"                  // Boolean الافتراضي true
         const val PREFS_NAME = "Mosalsaly"                          // ★ يجب أن يطابق MosalsalyPlugin
 
         /** بادئة مفاتيح تفعيل المنصات — لكل منصة مفتاح مستقل. */
@@ -96,6 +98,18 @@ class MosalsalySettings(private val prefs: SharedPreferences) : BottomSheetDialo
 
         fun qualityOrder(prefs: SharedPreferences?): String =
             prefs?.getString(KEY_QUALITY_ORDER, "default") ?: "default"
+
+        /** إظهار مسارات الصوت البديلة (audioTracks) إن وفّرها المصدر. */
+        fun showAudio(prefs: SharedPreferences?): Boolean =
+            prefs?.getBoolean(KEY_SHOW_AUDIO, true) ?: true
+
+        /**
+         * «الروابط الحيّة فقط»: نفحص كل رابط ونُسقط الميت (404/403).
+         * إيقافه يعني عرض روابط المنصة كما ترسلها بلا فحص — أسرع، ويُبقي
+         * الميت ظاهراً (بلا فائدة). الافتراضي true: لا تُعرض روابط ميتة.
+         */
+        fun onlyAlive(prefs: SharedPreferences?): Boolean =
+            prefs?.getBoolean(KEY_ONLY_ALIVE, true) ?: true
 
         fun rawLinks(prefs: SharedPreferences?): Boolean =
             prefs?.getBoolean(KEY_RAW_LINKS, false) ?: false
@@ -169,6 +183,20 @@ class MosalsalySettings(private val prefs: SharedPreferences) : BottomSheetDialo
             })
 
             generalCategory.addPreference(SwitchPreferenceCompat(ctx).apply {
+                key = KEY_SHOW_AUDIO
+                title = "مسارات الصوت"
+                summary = "إظهار المسارات الصوتية البديلة إن وفّرها المصدر (نبهة، صوتي، أصلي)"
+                setDefaultValue(true)
+            })
+
+            generalCategory.addPreference(SwitchPreferenceCompat(ctx).apply {
+                key = KEY_ONLY_ALIVE
+                title = "الروابط الحيّة فقط"
+                summary = "فحص كل رابط وإسقاط الميت (أبطأ قليلاً). إيقافه يعرض روابط المنصة كما هي"
+                setDefaultValue(true)
+            })
+
+            generalCategory.addPreference(SwitchPreferenceCompat(ctx).apply {
                 key = KEY_RAW_LINKS
                 title = "الروابط الخام"
                 summary = "إظهار روابط الفيديو كما هي (للتشخيص) بدل أسماء الجودات"
@@ -177,8 +205,11 @@ class MosalsalySettings(private val prefs: SharedPreferences) : BottomSheetDialo
 
             // ===== المنصات =====
             val platformCategory = PreferenceCategory(ctx)
-            platformCategory.title = "المنصات (18)"
-            platformCategory.summary = "علِّم كل منصة تريد استخدامها"
+            // العدد مشتقّ من PLATFORM_KEYS لا مكتوب يدوياً — وإلا قال «18» وأمامك 23.
+            platformCategory.title = "المنصات (${PLATFORM_KEYS.size})"
+            // وسيلة التشغيل تظهر مع كل حلقة في اسم الرابط («netshort 3 · mp4»)،
+            // وهذه هي المفتاح الذي يفسّرها: mp4 = ملف مباشر، m3u8 = بث مقطّع.
+            platformCategory.summary = "علِّم كل منصة تريد استخدامها. وسيلة التشغيل تظهر في اسم كل رابط"
             preferenceScreen.addPreference(platformCategory)
 
             for ((platKey, label) in PLATFORM_KEYS) {
@@ -202,6 +233,8 @@ class MosalsalySettings(private val prefs: SharedPreferences) : BottomSheetDialo
                         remove(KEY_QUALITY_ORDER)
                         remove(KEY_FORCE_REFRESH)
                         remove(KEY_SHOW_EXTRA_SECTIONS)
+                        remove(KEY_SHOW_AUDIO)
+                        remove(KEY_ONLY_ALIVE)
                         remove(KEY_RAW_LINKS)
                         for ((k, _) in PLATFORM_KEYS) remove(KEY_PLATFORM_PREFIX + k)
                     }.apply()

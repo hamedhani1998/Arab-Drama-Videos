@@ -955,7 +955,7 @@ class OnShortProvider(private val prefs: SharedPreferences? = null) : MainAPI() 
             return node
         }
 
-        // === Fallback: حاول جلب تذكرة من صفحة التفاصيل وإعادة المحاولة最后一次 ===
+        // === Fallback: حاول جلب تذكرة من صفحة التفاصيل وإعادة المحاولة الأخيرة ===
         // ينقذ idrama/moborels عندما تفشل جميع محاولات API بسبب بطء/timeout مؤقت.
         val fallbackTicket = fetchTicket(postId)
         if (!fallbackTicket.isNullOrBlank()) {

@@ -410,6 +410,11 @@ class HuangguoDramaProvider(
         }
     }
 
+    // HuangguoDrama يعلن hasQuickSearch = true بلا أن يوفّر quickSearch، والافتراضي في
+    // MainAPI يرمي NotImplementedError — فيبقى صندوق البحث في التطبيق يرمي بدل
+    // أن يبحث. التوجيه سطر واحد، نفس ما يفعله mosalsaly/reelree/aryarabia/lodynet.
+    override suspend fun quickSearch(query: String): List<SearchResponse> = search(query) ?: emptyList()
+
     // ---------- التفاصيل ----------
 
     override suspend fun load(url: String): LoadResponse? {

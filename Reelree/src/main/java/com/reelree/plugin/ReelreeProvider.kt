@@ -194,12 +194,35 @@ class ReelreeProvider(private val prefs: SharedPreferences? = null) : MainAPI() 
         }
     }
 
-    override suspend fun search(query: String): List<SearchResponse>? {
+    // البحث كان يبني «?s=<حروف عربية خام>»: الاستعلام العربي لا يُرسَل بلا ترميز
+    // (محرك HTTP يرفضه أو يفسّره خطأً)، فيفشل الجلب ويظهر للمستخدم «لا نتائج».
+    // percent-encoding مع «%20» بدل «+» يطابق ما يقبله الموقع فعلاً.
+    override suspend fun search(query: String): List<SearchResponse> {
+        val q = query.trim()
+        if (q.isEmpty()) return emptyList()
+        val enc = try {
+            java.net.URLEncoder.encode(q, "UTF-8").replace("+", "%20")
+        } catch (e: Exception) {
+            android.util.Log.e("Reelree", "search encode fail ${e.message}"); return emptyList()
+        }
+        // صفحة نتائج ?s= تحمل البطاقات نفسها (rr-card) التي تحملها /explore/، فالمحلّل واحد
         return try {
-            val doc = app.get("$mainUrl/?s=${query.trim().replace(" ", "+")}", referer = mainUrl).document
-            parseCards(doc)
-        } catch (e: Exception) { null }
+            val doc = app.get("$mainUrl/?s=$enc", referer = mainUrl).document
+            val cards = parseCards(doc)
+            android.util.Log.i("Reelree", "search '$q' -> ${cards.size} cards")
+            cards
+        } catch (e: Exception) {
+            // نُعيد قائمة فارغة لا null: null في CloudStream يعني «المزوّد فشل» فتُعرض
+            // رسالة خطأ، والقائمة الفارغة تعني «لا نتائج» وهو ما يُرجّحه هذا الفشل.
+            android.util.Log.e("Reelree", "search '$q' fail ${e.message}")
+            emptyList()
+        }
     }
+
+    // hasQuickSearch = true بلا تنفيذ quickSearch: صندوق البحث السريع في التطبيق
+    // يبقى فارغاً ولا يستدعي search() أصلاً عند بعض الشاشات. aryarabia/mosalsaly/
+    // lodynet يوفّرونه صراحةً — نفس النمط هنا.
+    override suspend fun quickSearch(query: String): List<SearchResponse> = search(query)
 
     /** يحلل data-rr-server2 (HTML-entities) إلى RrServer. */
     private fun parseRrServer(raw: String?): RrServer? {
@@ -355,10 +378,6 @@ class ReelreeProvider(private val prefs: SharedPreferences? = null) : MainAPI() 
             val fullMaster = data.substring(firstPipe + 1).trim()
             if (!fullMaster.startsWith("http")) return false
 
-            callback(newExtractorLink(name, "الحلقة كاملة", fullMaster, ExtractorLinkType.M3U8) {
-                referer = mainUrl
-                quality = getQualityFromName("1080p")
-            })
 
             // الترجمات والأصوات من master السيرفر الكامل — نجلب master بمرونة (مهلات/أعد)
             // حتى لا نعتمد على رحلة واحدة قد تهلة (السيرفر بطيء). نستخرج tracks إن نجحنا،
@@ -371,6 +390,30 @@ class ReelreeProvider(private val prefs: SharedPreferences? = null) : MainAPI() 
                 if (!masterText.isNullOrBlank()) break
                 try { Thread.sleep(800L * (i + 1)) } catch (_: InterruptedException) {}
             }
+            // نبعث رابط «الحلقة كاملة» بعد جلب قائمة الأم مباشرةً لا قبله: الجودات
+            // الحقيقية تُقرأ منها (1080p/720p/…)، والتسمية كانت 1080p دائماً
+            // بينما قِسنا أن قائمة الأم في Reelree تحمل متغيّراً واحداً 540x960.
+            val realQual = masterText?.takeIf { it.startsWith("#EXT") }
+                ?.let { extractVariants(it, fullMaster).maxByOrNull { it.second }?.second }
+                ?: 0
+            val audioFiles = masterText?.takeIf { it.startsWith("#EXT") }
+                ?.let { mt -> extractTracks(mt, fullMaster).filter { it.kind == "AUDIO" } }
+                ?: emptyList()
+            android.util.Log.i("Reelree", "full master ${fullMaster.take(60)} quality=$realQual audio=${audioFiles.size}")
+            callback(newExtractorLink(name, "الحلقة كاملة", fullMaster, ExtractorLinkType.M3U8) {
+                referer = mainUrl
+                // الجودة الحقيقية من الـmaster — 0 يعني «غير معروف» فيظهر بلا رقم
+                quality = if (realQual > 0) realQual else Qualities.Unknown.value
+                // المسارات الصوتية على audioTracks لا كروابط فيديو: كروابط كانت
+                // تظهر في قائمة الجودة وكأنها جودات فيديو، فيختارها المستخدم خطأً.
+                if (audioFiles.isNotEmpty()) {
+                    this.audioTracks = audioFiles.map { t ->
+                        newAudioFile(t.uri) {
+                            this.headers = mapOf("User-Agent" to UA, "Referer" to mainUrl)
+                        }
+                    }
+                }
+            })
             if (!masterText.isNullOrBlank() && masterText.startsWith("#EXT")) {
                 for (t in extractTracks(masterText, fullMaster)) {
                     try {
@@ -380,16 +423,9 @@ class ReelreeProvider(private val prefs: SharedPreferences? = null) : MainAPI() 
                             if (prefs?.getBoolean(ReelreeSettingsBottomSheet.KEY_SHOW_SUBTITLES, true) != false) {
                                 subtitleCallback(newSubtitleFile(t.lang, t.uri))
                             }
-                        } else if (t.kind == "AUDIO") {
-                            // إظهار روابط الصوت المنفصلة — الافتراضي true = سلوك اليوم
-                            // حرفياً؛ إطفاؤه يتخطى مسارات الصوت فقط، ولا يمسّ رابط الحلقة.
-                            if (prefs?.getBoolean(ReelreeSettingsBottomSheet.KEY_SHOW_AUDIO_TRACKS, true) != false) {
-                                callback(newExtractorLink(name, "صوت: ${t.lang}", t.uri, ExtractorLinkType.M3U8) {
-                                    referer = mainUrl
-                                    quality = Qualities.Unknown.value
-                                })
-                            }
                         }
+                        // فرع AUDIO لم يعد يبثّ رابطاً: صار على audioTracks في رابط
+                        // «الحلقة كاملة» أعلاه (إعداد «مسارات الصوت» يتحكم به).
                     } catch (_: Exception) {}
                 }
             }

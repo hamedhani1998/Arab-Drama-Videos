@@ -168,6 +168,11 @@ class DramaGlanceProvider(private val prefs: SharedPreferences? = null) : MainAP
         }
     }
 
+    // DramaGlance يعلن hasQuickSearch = true بلا أن يوفّر quickSearch، والافتراضي في
+    // MainAPI يرمي NotImplementedError — فيبقى صندوق البحث في التطبيق يرمي بدل
+    // أن يبحث. التوجيه سطر واحد، نفس ما يفعله mosalsaly/reelree/aryarabia/lodynet.
+    override suspend fun quickSearch(query: String): List<SearchResponse> = search(query) ?: emptyList()
+
     /**
      * يفكّ حقل url في player_aaaa حسب قيمة encrypt:
      *  1 = URL-encoding (الحالة الوحيدة المرصودة في الموقع)، 2 = base64.
