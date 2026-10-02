@@ -11,6 +11,7 @@ import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
 import androidx.fragment.app.FragmentManager
 import androidx.preference.ListPreference
+import androidx.preference.EditTextPreference
 import androidx.preference.Preference
 import androidx.preference.PreferenceCategory
 import androidx.preference.PreferenceFragmentCompat
@@ -72,6 +73,7 @@ class OnShortSettingsBottomSheet(private val prefs: SharedPreferences) : BottomS
         const val KEY_BRIDGE_ENABLED = "os_bridge_enabled"        // Boolean — مفتاح سيد لكل الجسور، الافتراضي true
         const val KEY_CROSSPOST_ENABLED = "os_crosspost_enabled"  // Boolean — جسر إعادة البحث، الافتراضي true
         const val KEY_MOSALSALY_ENABLED = "os_mosalsaly_enabled"  // Boolean — جسر Mosalsaly، الافتراضي true
+        const val KEY_SUB_LANGS = "os_sub_langs"        // String — "ar,en,fr" أو فارغ = الكل
 
         fun show(fm: FragmentManager, prefs: SharedPreferences) {
             OnShortSettingsBottomSheet(prefs).show(fm, "os_settings")
@@ -172,6 +174,23 @@ class OnShortSettingsBottomSheet(private val prefs: SharedPreferences) : BottomS
             }
             playbackCategory.addPreference(mosPref)
 
+            // تصفية لغات الترجمة. قِسنا المنصّات: dramawave وfreereels تعيدان
+            // ٢٥ ترجمة لكل حلقة (pl, ja, ko, tr, ru, de, pt, es, hi, zh, vi…)،
+            // فقائمة المشغّل تطول بلا نهاية. هذا الحقل يعرض ما تكتبه فقط
+            // (مثل «ar,en» = العربية والإنجليزية)؛ فإذا تركته فارغاً عُرضت كل
+            // اللغات، وهو السلوك الافتراضي تماماً فلا يتغيّر شيء إن لم تلمسه.
+            val subLangsPref = EditTextPreference(ctx).apply {
+                key = KEY_SUB_LANGS
+                title = "لغات الترجمة المطلوبة"
+                summary = "مثال: ar,en — اتركه فارغاً لعرض كل اللغات"
+                setDefaultValue("")
+                dialogTitle = "لغات الترجمة المطلوبة"
+                setOnBindEditTextListener { et ->
+                    et.inputType = android.text.InputType.TYPE_CLASS_TEXT
+                }
+            }
+            playbackCategory.addPreference(subLangsPref)
+
             val resetPref = Preference(ctx).apply {
                 key = "os_reset_prefs"
                 title = "إعادة الضبط الافتراضي"
@@ -184,6 +203,7 @@ class OnShortSettingsBottomSheet(private val prefs: SharedPreferences) : BottomS
                         remove(KEY_BRIDGE_ENABLED)
                         remove(KEY_CROSSPOST_ENABLED)
                         remove(KEY_MOSALSALY_ENABLED)
+                        remove(KEY_SUB_LANGS)
                     }.apply()
                     Toast.makeText(ctx, "تمت إعادة الضبط", Toast.LENGTH_SHORT).show()
                     true

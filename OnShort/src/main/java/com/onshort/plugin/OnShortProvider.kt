@@ -663,8 +663,19 @@ class OnShortProvider(private val prefs: SharedPreferences? = null) : MainAPI() 
 
         val subs = node.get("subtitles")
         if (subs != null && subs.isArray) {
+            // تصفية اللغات من الإعدادات — فارغ = الكل (السلوك الافتراضي).
+            // دُفعت لأنّ المنصّات مثل dramawave تعيد ٢٥ ترجمة لكل حلقة، فتطول
+            // قائمة المشغّل بلا نهاية؛ والحقل يعرض ما يختاره المستخدم وحده.
+            val wanted = prefs?.getString(OnShortSettingsBottomSheet.KEY_SUB_LANGS, "")
+                ?.split(",", ";", "،")
+                ?.map { it.trim().lowercase().substringBefore('-').substringBefore('_') }
+                ?.filter { it.isNotBlank() }
+                ?.toSet()
+                .orEmpty()
+
             val seen = mutableSetOf<String>()
             var sent = 0
+            var filtered = 0
             for (s in subs) {
                 val su = s.get("url")?.asText() ?: continue
                 if (su.isBlank()) continue
@@ -676,6 +687,10 @@ class OnShortProvider(private val prefs: SharedPreferences? = null) : MainAPI() 
                 // بنفسه: fromTagToLanguageName("ja","ar") = «اليابانية»
                 // — أي التسمية العربية تُشتقّ منه لا تُمرَّر. فنُبقي الرمز القصير.
                 val lang = normalizeLang(langRaw)
+                if (wanted.isNotEmpty() && lang !in wanted) {
+                    filtered++
+                    continue
+                }
                 try {
                     subtitleCallback(newSubtitleFile(lang, su))
                     sent++
@@ -684,7 +699,8 @@ class OnShortProvider(private val prefs: SharedPreferences? = null) : MainAPI() 
                     logE("OnShort.emitNode subtitle $lang failed: ${e.message}")
                 }
             }
-            logD("OnShort.emitNode($labelSource) subtitles sent=$sent of ${subs.size()}")
+            logD("OnShort.emitNode($labelSource) subtitles sent=$sent of ${subs.size()}" +
+                if (filtered > 0) " (filtered=$filtered by ${wanted})" else "")
         }
     }
 
