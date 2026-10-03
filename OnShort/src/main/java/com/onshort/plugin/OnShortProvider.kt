@@ -437,6 +437,9 @@ class OnShortProvider(private val prefs: SharedPreferences? = null) : MainAPI() 
                     conn.requestMethod = "GET"
                     conn.setRequestProperty("User-Agent", ONS_UA)
                     conn.setRequestProperty("Referer", mainUrl)
+                    // Origin مع الـReferer: قِسنا أنّ غيابهما يردّ Forbidden قاطعاً،
+                    // والطلب لا يبلغ مشغّل OnShort أصلاً فيُسقط الكود الحلقة.
+                    conn.setRequestProperty("Origin", mainUrl)
                     conn.setRequestProperty("Accept", "application/json, text/plain, */*")
                     conn.setRequestProperty("Accept-Encoding", "identity")
                     conn.setRequestProperty("X-ONShort-Player", "1")
@@ -948,7 +951,18 @@ class OnShortProvider(private val prefs: SharedPreferences? = null) : MainAPI() 
             val u = "$ONS_PLAY_API?post=$postId&episode=$ep&_t=$ts"
             // إن لم تكن لدينا تذكرة نرسل بدونها: الخادم يرد 403 مع تذكرة صالحة في الجسم
             // نبدأ منها (bootstrap سريع — لا حاجة لصفحة ?p= البطيئة التي كانت تسبب المهلة).
-            val hdrs = mutableMapOf("X-ONShort-Player" to "1") // مطلوب بشدة
+            // Origin و Referer ليسا زينة: بلاهما يردّ الخادم 403 «Forbidden» قاطعاً،
+            // ومعهما يردّ «Player session expired» أي أنّ الطلب بلغ المشغّل وأنّ
+            // التذكرة تحتاج تجديداً. قِستُ الاثنين على 16 منصّة:
+            //   بلا Origin  → Forbidden على الـ16 كلها
+            //   مع Origin   → Player session expired ثم Media refresh failed
+            // فبدونهما لا يصل الطلب إلى المنصّة أصلاً، ويُسقط الكود الحلقة
+            // ويُسند سببها إلى المنصّة وهي ليست السبب.
+            val hdrs = mutableMapOf(
+                "X-ONShort-Player" to "1", // مطلوب بشدة
+                "Origin" to mainUrl,
+                "Referer" to mainUrl,
+            )
             if (!current.isNullOrBlank()) hdrs["X-ONShort-Ticket"] = current
             val node = rawGetJson(u, mainUrl, hdrs) ?: run {
                 // rawGetJson فشل (timeout/parse) — لا نتوقف فورًا: أعد المحاولة بنفس التذكرة.
@@ -1017,7 +1031,12 @@ class OnShortProvider(private val prefs: SharedPreferences? = null) : MainAPI() 
         if (!fallbackTicket.isNullOrBlank()) {
             val ts = System.currentTimeMillis()
             val u = "$ONS_PLAY_API?post=$postId&episode=$ep&_t=$ts"
-            val hdrs = mutableMapOf("X-ONShort-Player" to "1", "X-ONShort-Ticket" to fallbackTicket)
+            val hdrs = mutableMapOf(
+                "X-ONShort-Player" to "1",
+                "X-ONShort-Ticket" to fallbackTicket,
+                "Origin" to mainUrl,
+                "Referer" to mainUrl,
+            )
             val node = rawGetJson(u, mainUrl, hdrs)
             if (node != null) {
                 val ok = node.get("ok")?.asBoolean(false) ?: true
