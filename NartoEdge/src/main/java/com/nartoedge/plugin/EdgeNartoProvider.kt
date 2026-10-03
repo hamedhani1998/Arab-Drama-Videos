@@ -21,11 +21,23 @@ private const val UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/53
 // handling — it never talks to main.narto-drama.com (that belongs to the separate "Narto Drama"
 // extension). Kept as one concrete class; no shared base with the other source.
 private const val EDGE_HOST = "https://edge.narto-drama.com"
-private const val STREAM_HOST = "https://stream.narto-drama.com"
+// The apex host. Subtitles are BUILT on this one (never on stream.narto — see loadLinks).
+private const val NARTO_MAIN = "https://narto-drama.com"
+// stream.narto-drama.com is deliberately unused: it answers every subtitle token with
+// 501 "local file tetap di VPS edge" (measured 2026-10-03). The name survives only in comments.
 
 // Backend hosts that are dead (DNS NODATA / non-existent domain) and must NOT be emitted as
 // playback links — the player would select them and fail.
-private val DEAD_HOST_PATTERNS = listOf("montagehub")
+// cdn.narto-drama.com is the API's own "direct" host but its TLS certificate is EXPIRED
+// (measured 2026-10-02): the notAfter date is still in the future, yet a strict handshake fails
+// with "certificate has expired", so a link there can never play. Same entry the sibling
+// NartoDrama provider carries.
+private val DEAD_HOST_PATTERNS = listOf("montagehub", "cdn.narto-drama.com")
+
+// Dead verdicts, with a short TTL. joyreels hands out signed tokens that go stale fast, so
+// remembering the answer keeps a replay from re-spending the whole probe timeout on it.
+private val deadLinkCache = LinkedHashMap<String, Long>()
+private const val DEAD_LINK_TTL_MS = 5 * 60 * 1000L
 
 // One JSON-LD ListItem entry from the search results page.
 private data class SearchHit(
@@ -63,6 +75,19 @@ private data class EdgeSub(
     val label: String? = null,
     @JsonProperty("subtitle_url") val subtitleUrl: String? = null,     // relative /e/s/{jwt}
 )
+
+// Subtitle lang tags. SubtitleFile.getLangTag() resolves a code through fromCodeToLangTagIETF and
+// only falls back to fromLanguageToTagIETF; run against the app's own SubtitleHelper (CS3 jar):
+//   "ar" -> ar      "ar-SA" -> null      "ترجمة" -> null
+// A region-suffixed code yields a NULL tag and the player lists a track it cannot load. Keep the
+// code, drop the region — the app renders the Arabic name from "ar" itself.
+private fun String?.subLangTag(): String =
+    this?.trim()?.takeIf { it.isNotBlank() }
+        ?.substringBefore('-')
+        ?.substringBefore('_')
+        ?.takeIf { it.isNotBlank() } ?: "ar"
+
+private fun EdgeSub.langTag(): String = languageCode.subLangTag()
 
 // Minimal fake JWT the edge accepts (claims are not verified, slug/ep read from path).
 private val fakeRsCtx = "eyJhbGciOiJub25lIn0.eyJ2IjoiMSJ9."
@@ -385,63 +410,107 @@ class EdgeNartoProvider(private val prefs: SharedPreferences? = null) : MainAPI(
             val subTracks = buildList {
                 edge.multiSubtitles.orEmpty().forEach { s ->
                     val rel = s.subtitleUrl?.takeIf { it.isNotBlank() } ?: return@forEach
-                    val lang = s.label?.takeIf { it.isNotBlank() } ?: s.languageCode ?: "ترجمة"
-                    add(lang to rel)
+                    add(s.langTag() to rel)
                 }
                 edge.subtitleUrl?.takeIf { it.isNotBlank() && !it.contains("undefined") }?.let {
-                    add((edge.selectedSubtitleLanguage?.takeIf { l -> l.isNotBlank() } ?: "ترجمة") to it)
+                    add(edge.selectedSubtitleLanguage.subLangTag() to it)
                 }
                 edge.directSubtitleUrl?.takeIf { it.isNotBlank() && !it.contains("undefined") }?.let {
-                    add("ترجمة مباشرة" to it)
+                    add("ar" to it)
                 }
             }
             for ((lang, rel) in subTracks) {
-                val subUrl = if (rel.startsWith("http")) rel else STREAM_HOST + rel
+                // HOST is the bug that made these rows appear and then fail. MEASURED 2026-10-03
+                // on the sibling NartoDrama provider (same backend, same tokens): stream.narto
+                // answers EVERY /e/s/ token with HTTP 501 "local file tetap di VPS edge", while
+                // mainUrl serves the very same tokens as 200 text/vtt. So build on mainUrl.
+                val subUrl = if (rel.startsWith("http")) rel else NARTO_MAIN + rel
                 if (!seenSubs.add(subUrl)) continue
-                try { subtitleCallback(newSubtitleFile(lang, subUrl)) } catch (e: Exception) {}
+                // Do NOT wrap this in try/catch: swallowing it is how a subtitle row shipped that
+                // the player could never load, with nothing in logcat to explain why.
+                subtitleCallback(newSubtitleFile(lang, subUrl))
             }
 
             val emitted = LinkedHashSet<String>()
             var any = false
             var skippedDead = 0
+            // Why the last probe failed — so "emit SKIP" names the cause (410, expired, TLS)
+            // instead of a bare "dead shortmax token" that hid this whole class of bug.
+            var lastProbeWhy = ""
 
             // shortmax-stream stores one signed token per episode; the ingest drops them at
             // ARBITRARY times (most are already 410 "link expired" even inside the exp window,
             // 2026-09-07 audit: 7/8 sampled tokens dead). Don't hand the player a dead master:
-            // probe it (range GET) and skip 410/403. This kills the "plays a bit then spins on
-            // a dead token" failure mode.
+            // probe it and skip 410/403. This kills the "plays a bit then spins on a dead
+            // token" failure mode.
+            //
+            // MEASURED 2026-10-03 on the sibling NartoDrama provider (same backend, same hosts):
+            // a dead joyreels-stream token answers DIFFERENTLY depending on the Range header, and
+            // that difference is the whole bug:
+            //     with    "Range: bytes=0-1"  -> HTTP 403  "joyreels-edge: invalid token"
+            //     without any Range header  -> HTTP 410  "joyreels-edge: link expired"
+            // The old probe sent Range, got a 403, and reported it as a *probe* failure rather than
+            // a dead link — so the dead link went to the player as if healthy, and the player,
+            // which sends no Range, hit the real 410. Probe exactly what the player sends.
             fun isAlive(u: String): Boolean {
-                val isShortmax = u.contains("shortmax-stream")
+                val host = u.substringAfter("//").substringBefore("/").lowercase()
+                // Probe EVERY Narto-hosted stream, not just shortmax: joyreels-stream was the host
+                // throwing 410 repeatedly while this provider reported deadSkipped=0.
+                if (!host.endsWith("narto-drama.com")) return true
                 val isProxy = u.contains("/e/m/")
                 val probeBody = isProxy   // proxy 200s even when its src is "link expired"
-                if (!isShortmax && !isProxy) return true
+                // A cached-dead verdict is worth keeping: the same token will not come back to
+                // life within one episode, and re-probing it only adds seconds to every replay.
+                deadLinkCache[u]?.let { at ->
+                    if (System.currentTimeMillis() - at < DEAD_LINK_TTL_MS) return false
+                }
                 return try {
                     val httpConn = java.net.URL(u).openConnection() as java.net.HttpURLConnection
                     httpConn.apply {
                         requestMethod = "GET"
                         setRequestProperty("Referer", nartoOrigin)
                         setRequestProperty("User-Agent", "Mozilla/5.0 (Linux; Android 10)")
-                        if (!probeBody) setRequestProperty("Range", "bytes=0-1")
-                        else setRequestProperty("Range", "bytes=0-255")
-                        connectTimeout = 3500
-                        readTimeout = 3000
+                        // Range ONLY for the proxy body-probe — the player never sends one, and
+                        // sending it here inverts the verdict on a dead token (see above).
+                        if (probeBody) setRequestProperty("Range", "bytes=0-255")
+                        connectTimeout = 3000
+                        readTimeout = 2500
                         instanceFollowRedirects = true
                     }
                     val code = httpConn.responseCode
-                    if (code !in 200..399) { httpConn.inputStream?.close(); return false }
+                    if (code !in 200..399) {
+                        lastProbeWhy = "HTTP $code"
+                        deadLinkCache[u] = System.currentTimeMillis()
+                        return false
+                    }
                     if (probeBody) {
                         val body = httpConn.inputStream?.bufferedReader()?.use { it.readText() } ?: ""
                         httpConn.inputStream?.close()
-                        !body.contains("link expired")
+                        val expired = body.contains("link expired") || body.contains("invalid token")
+                        if (expired) {
+                            lastProbeWhy = "body says link expired"
+                            deadLinkCache[u] = System.currentTimeMillis()
+                        }
+                        !expired
                     } else {
                         httpConn.inputStream?.close()
                         true
                     }
-                } catch (e: Exception) { false }
+                } catch (e: Exception) {
+                    // A dead TLS cert lands here as SSLHandshakeException — name it in the log
+                    // instead of reporting a bare "dead shortmax token".
+                    lastProbeWhy = "${e.javaClass.simpleName}: ${e.message?.take(60) ?: "-"}"
+                    deadLinkCache[u] = System.currentTimeMillis()
+                    false
+                }
             }
 
             suspend fun emit(u: String, label: String, q: String) {
-                if (u.isBlank() || !emitted.add(u)) return
+                // Dedup on the links we ACCEPT, not on every URL we merely looked at.
+                // `emitted.add(u)` used to run BEFORE the probe, so a URL that failed the probe
+                // was marked seen for the rest of loadLinks and could never be retried — which
+                // silently disabled every fallback that tried the same URL again.
+                if (u.isBlank() || u in emitted) return
                 val host = u.substringAfter("//").substringBefore("/").substringBefore(":").lowercase()
                 if (DEAD_HOST_PATTERNS.any { host.contains(it) }) {
                     skippedDead++
@@ -450,7 +519,7 @@ class EdgeNartoProvider(private val prefs: SharedPreferences? = null) : MainAPI(
                 }
                 if (!isAlive(u)) {
                     skippedDead++
-                    android.util.Log.e("EdgeNarto", "emit SKIP dead shortmax token $host ($label)")
+                    android.util.Log.e("EdgeNarto", "emit SKIP dead link $host ($label) why=$lastProbeWhy")
                     return
                 }
                 val type = inferStreamType(u)
