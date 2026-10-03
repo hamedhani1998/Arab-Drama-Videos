@@ -28,7 +28,13 @@ private const val STREAM_HOST = "https://stream.narto-drama.com"
 
 // Backend hosts that are dead (DNS NODATA / non-existent domain) and must NOT be emitted as
 // playback links — the player would select them and fail.
-private val DEAD_HOST_PATTERNS = listOf("montagehub")
+// Hosts we never hand to the player. `cdn.narto-drama.com` is the API's own "direct" host for
+// shortmax works, but its TLS certificate has EXPIRED (measured 2026-10-02: python and the
+// player both reject it — CERTIFICATE_VERIFY_FAILED). The player validates certs and has no
+// verify=false escape, so a link on this host is a guaranteed "Source error". The real
+// qualities live in the signed shortmax-stream tokens, which serve fine (cert valid to
+// Dec 1 2026). Recoverable — drop this line once the host's cert is fixed.
+private val DEAD_HOST_PATTERNS = listOf("montagehub", "cdn.narto-drama.com")
 
 // One JSON-LD ListItem entry from the search results page.
 private data class SearchHit(
@@ -528,6 +534,17 @@ class NartoDramaProvider(private val prefs: SharedPreferences? = null) : MainAPI
                 return if (q == null) "480p" else "${q}p"
             }
 
+            // The authoritative quality for a multi_resolutions entry is the API's own
+            // `resolution`/`label` field. Measured 2026-10-02: the shortmax token no longer
+            // carries the quality in its path (it is .../{token}/main.m3u8, no _720p and no
+            // query), so reading quality off the path mislabelled all three as 480p.
+            fun qualityOfRes(r: NartoResolution): String {
+                val lbl = r.label?.trim()?.takeIf { it.isNotBlank() }
+                if (lbl != null && Regex("""\d{3,4}""").containsMatchIn(lbl)) return lbl
+                val n = r.resolution ?: return "480p"
+                return "${n}p"
+            }
+
             // Decode a JWT payload's "src" field robustly. Payload is base64url JSON
             // (header.payload[.sig]); the JSON text may contain escape sequences (still valid
             // JSON), so decode the bytes then use the ObjectMapper to extract "src" — regexes
@@ -569,10 +586,13 @@ class NartoDramaProvider(private val prefs: SharedPreferences? = null) : MainAPI
                         emit(src, "كامل", proxyQuality(src))
                     }
                 }
-                // shortmax: same uuid serves 480/720/1080 with one auth_key (verified 200).
-                // CRITICAL: path uses `{uuid}_{q}/main.m3u8` with NO `p` — verified live that
-                // `_720p`/`_1080p` return HTTP 403 while `_720`/`_1080` return 200. The label keeps
-                // the `p` for display but the URL must NOT contain it.
+                // Derive the sibling qualities when the URL still carries `{uuid}_{q}/main.m3u8`.
+                // MEASURED 2026-10-02: shortmax no longer uses this shape — it is now
+                // `/{token}/main.m3u8` with no `_{q}` and no query, so this regex does not match
+                // and we return below. That is harmless: shortmax's own qualities arrive as
+                // distinct signed tokens in multi_resolutions and are emitted verbatim, each
+                // labelled from the API's own `resolution` field. This block still serves any
+                // other backend that keeps the older shape.
                 val m = Regex("""(.+?)_(\d{3,4})(?:p)?/main\.m3u8(\?.*)""").find(src) ?: return
                 // akamai raw variants would 403 on their auth-less segments — for akamai the
                 // proxy re-wrap (emitted above) is the ONLY safe link, so do NOT add raw variants.
@@ -611,20 +631,29 @@ class NartoDramaProvider(private val prefs: SharedPreferences? = null) : MainAPI
             val showFull = prefs?.getBoolean(NartoDramaSettingsBottomSheet.KEY_SHOW_FULL, true) != false
             for (u in if (showFull) directs else emptyList()) {
                 if (directEmitted >= 2) break
-                // v43: on slow CDNs (shortmax-stream) a 1080 master's 1.7MB segments drain the
-                // buffer as fast as it fills ("plays a bit then spins"). Prefer the 480 token
-                // (740KB @ ~3s for a 10s segment) so the default "كامل" starts smooth; the
-                // multi_resolutions emissions below still give 1080/720 to the quality picker.
-                val picked = if (u.contains("shortmax-stream") && !u.contains("/e/m/")) {
-                    edge.multiResolutions
-                        ?.asSequence()
-                        ?.filter { it.streamUrl?.contains("shortmax-stream") == true }
-                        ?.minWithOrNull(compareBy { it.resolution ?: 1080 })
-                        ?.streamUrl
-                        ?.takeIf { it.isNotBlank() }
+                // v43: on slow CDNs (shortmax-stream) a 1080 master's big segments drain the
+                // buffer as fast as it fills ("plays a bit then spins"). Prefer the 480 token so
+                // the default "كامل" starts smooth; the multi_resolutions emissions below still
+                // give 1080/720 to the quality picker.
+                // MEASURED 2026-10-02 (re-confirmed): for shortmax the API's direct_play_url is on
+                // cdn.narto-drama.com, whose certificate has EXPIRED — it is in DEAD_HOST_PATTERNS,
+                // so emitting it as-is gives the player a guaranteed "Source error". Every quality
+                // of the work lives in the signed shortmax-stream tokens instead, and those serve
+                // fine. So when the API hands us a dead direct but the title has tokens, «كامل»
+                // becomes a token. Pick the LOWEST one: the measured segments are 402KB @5s (480)
+                // / 578KB (720) / 890KB (1080), and the 1080 drains the buffer faster than it
+                // refills on a slow link ("plays a bit then spins"). The higher ones still reach
+                // the user through the quality picker below.
+                val shortmaxTokens = edge.multiResolutions.orEmpty()
+                    .filter { it.streamUrl?.contains("shortmax-stream") == true && it.streamUrl.isNotBlank() }
+                val needsToken = u.contains("cdn.narto-drama.com") || u.contains("shortmax-stream")
+                val picked = if (needsToken && !u.contains("/e/m/")) {
+                    shortmaxTokens.minWithOrNull(compareBy { it.resolution ?: 1080 })?.streamUrl
                 } else null
+                val pickedQ = picked?.let { pu -> shortmaxTokens.firstOrNull { it.streamUrl == pu } }
+                    ?.let { qualityOfRes(it) }
                 val before = emitted.size
-                emit(picked ?: u, "كامل", picked?.let { proxyQuality(it) } ?: proxyQuality(u))
+                emit(picked ?: u, "كامل", pickedQ ?: proxyQuality(u))
                 if (emitted.size > before) directOk++
                 directEmitted++
             }
@@ -646,11 +675,10 @@ class NartoDramaProvider(private val prefs: SharedPreferences? = null) : MainAPI
             for (res in edge.multiResolutions.orEmpty()) {
                 val su = res.streamUrl?.trim().orEmpty()
                 if (su.isBlank() || su.contains("/e/m/")) continue
-                val label = res.label?.takeIf { it.isNotBlank() } ?: run {
-                    val r = res.resolution ?: 480
-                    "${r}p"
-                }
-                emit(su, label, label)
+                // quality from the API field, not from the URL path (see qualityOfRes)
+                val label = res.label?.trim()?.takeIf { it.isNotBlank() }
+                    ?: "${res.resolution ?: 480}p"
+                emit(su, label, qualityOfRes(res))
             }
 
             if (emitted.isEmpty()) {
