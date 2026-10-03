@@ -9,6 +9,9 @@ import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.GlobalScope
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.launch
 
 private val mapper = ObjectMapper().registerKotlinModule()
@@ -36,6 +39,13 @@ private const val BRW_HOST = "https://edge.narto-drama.com"
 // serve fine (cert accepted, valid through December 1, 2026). Recoverable — drop this line once
 // the host's cert is fixed.
 private val DEAD_HOST_PATTERNS = listOf("montagehub", "cdn.narto-drama.com")
+
+// joyreels-stream hands out signed tokens that go stale fast. MEASURED 2026-10-03: a token the
+// API had just minted answered 410 "joyreels-edge: link expired" moments later. Probing a dead
+// one is not free, so remember the verdict for a while — the same URL will not come back to life
+// within one episode, and re-probing it only adds seconds to every replay.
+private val deadLinkCache = LinkedHashMap<String, Long>()
+private const val DEAD_LINK_TTL_MS = 5 * 60 * 1000L
 
 // One JSON-LD ListItem entry from the search results page.
 private data class SearchHit(
@@ -520,32 +530,49 @@ class NartoDramaProvider(private val prefs: SharedPreferences? = null) : MainAPI
                 // A proxy answers 200 even when the src behind it is "link expired", so read the
                 // body and look for the marker instead of trusting the status code.
                 val probeBody = isProxy
+                // probeBodyForBody = read enough text to look for an expiry marker inside it.
+                val readBytes = if (probeBody) 256 else 1
+                // MEASURED 2026-10-03 from the phone: a joyreels-stream token answers DIFFERENTLY
+                // depending on the Range header, and that difference is the whole bug:
+                //     with    "Range: bytes=0-1"  -> HTTP 403  "joyreels-edge: invalid token"
+                //     without any Range header  -> HTTP 410  "joyreels-edge: link expired"
+                // So the old bytes=0-1 probe made a DEAD link look broken-in-the-probe (FileNotFound)
+                // and the player — which sends no Range — got the real 410 and errored. i.e. we
+                // were judging liveness on a request shape the player never makes. Probe exactly
+                // what the player does: a bare GET, no Range.
+                val useRange = !probeBody   // only the proxy body-probe needs a Range at all
+                deadLinkCache[u]?.let { at ->
+                    if (System.currentTimeMillis() - at < DEAD_LINK_TTL_MS) {
+                        lastProbeWhy = "cached dead"
+                        return false
+                    }
+                }
                 return try {
                     val httpConn = java.net.URL(u).openConnection() as java.net.HttpURLConnection
                     httpConn.apply {
                         requestMethod = "GET"
                         setRequestProperty("Referer", nartoOrigin)
                         setRequestProperty("User-Agent", "Mozilla/5.0 (Linux; Android 10)")
-                        if (!probeBody) setRequestProperty("Range", "bytes=0-1")
-                        else setRequestProperty("Range", "bytes=0-255")
-                        connectTimeout = 3500
-                        readTimeout = 3000
+                        if (useRange) setRequestProperty("Range", "bytes=0-$readBytes")
+                        connectTimeout = 3000
+                        readTimeout = 2500
                         instanceFollowRedirects = true
                     }
                     val code = httpConn.responseCode
                     if (code !in 200..399) {
-                        httpConn.inputStream?.close()
                         lastProbeWhy = "HTTP $code"
+                        deadLinkCache[u] = System.currentTimeMillis()
                         return false
                     }
                     if (probeBody) {
                         val body = httpConn.inputStream?.bufferedReader()?.use { it.readText() } ?: ""
-                        httpConn.inputStream?.close()
-                        val expired = body.contains("link expired")
-                        if (expired) lastProbeWhy = "body says link expired"
+                        val expired = body.contains("link expired") || body.contains("invalid token")
+                        if (expired) {
+                            lastProbeWhy = "body says link expired"
+                            deadLinkCache[u] = System.currentTimeMillis()
+                        }
                         !expired
                     } else {
-                        httpConn.inputStream?.close()
                         true
                     }
                 } catch (e: Exception) {
@@ -553,8 +580,26 @@ class NartoDramaProvider(private val prefs: SharedPreferences? = null) : MainAPI
                     // cdn.narto-drama.com gets caught, so name it in the log rather than
                     // reporting a bare "dead token".
                     lastProbeWhy = "${e.javaClass.simpleName}: ${e.message?.take(60) ?: "-"}"
+                    deadLinkCache[u] = System.currentTimeMillis()
                     false
                 }
+            }
+
+            // Register an already-probed, already-vetted link. Split out of emit() so the parallel
+            // quality probes can all finish BEFORE any registration, keeping «كامل» first and
+            // the quality order the user picked.
+            suspend fun emitNow(u: String, label: String, q: String) {
+                if (u.isBlank() || u in emitted) return
+                emitted.add(u)
+                val type = inferStreamType(u)
+                collected.add(
+                    newExtractorLink(source = name, name = label, url = u, type = type) {
+                        referer = nartoOrigin
+                        quality = getQualityFromName(q)
+                        headers = mapOf("Referer" to nartoOrigin)
+                    }
+                )
+                any = true
             }
 
             suspend fun emit(u: String, label: String, q: String) {
@@ -574,18 +619,7 @@ class NartoDramaProvider(private val prefs: SharedPreferences? = null) : MainAPI
                     android.util.Log.e("NartoDrama", "emit SKIP dead link $host ($label) why=$lastProbeWhy")
                     return
                 }
-                emitted.add(u)
-                val type = inferStreamType(u)
-                // ★ نُضيف إلى قائمة التجميع بدل البثّ المباشر؛ البثّ يتم دفعةً واحدة
-                //   في emitSorted عند المخرج (نفس newExtractorLink تماماً).
-                collected.add(
-                    newExtractorLink(source = name, name = label, url = u, type = type) {
-                        referer = nartoOrigin
-                        quality = getQualityFromName(q)
-                        headers = mapOf("Referer" to nartoOrigin)
-                    }
-                )
-                any = true
+                emitNow(u, label, q)
             }
 
             // v37 (fix "افحص المصدرين واصلحهما بالكامل"): live API audit on 2026-09-05 showed the
@@ -764,13 +798,39 @@ class NartoDramaProvider(private val prefs: SharedPreferences? = null) : MainAPI
             // stream → consumes buffer faster than it fills → PAUSED buffering dip; 480's 740KB
             // @ 3.2s vs 10s play keeps well ahead). Only safe when the master we emit is NOT a
             // nested /e/m/{jwt} proxy (which would spin) — so gate each on a real CDN host.
-            for (res in edge.multiResolutions.orEmpty()) {
-                val su = res.streamUrl?.trim().orEmpty()
-                if (su.isBlank() || su.contains("/e/m/")) continue
-                // quality from the API field, not from the URL path (see qualityOfRes)
+            // Probe every quality CONCURRENTLY, then emit in the API's own order.
+            //
+            // MEASURED 2026-10-03 from the phone: loadLinks took 12.3 s before playback even
+            // started (fetchRefresh 12296ms + three serial probes at ~0.6-3 s each). A serial
+            // probe spends its whole timeout budget on the FIRST dead token before the player
+            // learns anything. The probes are independent — one HTTP request each, no shared
+            // state — so run them together and emit afterwards in the order the API listed them,
+            // which keeps «كامل» first and the quality picker in the user's chosen order.
+            val resCandidates = edge.multiResolutions.orEmpty()
+                .map { res -> res to res.streamUrl?.trim().orEmpty() }
+                .filter { (_, su) -> su.isNotBlank() && !su.contains("/e/m/") }
+            val probed = coroutineScope {
+                resCandidates.map { (res, su) ->
+                    async(Dispatchers.IO) {
+                        // isAlive() annotates lastProbeWhy; that var is only meaningful for the
+                        // single-URL paths, so a resolution probe just returns the verdict.
+                        Triple(res, su, isAlive(su))
+                    }
+                }.awaitAll()
+            }
+            android.util.Log.e(
+                "NartoDrama",
+                "loadLinks probed ${probed.size} qualities in parallel slug=$slug ep=$ep dead=${probed.count { !it.third }}"
+            )
+            for ((res, su, ok) in probed) {
+                if (!ok) {
+                    skippedDead++
+                    android.util.Log.e("NartoDrama", "emit SKIP dead resolution (${qualityOfRes(res)}) slug=$slug")
+                    continue
+                }
                 val label = res.label?.trim()?.takeIf { it.isNotBlank() }
                     ?: "${res.resolution ?: 480}p"
-                emit(su, label, qualityOfRes(res))
+                emitNow(su, label, qualityOfRes(res))
             }
 
             if (emitted.isEmpty()) {
