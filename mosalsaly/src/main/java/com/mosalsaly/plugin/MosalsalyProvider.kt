@@ -464,10 +464,33 @@ class MosalsalyProvider(
             val url = "$mainUrl/mosalsal/$slug"
             if (!seen.add(url)) continue
             out.add(newTvSeriesSearchResponse(title, url, TvType.TvSeries) {
-                this.posterUrl = poster
+                this.posterUrl = cleanPoster(poster)
             })
         }
         return out
+    }
+
+    /**
+     * يقطع لاحقة المعاينة من رابط الصورة.
+     *
+     * dramaboxdb يخدم المسار هكذا:
+     *   .../42000023908.jpg@w=3840
+     * وهي لاحقة وسيط الصور (UFW) لا جزء من الاسم.
+     * قِسنا الثنين:
+     *   مع اللاحقة  → 000  (الاتصال يُقطع)
+     *   نظيفاً      → 200  image/jpeg
+     * أي أنّ اللاحقة تُرجع CDN طلباً محجوباً، فلا تظهر الأيقونة بسببها.
+     *
+     * ولا نمسّ ما قبل @ إلا بعد التحقّق: نقبل الذيل إن كان أرقاماً أو رموز قياس
+     * (w=h, x) فقط، ونشترط نقطة في ما قبل @ — لأن ملف الصورة ينتهي في ما قبل @.
+     */
+    private fun cleanPoster(raw: String): String {
+        val at = raw.lastIndexOf('@')
+        if (at <= 0) return raw
+        val tail = raw.substring(at + 1)
+        val allowed = tail.all { it.isDigit() || it in "w=h,x" }
+        if (!allowed || !raw.substring(0, at).contains('.')) return raw
+        return raw.substring(0, at)
     }
 
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse? {
