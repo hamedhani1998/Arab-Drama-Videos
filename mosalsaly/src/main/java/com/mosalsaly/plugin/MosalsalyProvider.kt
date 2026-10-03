@@ -599,6 +599,58 @@ class MosalsalyProvider(
         return out.distinctBy { it.serial }.sortedBy { it.serial }
     }
 
+    /**
+     * يحدّد منصّة السلسلة، وله مصدران.
+     *
+     * الأول صفحة التفاصيل نفسها: رابط ‎/masdar/<slug>‎ أو جملة «ومصدره منصة X».
+     * وهذا يكفي في أغلب الصفحات — قِسنا «ربيع-القلب» و«الحب في ظل عقد»
+     * و«الحارسة الجميلة» وكلها تحمل الرابط مباشرة.
+     *
+     * لكنّ قسماً من الصفحات تُخفي الصفّ في قالب: ‎<dt>المصدر</dt><template id="P:9"></template>‎
+     * بلا رابط، وتنتظر المتصفح أن يملأه. عندها لا يوجد ‎/masdar/‎ الخاص بها إطلاقاً،
+     * و«ومصدره منصة {source}» قالب بديل بلا قيمة — أي لا اسم منصّة في الصفحة.
+     * قِستُ الثلاثة التي أعطاني إياها المستخدم:
+     *
+     *   من-الطلاق-إلى-الحب           bookId=6757ea…  ٦٣ حلقة   لا منصّة في الصفحة
+     *   الحنان-المفقود-3             bookId=190158      ٧٧ حلقة   لا منصّة في الصفحة
+     *   أب-حضري-متعدد-الاستخدامات    bookId=2623        ٩١ حلقة   لا منصّة في الصفحة
+     *
+     * الثلاثة كان load يرجع null لأجلها فلا تظهر صفحة التفاصيل.
+     *
+     * الثاني الواصف: ‎/api/episode-source/{bookId}/1‎ يُرجع ‎descriptor.source‎
+     * بالاسم الدقيق («HappyShort» / «ShortWave» / «Stardust») — قِستُه ٣ من ٣.
+     * فنحوّله إلى slug عبر PLATFORM_BY_DISPLAY، وهو نفس ما ينتظره loadLinks.
+     *
+     * ولا نُسقط الصفحة: لو لم تعرف المنصّة بعد كل ذلك، نمرّر قيمة فارغة فيظهر
+     * العمل وتُحلَّ الحلقات عبر الـAPI نفسه. المنصّة تُستخدم في loadLinks لتخطّي
+     * المنصّات المعطّلة وللتسمية فقط، لا لفتح المحتوى — ومحتواه لا يعتمد عليها.
+     */
+    private suspend fun resolvePlatform(html: String, bookId: String): String? {
+        extractPlatform(html)?.lowercase()?.let { return it }
+        val fromApi = platformFromApi(bookId) ?: return ""
+        Log.i(TAG, "platform from api: $fromApi (bookId=$bookId)")
+        return fromApi
+    }
+
+    /** اسم المنصّة من واصف الحلقة الأولى. */
+    private suspend fun platformFromApi(bookId: String): String? {
+        val bid = try {
+            java.net.URLEncoder.encode(bookId, "UTF-8").replace("+", "%20")
+        } catch (e: Exception) { return null }
+        val text = try {
+            getWithRetry("$mainUrl/api/episode-source/$bid/1?lang=ar&refresh=1", mainUrl, 2, 300)
+        } catch (e: Exception) { null }
+        if (text.isNullOrBlank()) return null
+        return try {
+            val d = mosMapper.readTree(text).get("descriptor") as? ObjectNode ?: return null
+            val name = d.get("source")?.asText()?.trim().orEmpty()
+            if (name.isBlank()) null else PLATFORM_BY_DISPLAY[name] ?: name.lowercase()
+        } catch (e: Exception) {
+            Log.w(TAG, "platformFromApi parse fail ${e.message}")
+            null
+        }
+    }
+
     private fun extractPlatform(html: String): String? {
         // سطر المصدر في التفاصيل: <dt>المصدر</dt><dd><a href="/masdar/<p>">
         // «المصدر» يظهر أولاً في القوائم/الإشعارات أيضاً؛ نطابق التواجد الذي يليه
@@ -640,7 +692,13 @@ class MosalsalyProvider(
         val bookId = Regex("""(?:\\")?bookId(?:\\")?:\s*(?:\\")?([^"\\<>/\s]{2,})(?:\\")?""")
             .find(html)?.groupValues?.get(1)?.trim('\\', '"', '/') ?: return null
         if (episodes.isEmpty()) return null
-        val platform = extractPlatform(html)?.lowercase() ?: return null
+        // المنصّة: نقرأها من الصفحة، وإن لم تكن فنطلبها من ال‎API‎. والإلغاء هنا
+        // كان يُسقط صفحة التفاصيل كاملةً.
+        val platform = resolvePlatform(html, bookId)
+        if (platform == null) {
+            Log.w(TAG, "load: no platform for bookId=$bookId slug=$slug")
+            return null
+        }
         Log.i(TAG, "load ok slug=$slug bookId=$bookId platform=$platform eps=${episodes.size}")
         // slug الأصلي من الرابط — أفضل من slug مشتق من العنوان (قد يختلف)
         val encSlug = java.net.URLEncoder.encode(slug, "UTF-8").replace("+", "%20")
