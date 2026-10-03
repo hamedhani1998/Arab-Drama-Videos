@@ -449,17 +449,27 @@ class NartoDramaProvider(private val prefs: SharedPreferences? = null) : MainAPI
             val emitted = LinkedHashSet<String>()
             var any = false
             var skippedDead = 0
+            // Why the last probe failed — so "emit SKIP" names the cause (410, expired, TLS)
+            // instead of the generic "dead shortmax token" that hid this whole class of bug.
+            var lastProbeWhy = ""
 
-            // shortmax-stream stores one signed token per episode; the ingest drops them at
-            // ARBITRARY times (most are already 410 "link expired" even inside the exp window,
-            // 2026-09-07 audit: 7/8 sampled tokens dead). Don't hand the player a dead master:
-            // probe it (range GET) and skip 410/403. This kills the "plays a bit then spins on
-            // a dead token" failure mode.
+            // Every Narto stream host hands out a SIGNED, SHORT-LIVED token, and the ingest drops
+            // them at arbitrary times — the live failure is a plain HTTP 410, not a parse bug.
+            // MEASURED 2026-10-03 from the phone (adb logcat, 12 failures in one browsing pass):
+            //   30 mentions of joyreels-stream.narto-drama.com  -> Response code: 410
+            //   5  mentions of shortmax-stream.narto-drama.com -> Response code: 410
+            // while `loadLinks DONE ... deadSkipped=0` — i.e. the provider reported a healthy
+            // result and handed the player links that were already dead. The old probe only ran
+            // for hosts containing "shortmax-stream" or "/e/m/", so joyreels was returned as
+            // alive WITHOUT a request; zero "emit SKIP" lines appeared in the whole log.
+            // So: probe every Narto-hosted stream, and log the status so the reason is visible.
             fun isAlive(u: String): Boolean {
-                val isShortmax = u.contains("shortmax-stream")
+                val host = u.substringAfter("//").substringBefore("/").lowercase()
+                if (!host.endsWith("narto-drama.com")) return true   // tiktok/akamai/etc: leave alone
                 val isProxy = u.contains("/e/m/")
-                val probeBody = isProxy   // proxy 200s even when its src is "link expired"
-                if (!isShortmax && !isProxy) return true
+                // A proxy answers 200 even when the src behind it is "link expired", so read the
+                // body and look for the marker instead of trusting the status code.
+                val probeBody = isProxy
                 return try {
                     val httpConn = java.net.URL(u).openConnection() as java.net.HttpURLConnection
                     httpConn.apply {
@@ -473,20 +483,36 @@ class NartoDramaProvider(private val prefs: SharedPreferences? = null) : MainAPI
                         instanceFollowRedirects = true
                     }
                     val code = httpConn.responseCode
-                    if (code !in 200..399) { httpConn.inputStream?.close(); return false }
+                    if (code !in 200..399) {
+                        httpConn.inputStream?.close()
+                        lastProbeWhy = "HTTP $code"
+                        return false
+                    }
                     if (probeBody) {
                         val body = httpConn.inputStream?.bufferedReader()?.use { it.readText() } ?: ""
                         httpConn.inputStream?.close()
-                        !body.contains("link expired")
+                        val expired = body.contains("link expired")
+                        if (expired) lastProbeWhy = "body says link expired"
+                        !expired
                     } else {
                         httpConn.inputStream?.close()
                         true
                     }
-                } catch (e: Exception) { false }
+                } catch (e: Exception) {
+                    // A dead TLS cert lands here as SSLHandshakeException — that is how
+                    // cdn.narto-drama.com gets caught, so name it in the log rather than
+                    // reporting a bare "dead token".
+                    lastProbeWhy = "${e.javaClass.simpleName}: ${e.message?.take(60) ?: "-"}"
+                    false
+                }
             }
 
             suspend fun emit(u: String, label: String, q: String) {
-                if (u.isBlank() || !emitted.add(u)) return
+                // Dedup on the links we actually ACCEPT, not on every URL we merely looked at.
+                // `emitted.add(u)` used to run BEFORE the probe, so a URL that failed the probe
+                // was marked as seen for the rest of loadLinks and could never be retried — which
+                // silently disabled every fallback that tried the same URL again.
+                if (u.isBlank() || u in emitted) return
                 val host = u.substringAfter("//").substringBefore("/").substringBefore(":").lowercase()
                 if (DEAD_HOST_PATTERNS.any { host.contains(it) }) {
                     skippedDead++
@@ -495,9 +521,10 @@ class NartoDramaProvider(private val prefs: SharedPreferences? = null) : MainAPI
                 }
                 if (!isAlive(u)) {
                     skippedDead++
-                    android.util.Log.e("NartoDrama", "emit SKIP dead shortmax token $host ($label)")
+                    android.util.Log.e("NartoDrama", "emit SKIP dead link $host ($label) why=$lastProbeWhy")
                     return
                 }
+                emitted.add(u)
                 val type = inferStreamType(u)
                 // ★ نُضيف إلى قائمة التجميع بدل البثّ المباشر؛ البثّ يتم دفعةً واحدة
                 //   في emitSorted عند المخرج (نفس newExtractorLink تماماً).
@@ -656,6 +683,21 @@ class NartoDramaProvider(private val prefs: SharedPreferences? = null) : MainAPI
                 emit(picked ?: u, "كامل", pickedQ ?: proxyQuality(u))
                 if (emitted.size > before) directOk++
                 directEmitted++
+            }
+            if (directOk == 0 && showFull) {
+                // MEASURED 2026-10-03: the API's direct token is frequently already 410, and the
+                // quality list is NOT always populated (multi_resolutions is [] for many works).
+                // So before giving up on «كامل», re-try the same direct URL once — the ingest
+                // refreshes tokens on each call, and the proxy below is a weaker option than a
+                // fresh token from the same source. We log the outcome either way so a truly
+                // dead episode is distinguishable from one we simply could not refresh.
+                val retry = directs.firstOrNull { it.isNotBlank() && it !in emitted }
+                if (retry != null) {
+                    val before = emitted.size
+                    emit(retry, "كامل", proxyQuality(retry))
+                    android.util.Log.e("NartoDrama", "loadLinks retry-direct alive=${emitted.size > before} url=${retry.take(60)}")
+                    if (emitted.size > before) directOk++
+                }
             }
             if (directOk == 0) {
                 // No live direct CDN host survived the probe (dead shortmax tokens) — fall back
