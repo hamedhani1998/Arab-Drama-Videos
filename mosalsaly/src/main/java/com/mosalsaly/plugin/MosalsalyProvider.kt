@@ -375,6 +375,66 @@ class MosalsalyProvider(
         return null
     }
 
+    /**
+     * جلب صفحة تفاصيل، مع إنقاذ واحد: همزة الألف الأولى.
+     *
+     * قِستُ هذا على رابطٍ أعطاني المستخدم: ‎/mosalsal/اب-حضري-متعدد-الاستخدامات‎
+     * (بتاء، بلا همزة) يرجع ١٨٢١٧٥ بايت فيها **صفر bookId وصفر حلقة** — وهي
+     * الصفحة الفارغة نفسها التي يرجعها أي slug غير موجود (١٨١٥٦٠ بايت)، أي أنّ
+     * الخادم لا يعرف الاسم. والصواب ‎أب-حضري-…‎ بهمزة يرجع ٤٠٧٥٣١ بايت و
+     * bookId=2623 و ٩١ حلقة.
+     *
+     * فرق حرف واحد يفصل «يعمل» عن «صفحة التفاصيل لا تظهر» — والسبب عند
+     * المستخدم كان رابطاً منقوصاً (نسخ بلا همزة)، لا خللاً في كودنا: روابط
+     * المنصّات في موقع mosalsaly.com تصل صحيحة.
+     *
+     * فإذا عادت الصفحة بلا بيانات، نجرّب الهمزة مرة واحدة قبل أن نستسلم. ليس
+     * هذا إصلاحاً لشيء نكسره نحن، بل شبكة أمان لو مرّر المستخدم رابطاً من
+     * طرف ثالث أو نُسخ عنوان بلا همزة.
+     */
+    private suspend fun loadHtml(slug: String): String? {
+        val encoded = java.net.URLEncoder.encode(slug, "UTF-8").replace("+", "%20")
+        val first = try { getWithRetry("$mainUrl/mosalsal/$encoded", mainUrl, 4, 400) }
+        catch (e: Exception) { null }
+        if (!first.isNullOrBlank() && hasSeriesData(first!!)) return first
+        Log.w(TAG, "loadHtml no data for slug=$slug — trying hamza form")
+        val alt = withHamza(slug)
+        if (alt == null) return first
+        val second = try { getWithRetry("$mainUrl/mosalsal/${java.net.URLEncoder.encode(alt, "UTF-8").replace("+", "%20")}", mainUrl, 4, 400) }
+        catch (e: Exception) { null }
+        return if (!second.isNullOrBlank() && hasSeriesData(second!!)) {
+            Log.i(TAG, "loadHtml rescued by hamza slug=$alt")
+            second
+        } else first
+    }
+
+    /** بيانات السلسلة موجودة؟ الخطّش التام بلا bookId ليس سلسلة. */
+    private fun hasSeriesData(html: String): Boolean =
+        html.contains("bookId") && (html.contains("chapter_id") || html.contains("episodes"))
+
+    /**
+     * «اب-…» ← «أب-…»: همزة على أوّل ألف في الـslug، وتُكتب «أ» لا «إا» — أي
+     * نستبدل الألف نفسه بالهمزة لا أنّنا نضيفها قبله.
+     */
+    private fun withHamza(slug: String): String? {
+        var out = slug
+        var touched = false
+        for (i in out.indices) {
+            if (out[i] != 'ا') continue
+            // نقتصر على أوّل كلمة، فهي التي تفصل بين عمل الرابط وعدمها.
+            // الألف داخل الكلمة (متعالٍ، سالم) لا نمسّه.
+            val prev = if (i > 0) out[i - 1] else ' '
+            if (prev == '-' || prev == '/' || prev == '_' || prev == ' ') {
+                if (i + 1 < out.length && out[i + 1] != ' ') {
+                    out = out.substring(0, i) + "أ" + out.substring(i + 1)
+                    touched = true
+                    break
+                }
+            }
+        }
+        return if (touched) out else null
+    }
+
     // البطاقات: <article class="group "><a ... aria-label="Title" href="/mosalsal/slug"><img ... src="POSTER">...
     // الصورة قد تأتي عبر src= (معظم المنصات) أو srcSet= حصراً (كانت بطاقات dramabox تستخدم srcSet
     // في بعض اللقطات) — نلتقط src إن وجد، وإلا أول URL من srcSet.
@@ -535,10 +595,8 @@ class MosalsalyProvider(
     override suspend fun load(url: String): LoadResponse? {
         val slug = url.substringAfter("/mosalsal/").substringBefore("?")
         if (slug.isBlank()) return null
-        val fetched = try { getWithRetry("$mainUrl/mosalsal/$slug", mainUrl, 4, 400) }
-        catch (e: Exception) { null }
-        if (fetched.isNullOrBlank()) return null
-        val html = fetched
+        val html = try { loadHtml(slug) } catch (e: Exception) { null }
+        if (html.isNullOrBlank()) return null
 
         // meta title h1
         val h1 = Regex("""<h1[^>]*>\s*([^<]{2,})\s*</h1>""").find(html)?.groupValues?.get(1)?.trim()

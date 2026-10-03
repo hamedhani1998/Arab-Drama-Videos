@@ -528,8 +528,14 @@ class OnShortProvider(private val prefs: SharedPreferences? = null) : MainAPI() 
     }
 
     // يحوّل كود اللغة من "pl-PL"/"ar-SA" إلى الشكل القصير ("pl"/"ar") الذي يقبله التطبيق
-    private fun normalizeLang(raw: String): String =
-        raw.trim().lowercase().substringBefore('-').substringBefore('_').ifBlank { "ar" }
+    private fun normalizeLang(raw: String): String {
+        val short = raw.trim().lowercase().substringBefore('-').substringBefore('_')
+        // المنصّات تخلط بين الرمزين: moborels ترسل "ar" و shortswave ترسل "ara-SA".
+        // قِسنا على الـAPI أنّ fromCodeToLangTagIETF("ara") = "ar" فالعرض سليم،
+        // لكن التصفية في الإعدادات تكتب المستخدم فيها "ar" — فنوحّدها هنا
+        // وإلا خسرت ترجمةً واحدة لمجرّد اختلاف الرمز بين منصّتين.
+        return if (short == "ara") "ar" else short.ifBlank { "ar" }
+    }
 
     // يحدد نوع الرابط الحقيقي: HLS (m3u8) ↔ MP4 مباشر. بعض خوادم OnShort تُرجع MP4 مباشرًا
     // (dramaboxdb/flextv.cc) وهذا كسر التشغيل عندما يُرسل كـ M3U8 — المشغل يفشل بـ "Source error".
