@@ -381,6 +381,32 @@ class NartoDramaProvider(private val prefs: SharedPreferences? = null) : MainAPI
             }
         }
         android.util.Log.e("NartoDrama", "fetchRefresh ALL HOSTS FAILED slug=$slug ep=$ep lastErr=${lastErr?.message?.take(80)}")
+        // MEASURED 2026-10-03 on the phone: when the device resolver is briefly blind (the capture
+        // shows UnknownHostException for apex, edge AND cdn within the same second) both hosts die
+        // inside ~2s and the whole episode goes empty. A resolver blip is not a dead source — wait
+        // it out and try once more, rather than handing the user a page with no links.
+        if (lastErr is java.net.UnknownHostException) {
+            for (backoff in listOf(1500L, 3000L)) {
+                try { Thread.sleep(backoff) } catch (e2: InterruptedException) { Thread.currentThread().interrupt(); return null }
+                android.util.Log.e("NartoDrama", "fetchRefresh DNS blip retry after ${backoff}ms slug=$slug ep=$ep")
+                for (h in hosts) {
+                    try {
+                        val body = app.get(
+                            "$h/e/rs/detail/watch/$slug/$ep/refresh-source?rs_ctx=$fakeRsCtx",
+                            referer = nartoOrigin,
+                            timeout = 30000L
+                        ).text
+                        val edge = mapper.readValue(body, NartoResponse::class.java)
+                        if (edge.ok == true) {
+                            android.util.Log.e("NartoDrama", "fetchRefresh RECOVERED after DNS blip host=$h slug=$slug ep=$ep")
+                            return edge
+                        }
+                    } catch (e: Exception) {
+                        lastErr = e
+                    }
+                }
+            }
+        }
         return null
     }
 
