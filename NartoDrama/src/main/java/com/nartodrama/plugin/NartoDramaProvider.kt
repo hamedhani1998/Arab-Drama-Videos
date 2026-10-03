@@ -24,7 +24,8 @@ private const val UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/53
 // refresh {"ok":true,"play_url":"stream-e1..."}). Still 100% independent of the Edge source.
 private const val NARTO_HOST = "https://narto-drama.com"
 private const val BRW_HOST = "https://edge.narto-drama.com"
-private const val STREAM_HOST = "https://stream.narto-drama.com"
+// stream.narto-drama.com is deliberately NOT a host we use: it answers every subtitle token with
+// 501 "local file tetap di VPS edge". The name survives only in the loadLinks comment below.
 
 // Backend hosts that are dead (DNS NODATA / non-existent domain) and must NOT be emitted as
 // playback links — the player would select them and fail.
@@ -72,6 +73,20 @@ private data class NartoSub(
     val label: String? = null,
     @JsonProperty("subtitle_url") val subtitleUrl: String? = null,     // relative /e/s/{jwt}
 )
+
+// Subtitle lang tags. SubtitleFile.getLangTag() resolves a code through fromCodeToLangTagIETF and
+// only falls back to fromLanguageToTagIETF; run against the app's own SubtitleHelper (CS3 jar,
+// 2026-10-03):   "ar" -> ar      "ar-SA" -> null      "ترجمة" -> null
+// A region-suffixed code from the API therefore yields a NULL tag and the player lists a track it
+// cannot load. Keep the code, drop the region — the app renders the Arabic name from "ar" itself.
+// ("بالعربية" does resolve, via the name fallback — but only for the labels it happens to know.)
+private fun String?.subLangTag(): String =
+    this?.trim()?.takeIf { it.isNotBlank() }
+        ?.substringBefore('-')
+        ?.substringBefore('_')
+        ?.takeIf { it.isNotBlank() } ?: "ar"
+
+private fun NartoSub.langTag(): String = languageCode.subLangTag()
 
 // Minimal fake JWT the API accepts (claims are not verified, slug/ep read from path).
 private val fakeRsCtx = "eyJhbGciOiJub25lIn0.eyJ2IjoiMSJ9."
@@ -426,24 +441,33 @@ class NartoDramaProvider(private val prefs: SharedPreferences? = null) : MainAPI
             }
 
             // 1) subtitles — every track the API returns (multi_subtitles + any single track).
+            //
+            // HOST is the bug that made these rows appear and then fail. The site prints the
+            // subtitle as a RELATIVE "/e/s/{jwt}" path, so the host is ours to choose, and we
+            // were hardcoding STREAM_HOST. MEASURED 2026-10-03 on slug fkh-lgr eps 1/2/3, every
+            // one answered by stream.narto-drama.com:
+            //     HTTP 501  "local file tetap di VPS edge"   ← the edge VPS holds the file back
+            // The same tokens on mainUrl return 200 text/vtt with a real WEBVTT body. So apex
+            // serves them and the stream host never did.
             val seenSubs = LinkedHashSet<String>()
             val subTracks = buildList {
                 edge.multiSubtitles.orEmpty().forEach { s ->
                     val rel = s.subtitleUrl?.takeIf { it.isNotBlank() } ?: return@forEach
-                    val lang = s.label?.takeIf { it.isNotBlank() } ?: s.languageCode ?: "ترجمة"
-                    add(lang to rel)
+                    add(s.langTag() to rel)
                 }
                 edge.subtitleUrl?.takeIf { it.isNotBlank() && !it.contains("undefined") }?.let {
-                    add((edge.selectedSubtitleLanguage?.takeIf { l -> l.isNotBlank() } ?: "ترجمة") to it)
+                    add(edge.selectedSubtitleLanguage.subLangTag() to it)
                 }
                 edge.directSubtitleUrl?.takeIf { it.isNotBlank() && !it.contains("undefined") }?.let {
-                    add("ترجمة مباشرة" to it)
+                    add("ar" to it)
                 }
             }
             for ((lang, rel) in subTracks) {
-                val subUrl = if (rel.startsWith("http")) rel else STREAM_HOST + rel
+                val subUrl = if (rel.startsWith("http")) rel else NARTO_HOST + rel
                 if (!seenSubs.add(subUrl)) continue
-                try { subtitleCallback(newSubtitleFile(lang, subUrl)) } catch (e: Exception) {}
+                // Do NOT wrap this in try/catch. Swallowing it is how a subtitle row shipped that
+                // the player could never load, with nothing in logcat to explain why.
+                subtitleCallback(newSubtitleFile(lang, subUrl))
             }
 
             val emitted = LinkedHashSet<String>()
