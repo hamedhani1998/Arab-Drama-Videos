@@ -29,11 +29,11 @@ private const val STREAM_HOST = "https://stream.narto-drama.com"
 // Backend hosts that are dead (DNS NODATA / non-existent domain) and must NOT be emitted as
 // playback links — the player would select them and fail.
 // Hosts we never hand to the player. `cdn.narto-drama.com` is the API's own "direct" host for
-// shortmax works, but its TLS certificate has EXPIRED (measured 2026-10-02: python and the
-// player both reject it — CERTIFICATE_VERIFY_FAILED). The player validates certs and has no
-// verify=false escape, so a link on this host is a guaranteed "Source error". The real
-// qualities live in the signed shortmax-stream tokens, which serve fine (cert valid to
-// Dec 1 2026). Recoverable — drop this line once the host's cert is fixed.
+// shortmax works, but its TLS certificate is EXPIRED — measured 2026-10-02, valid-through date
+// November 12, 2026 yet a strict handshake fails with "certificate has expired", so a link on
+// this host can never play. The real qualities live in the signed shortmax-stream tokens, which
+// serve fine (cert accepted, valid through December 1, 2026). Recoverable — drop this line once
+// the host's cert is fixed.
 private val DEAD_HOST_PATTERNS = listOf("montagehub", "cdn.narto-drama.com")
 
 // One JSON-LD ListItem entry from the search results page.
