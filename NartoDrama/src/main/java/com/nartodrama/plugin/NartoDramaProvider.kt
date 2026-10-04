@@ -76,6 +76,14 @@ private data class NartoResponse(
     @JsonProperty("subtitle_url") val subtitleUrl: String? = null,
     @JsonProperty("direct_subtitle_url") val directSubtitleUrl: String? = null,
     @JsonProperty("selected_subtitle_language") val selectedSubtitleLanguage: String? = null,
+    // MEASURED 2026-10-04: this boolean is the ONLY thing in the payload that distinguishes a
+    // fresh token from a stale one. The API answers ok=true either way:
+    //     source_refreshed=false -> joyreels token that is HTTP 410 the moment it arrives
+    //                             (and the call itself took 13059 ms)
+    //     source_refreshed=true  -> mydramawave, HTTP 200, 18 subtitles, 3 resolutions
+    // so "ok" is not a promise of playability. Kept so loadLinks can tell a stale payload from a
+    // live one instead of learning it from a 410.
+    @JsonProperty("source_refreshed") val sourceRefreshed: Boolean? = null,
 )
 
 private data class NartoResolution(
@@ -382,6 +390,27 @@ class NartoDramaProvider(private val prefs: SharedPreferences? = null) : MainAPI
                 }
             }
             val fresh = fetchRefreshUncached(slug, ep)
+            // A payload that says ok:true but source_refreshed=false is a RE-SERVED STALE token:
+            // measured 2026-10-04, such a play_url is HTTP 410 the instant it reaches the player.
+            // Asking again is the only lever we have — the upstream ingest is what actually
+            // re-mints the token, and it flips to true on a later call for the same episode.
+            // Skip the shared cache for a stale payload, or we would replay the dead one.
+            if (fresh != null && fresh.ok == true && fresh.sourceRefreshed == false) {
+                android.util.Log.e(
+                    "NartoDrama",
+                    "fetchRefresh STALE payload (source_refreshed=false) — re-requesting slug=$slug ep=$ep"
+                )
+                val again = fetchRefreshUncached(slug, ep)
+                if (again != null && again.ok == true) {
+                    refreshCache[key] = System.currentTimeMillis() to again
+                    return again
+                }
+                android.util.Log.e(
+                    "NartoDrama",
+                    "fetchRefresh still stale after re-request slug=$slug ep=$ep " +
+                        "(ok=${again?.ok} msg=${again?.message} refreshed=${again?.sourceRefreshed})"
+                )
+            }
             if (fresh != null) refreshCache[key] = System.currentTimeMillis() to fresh
             return fresh
         } finally {
