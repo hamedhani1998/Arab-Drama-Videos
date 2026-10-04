@@ -209,6 +209,19 @@ class NartoDramaProvider(private val prefs: SharedPreferences? = null) : MainAPI
 
     // The edge home "/" feed (Block-1 CollectionPage ListItems), cached. Apex "/" is
     // Cloudflare-challenged so we read the feed from edge, which is always up.
+    //
+    // MEASURED 2026-10-04: this feed is ENGLISH-ONLY, and it is the wrong fallback for an Arabic
+    // app. Fetching "/" and dumping it into a tab produced 24 cards, every one titled in Latin:
+    //     '"Ordinary" Life and "Poor" Husband'   '(Dub)The CEO's Flash Marriage Bride'
+    //     '$10,000 to Survive One Night'          '(Animated Drama) My Dream Saintess Is Real'
+    // which is exactly what the user reported ("أصبح يظهر لي المسلسلات مش باللغة العربية").
+    // It is not a query parameter — ?lang=ar-SA, ?lang=ar, ?hl=ar-SA, ?language=ar and an
+    // Accept-Language header all left it at 0/24 Arabic, while the SAME parse on
+    // /search?lang=ar-SA&q=دراما returned 24/24 Arabic. So the home route has no Arabic feed at
+    // all, and no header reaches it.
+    //
+    // Therefore the fallback below must NOT be the home feed. Fall back to a /search feed instead,
+    // which is the only endpoint measured to carry Arabic names.
     private suspend fun fetchHomeFeed(): String? {
         homeFeedCache?.let { return it }
         try {
@@ -221,6 +234,31 @@ class NartoDramaProvider(private val prefs: SharedPreferences? = null) : MainAPI
             android.util.Log.e("NartoDrama", "home feed fetch error", e)
         }
         return null
+    }
+
+    // Arabic-named cards for a tab whose own /search feed failed. Measured 2026-10-04: a plain
+    // /search?q=دراما returns 24/24 Arabic, so this is a faithful substitute for the home feed
+    // rather than the English-only "/" we used before.
+    private suspend fun fetchArabicFallback(q: String): String? {
+        val term = q.trim().takeIf { it.isNotBlank() } ?: "دراما"
+        val urlEncQ = java.net.URLEncoder.encode(term, "UTF-8")
+        return try {
+            val html = app.get(
+                "$BRW_HOST/search?lang=ar-SA&q=$urlEncQ&page=1&perPage=12",
+                referer = nartoOrigin,
+                headers = mapOf("User-Agent" to UA)
+            ).text
+            if (html.contains("\"@type\":\"ListItem\"")) {
+                android.util.Log.e("NartoDrama", "arabic fallback feed OK q=$term len=${html.length}")
+                html
+            } else {
+                android.util.Log.e("NartoDrama", "arabic fallback feed empty q=$term")
+                null
+            }
+        } catch (e: Exception) {
+            android.util.Log.e("NartoDrama", "arabic fallback feed error q=$term", e)
+            null
+        }
     }
 
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse? {
@@ -236,14 +274,22 @@ class NartoDramaProvider(private val prefs: SharedPreferences? = null) : MainAPI
             var html = fetchSearch(q)
             var fromFallback = false
             if (html == null || parseSearchItems(html).isEmpty()) {
-                // Tab's own feed failed/empty — never blank the screen: serve it from the shared
-                // home feed instead (always present, and cards carry apex URLs so nothing changes).
-                android.util.Log.e("NartoDrama", "getMainPage q=$q empty/failed -> fallback home feed")
-                html = fetchHomeFeed()
+                // Tab's own feed failed/empty — never blank the screen. But the old fallback was
+                // the edge home feed, which is English-only (measured 2026-10-04: 24/24 cards in
+                // Latin script), so a failed tab silently turned into an English tab. Fall back to
+                // a /search feed instead, the only endpoint measured to carry Arabic names, and
+                // only reach for the English home feed if that fails too — a wrong-language list
+                // is better than no list, but Arabic is better than English.
+                android.util.Log.e("NartoDrama", "getMainPage q=$q empty/failed -> arabic fallback feed")
+                html = fetchArabicFallback(q)
                 fromFallback = true
-                if (html == null) {
-                    android.util.Log.e("NartoDrama", "getMainPage fetch failed q=$q")
-                    return null
+                if (html == null || parseSearchItems(html).isEmpty()) {
+                    android.util.Log.e("NartoDrama", "getMainPage q=$q arabic fallback empty -> home feed (english)")
+                    html = fetchHomeFeed()
+                    if (html == null) {
+                        android.util.Log.e("NartoDrama", "getMainPage fetch failed q=$q")
+                        return null
+                    }
                 }
             }
             android.util.Log.e("NartoDrama", "getMainPage q=$q fetchMs=${System.currentTimeMillis() - t0} len=${html.length} fallback=$fromFallback")
@@ -271,10 +317,16 @@ class NartoDramaProvider(private val prefs: SharedPreferences? = null) : MainAPI
         }
         android.util.Log.e("NartoDrama", "starting background warm (q=$q)")
         GlobalScope.launch(Dispatchers.IO) {
+            // Warm the other tabs' /search feeds. The English home feed is warmed too, but ONLY
+            // as the last-resort layer — it is English-only (measured 2026-10-04), so it must
+            // never be the first thing a tab renders.
             val targets = homeSections.filter { it != q } + "/*home*/"
             targets.map { warmQ ->
                 launch(Dispatchers.IO) {
-                    if (warmQ == "/*home*/") fetchHomeFeed() else fetchSearch(warmQ)
+                    if (warmQ == "/*home*/") {
+                        fetchSearch("دراما")
+                        fetchHomeFeed()
+                    } else fetchSearch(warmQ)
                 }
             }.forEach { it.join() }
             android.util.Log.e("NartoDrama", "background warm complete (searchCache=${searchCache.size})")
