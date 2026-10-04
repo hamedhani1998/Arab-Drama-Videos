@@ -13,6 +13,8 @@ import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import java.util.concurrent.ConcurrentHashMap
 
 private val mapper = ObjectMapper().registerKotlinModule()
     .configure(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES, false)
@@ -27,6 +29,10 @@ private const val UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/53
 // refresh {"ok":true,"play_url":"stream-e1..."}). Still 100% independent of the Edge source.
 private const val NARTO_HOST = "https://narto-drama.com"
 private const val BRW_HOST = "https://edge.narto-drama.com"
+// How long a successful refresh-source payload may be reused before we ask the API again. The
+// tokens inside it are signed and short-lived, so this must stay well under their lifetime — 30 s
+// only covers "re-open the episode you just watched", not a different one.
+private const val REFRESH_CACHE_TTL_MS = 30 * 1000L
 // stream.narto-drama.com is deliberately NOT a host we use: it answers every subtitle token with
 // 501 "local file tetap di VPS edge". The name survives only in the loadLinks comment below.
 
@@ -350,7 +356,42 @@ class NartoDramaProvider(private val prefs: SharedPreferences? = null) : MainAPI
     // fallback to the edge host on network/DNS failure. Per-episode cooldown handling: retryable
     // gate that we wait out (bounded) then retry. On a transient device-DNS blip (UnknownHost on
     // main domain) this still resolves via edge, so loadLinks never returns empty needlessly.
+    // MEASURED 2026-10-04 (adb logcat, slug lzl-lmkhtfy ep=1): the server answered
+    // "refresh_source_cooldown_active" with retry_after_seconds = 20, but the wait was capped at
+    // 12 s (coerceIn(4, 12)), so the retry landed INSIDE the window, drew the same cooldown again,
+    // and loadLinks returned false — a legitimate 20 s cooldown ALWAYS ended as an empty episode.
+    // Worse, two threads (pids 12006 and 12046 — a double tap on the same episode) each slept the
+    // full 12 s and each gave up, so the user paid twice for one cooldown.
+    // Three fixes:
+    //   1. honour the number the server gave, bounded so an absurd value cannot hang loadLinks;
+    //   2. ONE in-flight refresh per episode (a coroutine Mutex, which suspends rather than
+    //      blocking — a plain synchronized{} around a Thread.sleep would deadlock the dispatcher);
+    //   3. a short success cache, so re-opening the episode the user just watched costs nothing.
+    private val refreshLocks = ConcurrentHashMap<String, Mutex>()
+    private val refreshCache = LinkedHashMap<String, Pair<Long, NartoResponse>>()
+
     private suspend fun fetchRefresh(slug: String, ep: String): NartoResponse? {
+        val key = "$slug/$ep"
+        val lock = refreshLocks.computeIfAbsent(key) { Mutex() }
+        lock.lock()
+        try {
+            refreshCache[key]?.let { (at, resp) ->
+                if (System.currentTimeMillis() - at < REFRESH_CACHE_TTL_MS) {
+                    android.util.Log.e("NartoDrama", "fetchRefresh CACHE hit slug=$slug ep=$ep")
+                    return resp
+                }
+            }
+            val fresh = fetchRefreshUncached(slug, ep)
+            if (fresh != null) refreshCache[key] = System.currentTimeMillis() to fresh
+            return fresh
+        } finally {
+            lock.unlock()
+            // Drop the lock once nobody waits on it, so the map cannot grow with every episode.
+            if (!lock.isLocked) refreshLocks.remove(key, lock)
+        }
+    }
+
+    private suspend fun fetchRefreshUncached(slug: String, ep: String): NartoResponse? {
         // Try each host in order; final host = the other one (never the same twice).
         val hosts = listOf(mainUrl, BRW_HOST)
         var waited = false
@@ -374,7 +415,10 @@ class NartoDramaProvider(private val prefs: SharedPreferences? = null) : MainAPI
                             return null
                         }
                         waited = true
-                        val waitMs = ((edge.retryAfterSeconds ?: 15).coerceIn(4, 12)) * 1000L
+                        // Honour the server's own number. The old cap (12 s) was below the 20 s the
+                        // API actually asks for, so the retry could never succeed — see the note above.
+                        // Bounded at 25 s so a hostile or absurd value cannot hang loadLinks forever.
+                        val waitMs = ((edge.retryAfterSeconds ?: 15).coerceIn(4, 25)) * 1000L
                         android.util.Log.e("NartoDrama", "fetchRefresh COOLDOWN slug=$slug ep=$ep waiting=${waitMs}ms")
                         try { Thread.sleep(waitMs) } catch (e2: InterruptedException) { Thread.currentThread().interrupt() }
                         continue
@@ -540,7 +584,14 @@ class NartoDramaProvider(private val prefs: SharedPreferences? = null) : MainAPI
                 // and the player — which sends no Range — got the real 410 and errored. i.e. we
                 // were judging liveness on a request shape the player never makes. Probe exactly
                 // what the player does: a bare GET, no Range.
-                val useRange = !probeBody   // only the proxy body-probe needs a Range at all
+                //
+                // RE-MEASURED 2026-10-04: a LIVE joyreels token ignores Range outright — both shapes
+                // return HTTP 200 application/vnd.apple.mpegurl, 6807 bytes, in the same ~610 ms. So
+                // the header bought nothing on a good link and inverted the verdict on a bad one.
+                // `useRange = !probeBody` therefore still sent a Range on every DIRECT url — the
+                // exact shape the 2026-10-03 finding said to stop using. Only the /e/m/ proxy
+                // body-probe ever needs one (it must read text, not stream bytes).
+                val useRange = probeBody
                 deadLinkCache[u]?.let { at ->
                     if (System.currentTimeMillis() - at < DEAD_LINK_TTL_MS) {
                         lastProbeWhy = "cached dead"

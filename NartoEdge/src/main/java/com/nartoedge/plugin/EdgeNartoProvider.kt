@@ -10,6 +10,8 @@ import com.lagradost.cloudstream3.utils.*
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.sync.Mutex
+import java.util.concurrent.ConcurrentHashMap
 
 private val mapper = ObjectMapper().registerKotlinModule()
     .configure(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES, false)
@@ -38,6 +40,10 @@ private val DEAD_HOST_PATTERNS = listOf("montagehub", "cdn.narto-drama.com")
 // remembering the answer keeps a replay from re-spending the whole probe timeout on it.
 private val deadLinkCache = LinkedHashMap<String, Long>()
 private const val DEAD_LINK_TTL_MS = 5 * 60 * 1000L
+
+// How long a successful refresh-source payload may be reused. The tokens inside it are signed and
+// short-lived, so this only covers "re-open the episode you just watched" — never a different one.
+private const val REFRESH_CACHE_TTL_MS = 30 * 1000L
 
 // One JSON-LD ListItem entry from the search results page.
 private data class SearchHit(
@@ -315,7 +321,38 @@ class EdgeNartoProvider(private val prefs: SharedPreferences? = null) : MainAPI(
 
     // Fetch the refresh-source payload for this provider's OWN host only (edge). v23 cooldown
     // handling: retryable per-episode gate that we wait out (bounded) then retry.
+    // MEASURED 2026-10-04 (adb logcat, NartoDrama slug lzl-lmkhtfy ep=1): the server answered
+    // "refresh_source_cooldown_active" with retry_after_seconds = 20 while the wait was capped at
+    // 12 s, so the retry landed INSIDE the window, drew the same cooldown again, and loadLinks
+    // returned false — a legitimate 20 s cooldown always ended as an empty episode. Two threads
+    // (a double tap on one episode) each slept the full 12 s and each gave up. So: honour the
+    // server's own number, bounded so an absurd value cannot hang loadLinks; one in-flight refresh
+    // per episode (a coroutine Mutex, which suspends — a plain synchronized{} around Thread.sleep
+    // would deadlock the dispatcher); and a short success cache.
+    private val refreshLocks = ConcurrentHashMap<String, Mutex>()
+    private val refreshCache = LinkedHashMap<String, Pair<Long, EdgeResponse>>()
+
     private suspend fun fetchRefresh(slug: String, ep: String): EdgeResponse? {
+        val key = "$slug/$ep"
+        val lock = refreshLocks.computeIfAbsent(key) { Mutex() }
+        lock.lock()
+        try {
+            refreshCache[key]?.let { (at, resp) ->
+                if (System.currentTimeMillis() - at < REFRESH_CACHE_TTL_MS) {
+                    android.util.Log.e("EdgeNarto", "fetchRefresh CACHE hit slug=$slug ep=$ep")
+                    return resp
+                }
+            }
+            val fresh = fetchRefreshUncached(slug, ep)
+            if (fresh != null) refreshCache[key] = System.currentTimeMillis() to fresh
+            return fresh
+        } finally {
+            lock.unlock()
+            if (!lock.isLocked) refreshLocks.remove(key, lock)
+        }
+    }
+
+    private suspend fun fetchRefreshUncached(slug: String, ep: String): EdgeResponse? {
         var waited = false
         var attempt = 0
         while (attempt < 2) {
@@ -333,7 +370,7 @@ class EdgeNartoProvider(private val prefs: SharedPreferences? = null) : MainAPI(
                         return null
                     }
                     waited = true
-                    val waitMs = ((edge.retryAfterSeconds ?: 15).coerceIn(4, 12)) * 1000L
+                    val waitMs = ((edge.retryAfterSeconds ?: 15).coerceIn(4, 25)) * 1000L
                     android.util.Log.e("EdgeNarto", "fetchRefresh COOLDOWN slug=$slug ep=$ep waiting=${waitMs}ms")
                     try { Thread.sleep(waitMs) } catch (e2: InterruptedException) { Thread.currentThread().interrupt() }
                     continue
