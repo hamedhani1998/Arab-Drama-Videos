@@ -556,6 +556,13 @@ class NartoDramaProvider(private val prefs: SharedPreferences? = null) : MainAPI
             // Why the last probe failed — so "emit SKIP" names the cause (410, expired, TLS)
             // instead of the generic "dead shortmax token" that hid this whole class of bug.
             var lastProbeWhy = ""
+            // Did any probe return a VERDICT (an HTTP status, or an expiry marker inside a body)
+            // rather than simply failing to reach the host? This is the distinction that decides
+            // the last-resort branch below: a verdict means the link is dead and must not be
+            // handed to the player, whereas an exception means "could not tell" and a live link
+            // may still be sitting there. Never infer this by parsing lastProbeWhy — that is how
+            // a verdict and a transport failure end up conflated again.
+            var deadByVerdict = false
 
             // Every Narto stream host hands out a SIGNED, SHORT-LIVED token, and the ingest drops
             // them at arbitrary times — the live failure is a plain HTTP 410, not a parse bug.
@@ -595,6 +602,8 @@ class NartoDramaProvider(private val prefs: SharedPreferences? = null) : MainAPI
                 deadLinkCache[u]?.let { at ->
                     if (System.currentTimeMillis() - at < DEAD_LINK_TTL_MS) {
                         lastProbeWhy = "cached dead"
+                        // A remembered verdict is still a verdict, not an inability to tell.
+                        deadByVerdict = true
                         return false
                     }
                 }
@@ -612,6 +621,7 @@ class NartoDramaProvider(private val prefs: SharedPreferences? = null) : MainAPI
                     val code = httpConn.responseCode
                     if (code !in 200..399) {
                         lastProbeWhy = "HTTP $code"
+                        deadByVerdict = true
                         deadLinkCache[u] = System.currentTimeMillis()
                         return false
                     }
@@ -620,6 +630,7 @@ class NartoDramaProvider(private val prefs: SharedPreferences? = null) : MainAPI
                         val expired = body.contains("link expired") || body.contains("invalid token")
                         if (expired) {
                             lastProbeWhy = "body says link expired"
+                            deadByVerdict = true
                             deadLinkCache[u] = System.currentTimeMillis()
                         }
                         !expired
@@ -631,6 +642,14 @@ class NartoDramaProvider(private val prefs: SharedPreferences? = null) : MainAPI
                     // cdn.narto-drama.com gets caught, so name it in the log rather than
                     // reporting a bare "dead token".
                     lastProbeWhy = "${e.javaClass.simpleName}: ${e.message?.take(60) ?: "-"}"
+                    // Split the two exception families, because they mean opposite things.
+                    // A BAD CERTIFICATE is a verdict about the link: the bytes are there (the
+                    // same host serves a 26MB mp4 over a relaxed handshake — measured
+                    // 2026-10-04) but every strict client, ExoPlayer included, refuses it, so
+                    // emitting it guarantees "Source error". A DNS/TIMEOUT failure says nothing
+                    // about the link and must not be treated as a verdict — that case exists to
+                    // let the last-resort branch hand the player a possibly-live URL.
+                    if (e is javax.net.ssl.SSLHandshakeException) deadByVerdict = true
                     deadLinkCache[u] = System.currentTimeMillis()
                     false
                 }
@@ -888,9 +907,31 @@ class NartoDramaProvider(private val prefs: SharedPreferences? = null) : MainAPI
                 // Last resort: the API gave us at least one real URL — hand the player the raw
                 // direct URL WITHOUT the isAlive probe (device DNS can be transiently flaky; a
                 // dead token is better than "no links", and the player surfaces a clear error).
-                android.util.Log.e("NartoDrama", "loadLinks no links survived probes — emitting raw API URL slug=$slug")
-                val raw = listOfNotNull(edge.directPlayUrl, edge.playUrl)
-                    .firstOrNull { !it.isNullOrBlank() }
+                //
+                // MEASURED 2026-10-04 (adb logcat, slug lzl-lmkhtfy ep=1): this "last resort" is
+                // exactly what produced the failure the user reported. The probe had just SKIPPED
+                // that very URL as HTTP 410 (deadSkipped=3), and then this branch emitted it
+                // UNPROBED anyway:
+                //     emit SKIP dead link joyreels-stream.narto-drama.com (كامل) why=HTTP 410
+                //     loadLinks no links survived probes — emitting raw API URL slug=lzl-lmkhtfy
+                //     loadLinks DONE ... links=0 subs=0 deadSkipped=3 any=true
+                // and the player immediately failed on it, three times:
+                //     ExoPlaybackException: Source error
+                //     Caused by: InvalidResponseCodeException: Response code: 410
+                // So the probe learned the link was dead, and 400 lines later we handed the player
+                // that same dead link with a comment claiming it beat "no links". It did not beat
+                // it: the user sees an error screen, which IS "no links" plus a failure toast.
+                //
+                // Keep the escape hatch for what it was actually for — a probe that could not tell
+                // (DNS/TLS blip on the device), where an exception was thrown rather than a status
+                // returned. A STATUS means dead, and a dead link must not reach the player.
+                android.util.Log.e(
+                    "NartoDrama",
+                    "loadLinks no links survived probes — deadByVerdict=$deadByVerdict " +
+                        "why='$lastProbeWhy' emitRaw=${!deadByVerdict} slug=$slug"
+                )
+                val raw = if (deadByVerdict) null else
+                    listOfNotNull(edge.directPlayUrl, edge.playUrl).firstOrNull { !it.isNullOrBlank() }
                 if (!raw.isNullOrBlank()) {
                     val t = inferStreamType(raw)
                     collected.add(
