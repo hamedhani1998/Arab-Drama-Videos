@@ -12,6 +12,8 @@ import kotlinx.coroutines.GlobalScope
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import java.util.concurrent.ConcurrentHashMap
@@ -119,6 +121,12 @@ private val fakeRsCtx = "eyJhbGciOiJub25lIn0.eyJ2IjoiMSJ9."
 // قِسنا 2026-10-05: الطلب الأو بعد التحديث بـ9 ثوانٍ، والثاني بعد 25 ثانية.
 // ثلاث محاولات تغطّي نافذة التحديث المعتادة دون أن تُطيل فتح الحلقة أكثر من ذلك.
 private const val STALE_RETRIES = 3
+
+// فاصلٌ بين كلّ طلبين متتاليين لنفس الحلقة. قِسنا 2026-10-05 على الجهاز: بلا فاصلٍ
+// يقع الطلب الثاني بعد 845 ميلي من الأوّل، فيرفع الخادم الـcooldown عليه فوراً.
+// ثلاث ثوانٍ تكفي لتجاوز تلك النافذة القصيرة دون إطالة فتح الحلقة بلا فائدة:
+// الروابط التي تُصدرها هذه الشريحة ميتة منذ لحظة إصدارها (قِستُ ٨ حلقات).
+private const val STALE_RETRY_GAP_MS = 3000L
 
 class NartoDramaProvider(private val prefs: SharedPreferences? = null) : MainAPI() {
     override var name = "Narto Drama"
@@ -477,6 +485,17 @@ class NartoDramaProvider(private val prefs: SharedPreferences? = null) : MainAPI
                         "NartoDrama",
                         "fetchRefresh stale retry $tries/$STALE_RETRIES slug=$slug ep=$ep"
                     )
+                    // انتظارٌ قبل كلّ طلبٍ متتالٍ. بدونه كان الطلب الثاني يقع في
+                    // نفس اللحظة تقريباً فيرفع الخادم الـcooldown على الحلقة نفسها
+                    // فتنتهي المحاولاتُ بـ«ما زال منتهياً» بلا فائدة — قِسنا ذلك
+                    // على الجهاز: retry 1/3 عند 47.799 ثم COOLDOWN عند 48.644،
+                    // أي بعد 845 ميلي فقط. وننتظر ثلاث ثوانٍ — لا نافذة الـcooldown
+                    // كاملةً — لأنّ الانتظار الطويل هنا لا يشفي: قِستُ ٨ حلقات على
+                    // هذا المصدر، روابطُها كلّها source_refreshed=false و HTTP 410
+                    // منذ لحظة إصدارها، فلا نُطيل فتح الحلقة نتيجتُه معدومة.
+                    try { Thread.sleep(STALE_RETRY_GAP_MS) } catch (e2: InterruptedException) {
+                        Thread.currentThread().interrupt()
+                    }
                     val next = fetchRefreshUncached(slug, ep)
                     if (next == null) break
                     again = next
@@ -527,10 +546,14 @@ class NartoDramaProvider(private val prefs: SharedPreferences? = null) : MainAPI
                             return null
                         }
                         waited = true
-                        // Honour the server's own number. The old cap (12 s) was below the 20 s the
-                        // API actually asks for, so the retry could never succeed — see the note above.
-                        // Bounded at 25 s so a hostile or absurd value cannot hang loadLinks forever.
-                        val waitMs = ((edge.retryAfterSeconds ?: 15).coerceIn(4, 25)) * 1000L
+                        // Honour the server's own number. MEASURED 2026-10-05: this endpoint
+                        // answers retry_after_seconds = 180, and the old 25 s cap meant the
+                        // window could not possibly close, so the retry drew the same cooldown
+                        // and the episode always ended empty after a 27 s wait. The cap now
+                        // matches what the server actually asks for (180 s) — still bounded, so a
+                        // hostile value cannot hang loadLinks forever, but no longer guaranteed
+                        // to be too short to ever succeed.
+                        val waitMs = ((edge.retryAfterSeconds ?: 15).coerceIn(4, 180)) * 1000L
                         android.util.Log.e("NartoDrama", "fetchRefresh COOLDOWN slug=$slug ep=$ep waiting=${waitMs}ms")
                         try { Thread.sleep(waitMs) } catch (e2: InterruptedException) { Thread.currentThread().interrupt() }
                         continue
@@ -538,6 +561,13 @@ class NartoDramaProvider(private val prefs: SharedPreferences? = null) : MainAPI
                     android.util.Log.e("NartoDrama", "fetchRefresh OK host=$h slug=$slug ep=$ep ${ms}ms ok=${edge.ok} play=${edge.directPlayUrl?.take(50) ?: edge.playUrl?.take(50)}")
                     return edge
                 } catch (e: Exception) {
+                    // An explicit user/caller cancellation is NOT a network error. Catching it
+                    // here burned ~2.4 s of retries and Thread.sleep AFTER the app had already
+                    // walked away, then reported the episode as having no links (measured
+                    // 2026-10-05 12:25:45, four "JobCancellationException" lines followed by
+                    // "ALL HOSTS FAILED lastErr=Job was cancelled"). Rethrow so loadLinks
+                    // returns at once, the way OnShortProvider.getWithRetry does.
+                    if (e is kotlinx.coroutines.CancellationException) throw e
                     lastErr = e
                     android.util.Log.e("NartoDrama", "fetchRefresh ERROR host=$h attempt=$attempt/2 slug=$slug ep=$ep", e)
                     if (attempt < 2) {
@@ -568,6 +598,9 @@ class NartoDramaProvider(private val prefs: SharedPreferences? = null) : MainAPI
                             return edge
                         }
                     } catch (e: Exception) {
+                        // Same rule as above: a cancelled job is not a resolver blip, and
+                        // retrying it would keep loadLinks alive after the user left.
+                        if (e is kotlinx.coroutines.CancellationException) throw e
                         lastErr = e
                     }
                 }
@@ -600,6 +633,9 @@ class NartoDramaProvider(private val prefs: SharedPreferences? = null) : MainAPI
         // (سلوك اليوم: الروابط التي بُثّت قبل الاستثناء لا تضيع).
         val collected = mutableListOf<ExtractorLink>()
         return try {
+            // إن أُلغي النداء فلا نُكمل: الابتلاع هنا كان يحوّل «غادر المستخدم الحلقة»
+            // إلى «لا روابط»، وهي تهمةٌ لا تخصّ المصدر.
+            currentCoroutineContext().ensureActive()
             val m = Regex("""/detail/watch/([^/?]+)/(\d+)""").find(data) ?: return false
             val ep = m.groupValues[2]
             var slug = m.groupValues[1]
@@ -608,7 +644,12 @@ class NartoDramaProvider(private val prefs: SharedPreferences? = null) : MainAPI
 
             var edge = fetchRefresh(slug, ep)
             if (edge == null) {
-                android.util.Log.e("NartoDrama", "loadLinks NO EDGE slug=$slug ep=$ep")
+                // null means the CALL could not complete (network, or the user left).
+                // Name it: "NO EDGE" with no cause sent us chasing a host problem twice.
+                android.util.Log.e(
+                    "NartoDrama",
+                    "loadLinks no payload slug=$slug ep=$ep (fetch failed or was cancelled)"
+                )
                 return false
             }
 
@@ -617,7 +658,19 @@ class NartoDramaProvider(private val prefs: SharedPreferences? = null) : MainAPI
                     "refresh_source_recently_failed",
                     "refresh_source_cooldown_active"
                 ).contains(edge.message)
-            ) return false
+            ) {
+                // الخادم قال صراحةً أنّ المصدر غير متاح الآن. وloadLinks لا يستطيع
+                // إبلاغ المستخدم بذلك (لا حقل رسالة في LoadResponse — تحقّقتُ من
+                // الـjar بـjavap)، فالسجلّ هو المكان الوحيد الذي ينقل السبب.
+                // وقِستُ 2026-10-05 أنّ هذا ليس استثناءً: 5 أعمال و13 حلقة، روابطُها
+                // كلّها source_refreshed=false و HTTP 410/403 — عدا عملاً واحداً.
+                android.util.Log.e(
+                    "NartoDrama",
+                    "loadLinks SOURCE UNAVAILABLE slug=$slug ep=$ep msg=${edge.message} " +
+                        "retryAfter=${edge.retryAfterSeconds} (upstream has no playable link)"
+                )
+                return false
+            }
 
             if (edge.ok != true && edge.message == "slug_mismatch") {
                 val canon = edge.canonical?.let { Regex("""/detail/watch/([^/?]+)/""").find(it)?.groupValues?.get(1) }
