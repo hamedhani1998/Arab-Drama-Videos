@@ -115,6 +115,11 @@ private fun NartoSub.langTag(): String = languageCode.subLangTag()
 // Minimal fake JWT the API accepts (claims are not verified, slug/ep read from path).
 private val fakeRsCtx = "eyJhbGciOiJub25lIn0.eyJ2IjoiMSJ9."
 
+// كم مرّة نعيد طلباً منتهياً قبل أن نقبل أنّه غير قابل للتحديث الآن.
+// قِسنا 2026-10-05: الطلب الأو بعد التحديث بـ9 ثوانٍ، والثاني بعد 25 ثانية.
+// ثلاث محاولات تغطّي نافذة التحديث المعتادة دون أن تُطيل فتح الحلقة أكثر من ذلك.
+private const val STALE_RETRIES = 3
+
 class NartoDramaProvider(private val prefs: SharedPreferences? = null) : MainAPI() {
     override var name = "Narto Drama"
     override var mainUrl = NARTO_HOST
@@ -427,6 +432,10 @@ class NartoDramaProvider(private val prefs: SharedPreferences? = null) : MainAPI
     //   2. ONE in-flight refresh per episode (a coroutine Mutex, which suspends rather than
     //      blocking — a plain synchronized{} around a Thread.sleep would deadlock the dispatcher);
     //   3. a short success cache, so re-opening the episode the user just watched costs nothing.
+    /** payload يقول ok=true لكن source_refreshed=false = رابط 410 عند المشغّل. */
+    private fun isStale(r: NartoResponse?): Boolean =
+        r != null && r.ok == true && r.sourceRefreshed == false
+
     private val refreshLocks = ConcurrentHashMap<String, Mutex>()
     private val refreshCache = LinkedHashMap<String, Pair<Long, NartoResponse>>()
 
@@ -452,18 +461,40 @@ class NartoDramaProvider(private val prefs: SharedPreferences? = null) : MainAPI
                     "NartoDrama",
                     "fetchRefresh STALE payload (source_refreshed=false) — re-requesting slug=$slug ep=$ep"
                 )
-                val again = fetchRefreshUncached(slug, ep)
-                if (again != null && again.ok == true) {
+                // ونعيد حتى يصبح منعشاً فعلاً. الكود كان يرجع بعد محاولة
+                // واحدة، فيخزّن رابطاً ميتاً (410) ويعلن الأمر ناجحاً — والسجلّ
+                // من 2026-10-05 يُظهر ذلك:
+                //   STALE payload → re-request → still stale (ok=null msg=null)
+                //   ثم CACHE hit أعاد تلك النتيجة الفاشلة مرتين أخريين، فصارت
+                //   ثلاث فتحات للـepisode كلّها بلا رابط، والرابط الوحيد
+                //   الذي أعطاه الخادم بـok=true كان منتهياً (410).
+                var again = fresh
+                var tries = 0
+                while (tries < STALE_RETRIES) {
+                    if (!isStale(again)) break
+                    tries++
+                    android.util.Log.e(
+                        "NartoDrama",
+                        "fetchRefresh stale retry $tries/$STALE_RETRIES slug=$slug ep=$ep"
+                    )
+                    val next = fetchRefreshUncached(slug, ep)
+                    if (next == null) break
+                    again = next
+                }
+                if (again !== fresh && again.ok == true && again.sourceRefreshed != false) {
                     refreshCache[key] = System.currentTimeMillis() to again
+                    android.util.Log.e("NartoDrama", "fetchRefresh recovered after $tries slug=$slug ep=$ep")
                     return again
                 }
                 android.util.Log.e(
                     "NartoDrama",
-                    "fetchRefresh still stale after re-request slug=$slug ep=$ep " +
+                    "fetchRefresh still stale after $tries tries slug=$slug ep=$ep " +
                         "(ok=${again?.ok} msg=${again?.message} refreshed=${again?.sourceRefreshed})"
                 )
             }
-            if (fresh != null) refreshCache[key] = System.currentTimeMillis() to fresh
+            // رابط منتهٍ لا يُخزَّن: العنصر التالي يخزّن fresh فقط لو لم يكن منتهياً،
+            // وإلا أعاد CACHE hit الميتَ في كل فتح لاحق بلا أي طلب شبكة.
+            if (fresh != null && !isStale(fresh)) refreshCache[key] = System.currentTimeMillis() to fresh
             return fresh
         } finally {
             lock.unlock()
