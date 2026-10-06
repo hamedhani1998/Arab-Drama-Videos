@@ -31,6 +31,11 @@ internal suspend fun loadNartoLinks(
     origin: String,
     tag: String,
     showFullKey: String,
+    // مفتاح ترتيب الجودات (نصّ: "default" | "asc" | "desc") — لا مفتاح «إظهار كامل»،
+    // فذلك منطقيّ ويُكتب بـ SwitchPreference. تمريره هنا هو ما جعل emitNartoSorted يقرأ
+    // قيمةً منطقية بـgetString ويرمي ClassCastException بعد جمع الروابط كلّها: قِسناه
+    // 2026-10-06 على الجهاز، الحلقة تُجمع ثم لا تُبثّ، ومسار الاستثناء يرمي ثانيةً ثانية.
+    orderKey: String,
     fetch: NartoFetch,
     data: String,
     subtitleCallback: (SubtitleFile) -> Unit,
@@ -350,7 +355,7 @@ internal suspend fun loadNartoLinks(
             "loadLinks DONE slug=$slug ep=$ep links=${emitted.size} subs=${subTracks.size} " +
                 "deadSkipped=$skippedDead any=$any"
         )
-        emitNartoSorted(prefs, collected, showFullKey, callback)
+        emitNartoSorted(prefs, collected, orderKey, callback)
         any
     } catch (e: kotlinx.coroutines.CancellationException) {
         // غادر المستخدم الحلقة أو ألغى التطبيق النداء: ليس عطلاً في المصدر. طباعة
@@ -359,8 +364,9 @@ internal suspend fun loadNartoLinks(
     } catch (e: Exception) {
         android.util.Log.e(tag, "loadLinks FATAL", e)
         // حتى عند الخطأ: ما جُمع قبله يُبثّ (سلوك اليوم: الروابط التي سبقت الاستثناء كانت
-        // قد بُثّت أصلاً، فلا تضيع).
-        emitNartoSorted(prefs, collected, showFullKey, callback)
+        // قد بُثّت أصلاً، فلا تضيع). وهذه المرة لا يرمي الاستثناء ثانيةً — كانت البثّة
+        // الاحتياطية تمرّ بنفس المفتاح الخاطئ فتهرب من الـcatch وتُسقط النداء كله.
+        emitNartoSorted(prefs, collected, orderKey, callback)
         false
     }
 }
@@ -376,7 +382,20 @@ internal fun emitNartoSorted(
     orderKey: String,
     callback: (ExtractorLink) -> Unit,
 ) {
-    val order = prefs?.getString(orderKey, "default")
+    // قراءة آمنة: مفتاحٌ مكتوب بنوعٍ آخر (منطقيّ من SwitchPreference، أو عددٌ من SeekBar)
+    // يجعل SharedPreferences.getString يرمي ClassCastException. قِسناه على الجهاز
+    // 2026-10-06: تمرير مفتاح الإظهار بدل مفتاح الترتيب جمع روابط الحلقة كاملةً ثم ألقاها
+    // بعيداً عند البثّ، ورمى ثانيةً في مسار الاستثناء فهرب من الـcatch. تفضيلٌ لا يُقرأ
+    // لا يُسقط حلقةً بأكملها.
+    val order = try {
+        prefs?.getString(orderKey, "default")
+    } catch (e: ClassCastException) {
+        android.util.Log.e(
+            "NartoLinks",
+            "emitNartoSorted key=$orderKey is not a String (${e.message}) — keeping default order"
+        )
+        "default"
+    }
     val sorted = when (order) {
         "asc" -> collected.sortedBy { it.quality }
         "desc" -> collected.sortedByDescending { it.quality }

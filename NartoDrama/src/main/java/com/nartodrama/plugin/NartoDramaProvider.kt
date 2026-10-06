@@ -117,6 +117,12 @@ class NartoDramaProvider(private val prefs: SharedPreferences? = null) : MainAPI
                 searchCache[q] = html
                 return html
             }
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            // CloudStream يلغي البحث القديم حين يكتبه المستخدم آخره. ابتلاعُ الإلغاء هنا
+            // كان يحوّله إلى «فشل شبكة» ثم يستمرّ النداء في إرسال طلبات بعده — قِسناه
+            // 2026-10-06: خمس «search fetch error» من نوع JobCancellationException دفعةً
+            // واحدة. الإلغاء ليس عطلاً في المصدر، ويجب أن يخرج فوراً.
+            throw e
         } catch (e: Exception) {
             android.util.Log.e("NartoDrama", "search fetch error", e)
         }
@@ -132,6 +138,8 @@ class NartoDramaProvider(private val prefs: SharedPreferences? = null) : MainAPI
                 homeFeedCache = html
                 return html
             }
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            throw e // نفس قاعدة البحث أعلاه: الإلغاء ليس فشل شبكة
         } catch (e: Exception) {
             android.util.Log.e("NartoDrama", "home feed fetch error", e)
         }
@@ -174,6 +182,10 @@ class NartoDramaProvider(private val prefs: SharedPreferences? = null) : MainAPI
             }
             val list = items.take(12).mapNotNull { it.toSearchResponse() }
             if (list.isEmpty()) null else newHomePageResponse(request.name, list)
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            // لُغي النداء (تغيّر القسم أو غادر المستخدم): نُعيده كما هو بدل تسجيله
+            // «getMainPage ERROR» — سجلٌّ مليء بـCANCELLED يُخفي الأخطاء الحقيقية.
+            throw e
         } catch (e: Exception) {
             android.util.Log.e("NartoDrama", "getMainPage ERROR", e)
             null
@@ -185,6 +197,10 @@ class NartoDramaProvider(private val prefs: SharedPreferences? = null) : MainAPI
             val html = fetchSearch(query)
             if (html == null) return null
             parseSearchItems(html).mapNotNull { it.toSearchResponse() }
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            // بحثٌ ألغاه المستخدم بكتابةٍ أحدث ليس «لا نتائج»: إعادته null هنا كانت تعرض
+            // صفحةً فارغة لاستعلامٍ يعيد فعلاً عشرات البطاقات. الإلغاء يخرج كما هو.
+            throw e
         } catch (e: Exception) {
             android.util.Log.e("NartoDrama", "search ERROR q=$query", e)
             null
@@ -216,6 +232,8 @@ class NartoDramaProvider(private val prefs: SharedPreferences? = null) : MainAPI
                 attempt++
                 try {
                     doc = app.get("$loadHost/detail/watch/$slug", referer = nartoOrigin, headers = mapOf("User-Agent" to UA), timeout = 30000L).document
+                } catch (e: kotlinx.coroutines.CancellationException) {
+                    throw e // لا محاولة ثانية بعد أن غادر المستخدم الصفحة
                 } catch (e: Exception) {
                     android.util.Log.e("NartoDrama", "load attempt=$attempt/2 slug=$slug error=${e.message?.take(80)}", e)
                 }
@@ -254,6 +272,10 @@ class NartoDramaProvider(private val prefs: SharedPreferences? = null) : MainAPI
                 posterUrl = poster
                 plot = description
             }
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            // لُغي النداء: null هنا كانت تُقرأ «لا تفاصيل لهذا العنوان» وهي تهمةٌ لا تخصّ
+            // المصدر. الإلغاء يخرج كما هو.
+            throw e
         } catch (e: Exception) {
             null
         }
@@ -270,6 +292,7 @@ class NartoDramaProvider(private val prefs: SharedPreferences? = null) : MainAPI
         origin = nartoOrigin,
         tag = "NartoDrama",
         showFullKey = NartoDramaSettingsBottomSheet.KEY_SHOW_FULL,
+        orderKey = NartoDramaSettingsBottomSheet.KEY_QUALITY_ORDER,
         fetch = fetch,
         data = data,
         subtitleCallback = subtitleCallback,
