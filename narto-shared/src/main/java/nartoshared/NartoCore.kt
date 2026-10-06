@@ -87,6 +87,10 @@ internal data class NartoResponse(
     @JsonProperty("retry_after_seconds") val retryAfterSeconds: Int? = null,
     @JsonProperty("direct_play_url") val directPlayUrl: String? = null,
     @JsonProperty("play_url") val playUrl: String? = null,
+    // MEASURED 2026-10-06: present in 7/7 refresh payloads and previously dropped on the floor.
+    // It is the API's own statement of the container, and the URL is not always enough to tell:
+    // slug lms-lmhzwr hands a montagehub URL with no extension at all. See [inferStreamType].
+    @JsonProperty("direct_play_is_hls") val directPlayIsHls: Boolean? = null,
     @JsonProperty("multi_resolutions") val multiResolutions: List<NartoResolution>? = null,
     @JsonProperty("multi_subtitles") val multiSubtitles: List<NartoSub>? = null,
     @JsonProperty("subtitle_url") val subtitleUrl: String? = null,

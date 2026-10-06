@@ -14,10 +14,24 @@ import com.lagradost.cloudstream3.utils.ExtractorLinkType
  * playable URL in direct_play_url / play_url (no fixed host), and it can be an HLS playlist OR a
  * direct MP4 per work, so the container has to be read per link.
  */
-internal fun inferStreamType(url: String): ExtractorLinkType {
+internal fun inferStreamType(url: String, apiIsHls: Boolean? = null): ExtractorLinkType {
     val lower = url.lowercase()
+    // HLS is checked FIRST, and that order is the fix: the old order tested ".mp4" before
+    // anything else, so an HLS playlist that carries ".mp4" anywhere in its query was labelled
+    // VIDEO and the player fed a playlist to the file renderer. A measured m3u8 never contains
+    // ".m3u8?...mp4" on this source, so this cannot mislabel a link that plays today.
+    if (lower.contains(".m3u8") || lower.contains("mime_type=application/vnd.apple.mpegurl"))
+        return ExtractorLinkType.M3U8
     if (lower.contains("mime_type=video_mp4") || lower.contains(".mp4") || lower.endsWith(".m4v"))
         return ExtractorLinkType.VIDEO
+    // No hint in the URL at all. MEASURED 2026-10-06: the API sends `direct_play_is_hls` in
+    // EVERY refresh payload (7/7 works), and the URL-only guess was wrong where it mattered —
+    // slug lms-lmhzwr: play_url is an mp4 mirrored by sulao.montagehub.xyz with NO extension
+    // (`/oY1A1lpELbUcBBGqQJAW646NqwAt5QSfvyfkcI?auth_key=...`) while its direct_play_url is the
+    // same asset as an explicit `.mp4`, and the API's own flag says is_hls=false. The old code
+    // fell through to M3U8 and handed the player a file as a playlist. Read the flag instead of
+    // guessing; `null` (older payloads) keeps the previous M3U8 default.
+    if (apiIsHls != null) return if (apiIsHls) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
     return ExtractorLinkType.M3U8
 }
 
@@ -81,16 +95,29 @@ internal fun jwtSrc(u: String): String? {
 /** A "/e/m/{jwt}" proxy nests root-relative variant/segment URLs many players cannot resolve. */
 internal fun isProxyUrl(u: String): Boolean = u.contains("/e/m/")
 
-/** Every track the API returns: the multi list plus any single-track fields. */
-internal fun NartoResponse.subtitleTracks(): List<Pair<String, String>> = buildList {
+/**
+ * Every track the API returns: the multi list plus any single-track fields.
+ *
+ * The same language arrives TWICE for Arabic works — once inside `multi_subtitles` and again in
+ * the flat `subtitle_url` field — and both were emitted, so the player listed two Arabic rows.
+ * MEASURED 2026-10-06, slug nwn-ldrm-shw-at-lqdr: multi_subtitles carries ar-SA, and the flat
+ * subtitle_url ALSO decodes to an ar-SA track; the flat one answered HTTP 404 while the
+ * multi_subtitles copy is the one the API marks is_default. So the duplicate is not merely
+ * cosmetic — the extra row is the broken one. Key on the language tag and let the multi list win,
+ * because it is the richer, per-track source. `direct_subtitle_url` keeps its own "ar" key only
+ * when Arabic did not already arrive from multi_subtitles, so a genuinely extra track still shows.
+ */
+internal fun NartoResponse.subtitleTracks(): List<Pair<String, String>> {
+    val out = LinkedHashMap<String, String>()
     multiSubtitles.orEmpty().forEach { s ->
         val rel = s.subtitleUrl?.takeIf { it.isNotBlank() } ?: return@forEach
-        add(s.langTag() to rel)
+        out[s.langTag()] = rel
     }
-    subtitleUrl?.takeIf { it.isNotBlank() && !it.contains("undefined") }?.let {
-        add(selectedSubtitleLanguage.subLangTag() to it)
+    fun addFlat(tag: String, rel: String?) {
+        val v = rel?.takeIf { it.isNotBlank() && !it.contains("undefined") } ?: return
+        out.putIfAbsent(tag, v)
     }
-    directSubtitleUrl?.takeIf { it.isNotBlank() && !it.contains("undefined") }?.let {
-        add("ar" to it)
-    }
+    addFlat(selectedSubtitleLanguage.subLangTag(), subtitleUrl)
+    addFlat("ar", directSubtitleUrl)
+    return out.map { (tag, rel) -> tag to rel }
 }

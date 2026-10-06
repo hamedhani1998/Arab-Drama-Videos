@@ -121,6 +121,16 @@ internal suspend fun loadNartoLinks(
             subtitleCallback(newSubtitleFile(lang, subUrl))
         }
 
+        // The API's own container flag describes the DIRECT play asset only. A multi_resolutions
+        // token is a different object (always an HLS master on this source) and a proxy url
+        // resolves to a different src again, so the flag is returned ONLY for a URL that IS the
+        // direct/play url it was written about — otherwise we would stamp "is_hls=true" from the
+        // payload onto an asset it never described, replacing one wrong guess with another.
+        fun apiHintFor(u: String): Boolean? {
+            val direct = listOfNotNull(resp.directPlayUrl, resp.playUrl).map { it.trim() }
+            return if (u.trim() in direct) resp.directPlayIsHls else null
+        }
+
         val emitted = LinkedHashSet<String>()
         var any = false
         var skippedDead = 0
@@ -129,10 +139,10 @@ internal suspend fun loadNartoLinks(
         // Register an already-probed, already-vetted link. Split out of emit() so the parallel
         // quality probes can all finish BEFORE any registration, keeping «كامل» first and the
         // quality order the user picked.
-        suspend fun emitNow(u: String, label: String, q: String) {
+        suspend fun emitNow(u: String, label: String, q: String, apiIsHls: Boolean? = null) {
             if (u.isBlank() || u in emitted) return
             emitted.add(u)
-            val type = inferStreamType(u)
+            val type = inferStreamType(u, apiIsHls)
             collected.add(
                 newExtractorLink(source = api.name, name = label, url = u, type = type) {
                     referer = origin
@@ -143,7 +153,7 @@ internal suspend fun loadNartoLinks(
             any = true
         }
 
-        suspend fun emit(u: String, label: String, q: String) {
+        suspend fun emit(u: String, label: String, q: String, apiIsHls: Boolean? = null) {
             // Dedup on the links we actually ACCEPT, not on every URL we merely looked at.
             // `emitted.add(u)` used to run BEFORE the probe, so a URL that failed the probe was
             // marked as seen for the rest of loadLinks and could never be retried — which
@@ -160,7 +170,7 @@ internal suspend fun loadNartoLinks(
                 android.util.Log.e(tag, "emit SKIP dead link $host ($label) why=${probe.lastWhy}")
                 return
             }
-            emitNow(u, label, q)
+            emitNow(u, label, q, apiIsHls)
         }
 
         // Decode a proxy ("/e/m/{jwt}") into the real signed src the provider intended. The src is
@@ -245,7 +255,7 @@ internal suspend fun loadNartoLinks(
             val pickedQ = picked?.let { pu -> shortmaxTokens.firstOrNull { it.streamUrl == pu } }
                 ?.let { qualityOfRes(it) }
             val before = emitted.size
-            emit(picked ?: u, "كامل", pickedQ ?: proxyQuality(u))
+            emit(picked ?: u, "كامل", pickedQ ?: proxyQuality(u), apiHintFor(picked ?: u))
             if (emitted.size > before) directOk++
             directEmitted++
         }
@@ -259,7 +269,7 @@ internal suspend fun loadNartoLinks(
             val retry = directs.firstOrNull { it.isNotBlank() && it !in emitted }
             if (retry != null) {
                 val before = emitted.size
-                emit(retry, "كامل", proxyQuality(retry))
+                emit(retry, "كامل", proxyQuality(retry), apiHintFor(retry))
                 android.util.Log.e(
                     tag, "loadLinks retry-direct alive=${emitted.size > before} url=${retry.take(60)}"
                 )
@@ -338,7 +348,7 @@ internal suspend fun loadNartoLinks(
             val raw = if (probe.deadByVerdict) null else
                 listOfNotNull(resp.directPlayUrl, resp.playUrl).firstOrNull { !it.isNullOrBlank() }
             if (!raw.isNullOrBlank()) {
-                val t = inferStreamType(raw)
+                val t = inferStreamType(raw, apiHintFor(raw))
                 collected.add(
                     newExtractorLink(source = api.name, name = "كامل", url = raw, type = t) {
                         referer = origin
