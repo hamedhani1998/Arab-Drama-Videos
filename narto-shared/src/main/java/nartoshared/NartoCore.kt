@@ -41,7 +41,28 @@ internal const val STALE_RETRIES = 3
 // immediately puts that episode on cooldown. Three seconds clears that short window
 // without a long wait, because waiting longer does not help here: MEASURED across 8
 // episodes, this slice's links are born dead (410 on arrival), so a longer wait buys nothing.
+//
+// RE-MEASURED 2026-10-06: the gap still draws HTTP 429 (retry_after_seconds=45), so the second
+// request is no longer expected to succeed — it is what TELLS us the server's own window. The
+// wait that follows is then bounded by FETCH_DEADLINE_MS instead of being slept out blind.
 internal const val STALE_RETRY_GAP_MS = 3000L
+
+// Budget for the whole refresh-source phase inside loadLinks. CloudStream wraps loadLinks in
+// withTimeout(120_000), and we used to sleep out the server's retry_after (180 s) with
+// Thread.sleep, which a coroutine cannot interrupt — so the app cancelled at 120 s while the
+// sleeping thread ran on, and the FATAL landed at EXACTLY sleep_start + 180 s, measured twice
+// on the device 2026-10-06:
+//     11:51:10.669 COOLDOWN waiting=180000ms -> 11:54:10.671 TimeoutCancellationException
+//     11:51:14.597 COOLDOWN waiting=180000ms -> 11:54:14.597 loadLinks FATAL
+// i.e. a two-minute spinner that could only ever end in "no links".
+//
+// No wait may START past the deadline, and the hard wrapper sits 5 s under it so the deadline
+// logic — not a timeout — is what decides. Probes afterwards cost at most ~17 s (3 s connect /
+// 2.5 s read; the resolutions run in parallel), so 95 s + 17 s stays clear of the app's 120 s.
+// A server window that cannot fit inside the deadline is reported instead of slept out, because
+// sleeping it out is exactly the failure above.
+internal const val FETCH_DEADLINE_MS = 90_000L
+internal const val FETCH_HARD_TIMEOUT_MS = 95_000L
 
 // Hosts we never hand to the player. `cdn.narto-drama.com` is the API's own "direct" host for
 // shortmax works, but its TLS certificate is EXPIRED — measured 2026-10-02, valid-through date

@@ -1,6 +1,7 @@
 package nartoshared
 
 import com.lagradost.cloudstream3.app
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.sync.Mutex
 import java.util.concurrent.ConcurrentHashMap
 
@@ -22,7 +23,22 @@ internal class NartoFetch(
     private fun isStale(r: NartoResponse?): Boolean =
         r != null && r.ok == true && r.sourceRefreshed == false
 
-    suspend fun fetch(slug: String, ep: String): NartoResponse? {
+    /**
+     * هل يتّسع [ms] من الآن إلى [deadlineAt]؟ يُسجَّل السبب حين لا يتّسع، فالعودة الصامتة
+     * كانت تُقرأ في السجلّ «فشل شبكة» بينما الحقيقة أنّ نافذة الخادم أكبر من عمر النداء.
+     */
+    private fun withinDeadline(deadlineAt: Long, ms: Long, what: String): Boolean {
+        val now = System.currentTimeMillis()
+        if (now + ms <= deadlineAt) return true
+        android.util.Log.e(
+            tag,
+            "fetchRefresh SKIP $what — needs ${ms}ms but only ${deadlineAt - now}ms remain " +
+                "before the loadLinks deadline (a wait that long cannot finish inside it)"
+        )
+        return false
+    }
+
+    suspend fun fetch(slug: String, ep: String, deadlineAt: Long): NartoResponse? {
         val key = "$slug/$ep"
         val lock = refreshLocks.computeIfAbsent(key) { Mutex() }
         lock.lock()
@@ -33,7 +49,7 @@ internal class NartoFetch(
                     return resp
                 }
             }
-            val fresh = fetchUncached(slug, ep)
+            val fresh = fetchUncached(slug, ep, deadlineAt)
             // A payload that says ok:true but source_refreshed=false is a RE-SERVED STALE token:
             // measured 2026-10-04, such a play_url is HTTP 410 the instant it reaches the player.
             // Asking again is the only lever we have — the upstream ingest is what actually
@@ -62,15 +78,13 @@ internal class NartoFetch(
                     // اللحظة تقريباً فيرفع الخادم الـcooldown على الحلقة نفسها فتنتهي
                     // المحاولاتُ بـ«ما زال منتهياً» بلا فائدة — قِسنا ذلك على الجهاز:
                     // retry 1/3 عند 47.799 ثم COOLDOWN عند 48.644، أي بعد 845 ميلي فقط.
-                    // وننتظر ثلاث ثوانٍ — لا نافذة الـcooldown كاملةً — لأنّ الانتظار الطويل
-                    // هنا لا يشفي: قِستُ ٨ حلقات على هذا المصدر، روابطُها كلّها
-                    // source_refreshed=false و HTTP 410 منذ لحظة إصدارها.
-                    try {
-                        Thread.sleep(STALE_RETRY_GAP_MS)
-                    } catch (e2: InterruptedException) {
-                        Thread.currentThread().interrupt()
-                    }
-                    val next = fetchUncached(slug, ep)
+                    //
+                    // delay بدل Thread.sleep: النوم بـThread.sleep لا يقبل إلغاء النداء،
+                    // فيبقى loadLinks حياً بعد أن يقول التطبيق إنه ألغاه — قِسنا ذلك
+                    // 2026-10-06 حين أظهر الـFATAL دائماً بعد انتهاء النوم لا بعد الإلغاء.
+                    if (!withinDeadline(deadlineAt, STALE_RETRY_GAP_MS, "stale gap")) break
+                    delay(STALE_RETRY_GAP_MS)
+                    val next = fetchUncached(slug, ep, deadlineAt)
                     if (next == null) break
                     again = next
                 }
@@ -98,7 +112,7 @@ internal class NartoFetch(
         }
     }
 
-    private suspend fun fetchUncached(slug: String, ep: String): NartoResponse? {
+    private suspend fun fetchUncached(slug: String, ep: String, deadlineAt: Long): NartoResponse? {
         // Try each host in order; final host = the other one (never the same twice).
         var waited = false
         var lastErr: Exception? = null
@@ -106,6 +120,16 @@ internal class NartoFetch(
             var attempt = 0
             while (attempt < 2) {
                 attempt++
+                // لا نبدأ طلباً جديداً خارج الموعد النهائي: app.get مُعطى 30 ثانية، وقد يتجاوز
+                // بطلبٍ واحد حدّ التطبيق البالغ 120 ثانية قبل أن يصل الوقت إلى الفحص التالي.
+                if (System.currentTimeMillis() >= deadlineAt) {
+                    android.util.Log.e(
+                        tag,
+                        "fetchRefresh DEADLINE before attempt host=$h attempt=$attempt " +
+                            "slug=$slug ep=$ep — returning now rather than crossing the loadLinks limit"
+                    )
+                    return null
+                }
                 try {
                     val tl0 = System.currentTimeMillis()
                     val body = app.get(
@@ -134,14 +158,19 @@ internal class NartoFetch(
                         // hostile value cannot hang loadLinks forever, but no longer guaranteed
                         // to be too short to ever succeed.
                         val waitMs = ((resp.retryAfterSeconds ?: 15).coerceIn(4, 180)) * 1000L
+                        // الخادم يطلب 45 ثانية في بعض الحالات و180 في أخرى، وحدّ التطبيق
+                        // لـloadLinks هو 120 ثانية. نومُ 180 ثانية بـThread.sleep كان يعني:
+                        // التطبيق يلغي عند 120 ثانية، والنوم يكمل إلى 180، ثم يظهر الـFATAL —
+                        // قِسناه مرتين 2026-10-06 بالضبط (180.000 و180.002 ثانية). فننتظر
+                        // ما يقع داخل الموعد (و45 ثانية تكفي فعلياً) ونعود فوراً لما لا يقع،
+                        // لأنّ انتظارٌ لا يمكن الوصول إليه يعني شاشة تدور دقيقتين ثم فشل.
+                        if (!withinDeadline(deadlineAt, waitMs, "cooldown retry_after=${waitMs}ms")) {
+                            return null
+                        }
                         android.util.Log.e(
                             tag, "fetchRefresh COOLDOWN slug=$slug ep=$ep waiting=${waitMs}ms"
                         )
-                        try {
-                            Thread.sleep(waitMs)
-                        } catch (e2: InterruptedException) {
-                            Thread.currentThread().interrupt()
-                        }
+                        delay(waitMs)
                         continue
                     }
                     android.util.Log.e(
@@ -163,11 +192,7 @@ internal class NartoFetch(
                         tag, "fetchRefresh ERROR host=$h attempt=$attempt/2 slug=$slug ep=$ep", e
                     )
                     if (attempt < 2) {
-                        try {
-                            Thread.sleep(800)
-                        } catch (e2: InterruptedException) {
-                            Thread.currentThread().interrupt()
-                        }
+                        delay(800)
                     }
                 }
             }
@@ -182,14 +207,11 @@ internal class NartoFetch(
         // source — wait it out and try once more, rather than handing the user a page with no links.
         if (lastErr is java.net.UnknownHostException) {
             for (backoff in listOf(1500L, 3000L)) {
-                try {
-                    Thread.sleep(backoff)
-                } catch (e2: InterruptedException) {
-                    Thread.currentThread().interrupt()
-                    return null
-                }
+                if (!withinDeadline(deadlineAt, backoff, "dns backoff=$backoff")) return null
+                delay(backoff)
                 android.util.Log.e(tag, "fetchRefresh DNS blip retry after ${backoff}ms slug=$slug ep=$ep")
                 for (h in hosts) {
+                    if (System.currentTimeMillis() >= deadlineAt) return null
                     try {
                         val body = app.get(
                             "$h/e/rs/detail/watch/$slug/$ep/refresh-source?rs_ctx=$fakeRsCtx",

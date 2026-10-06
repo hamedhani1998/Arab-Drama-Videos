@@ -11,6 +11,7 @@ import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.withTimeoutOrNull
 
 /**
  * The whole of loadLinks, shared by both Narto sources.
@@ -47,12 +48,18 @@ internal suspend fun loadNartoLinks(
         val ep = m.groupValues[2]
         var slug = m.groupValues[1]
 
-        var resp = fetch.fetch(slug, ep)
+        // مهلة واحدة تُوزَّع على كل استدعاءات الجلب في هذا النداء. الخادم قد يطلب نافذة
+        // cooldown تصل 180 ثانية، وحدّ التطبيق لـloadLinks هو 120 ثانية؛ فالغلف الصلب هنا
+        // يجعل الجلب يعود قبل ذلك مهما طال الانتظار، فلا يظهر TimeoutCancellationException
+        // من التطبيق ولا يبقى النداء معلّقاً بعد أن أُلغي.
+        val deadlineAt = System.currentTimeMillis() + FETCH_DEADLINE_MS
+        var resp = withTimeoutOrNull(FETCH_HARD_TIMEOUT_MS) { fetch.fetch(slug, ep, deadlineAt) }
         if (resp == null) {
-            // null means the CALL could not complete (network, or the user left).
+            // null means the CALL could not complete (network, the deadline, or the user left).
             // Name it: "NO EDGE" with no cause sent us chasing a host problem twice.
             android.util.Log.e(
-                tag, "loadLinks no payload slug=$slug ep=$ep (fetch failed or was cancelled)"
+                tag,
+                "loadLinks no payload slug=$slug ep=$ep (fetch failed, hit the deadline, or was cancelled)"
             )
             return false
         }
@@ -78,7 +85,7 @@ internal suspend fun loadNartoLinks(
             if (canon != null && canon != slug) {
                 android.util.Log.e(tag, "loadLinks slug_mismatch $slug -> $canon ep=$ep")
                 slug = canon
-                resp = fetch.fetch(slug, ep)
+                resp = withTimeoutOrNull(FETCH_HARD_TIMEOUT_MS) { fetch.fetch(slug, ep, deadlineAt) }
                 if (resp == null) return false
             }
         }
@@ -345,6 +352,10 @@ internal suspend fun loadNartoLinks(
         )
         emitNartoSorted(prefs, collected, showFullKey, callback)
         any
+    } catch (e: kotlinx.coroutines.CancellationException) {
+        // غادر المستخدم الحلقة أو ألغى التطبيق النداء: ليس عطلاً في المصدر. طباعة
+        // «loadLinks FATAL» هنا كانت تزدحم بها السجلّ فتُخفي الأخطاء الحقيقية.
+        throw e
     } catch (e: Exception) {
         android.util.Log.e(tag, "loadLinks FATAL", e)
         // حتى عند الخطأ: ما جُمع قبله يُبثّ (سلوك اليوم: الروابط التي سبقت الاستثناء كانت
