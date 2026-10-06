@@ -1,5 +1,6 @@
 package com.arabshortdrama.plugin
 
+import cloudstreamshared.FormatTag
 import android.content.SharedPreferences
 import android.util.Log
 import com.fasterxml.jackson.databind.JsonNode
@@ -366,7 +367,7 @@ class ArabShortDramaProvider(private val prefs: SharedPreferences? = null) : Mai
                 if (localLink != null) {
                     produced++
                     callback(
-                        newExtractorLink(name, "يوتيوب ${richLabel(video.height, video.url, video.mimeType)}", localLink, type = ExtractorLinkType.DASH) {
+                        newExtractorLink(name, FormatTag.tagged("يوتيوب ${richLabel(video.height, video.url, video.mimeType)}", localLink, ExtractorLinkType.DASH), localLink, type = ExtractorLinkType.DASH) {
                             referer = "https://www.youtube.com/"
                             quality = video.height
                         }
@@ -438,7 +439,7 @@ class ArabShortDramaProvider(private val prefs: SharedPreferences? = null) : Mai
     /** يبني رابط ديلي موشن مباشر (جودة واحدة). */
     private suspend fun dmLink(id: String): ExtractorLink {
         val url = "https://www.dailymotion.com/embed/video/$id"
-        return newExtractorLink(name, "ديلي موشن", url) {
+        return newExtractorLink(name, FormatTag.tagged("ديلي موشن", url, null), url) {
             referer = "https://www.dailymotion.com/"
             quality = getQualityFromName("480p")
         }

@@ -1,5 +1,6 @@
 package com.pakistanilive.plugin
 
+import cloudstreamshared.FormatTag
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
 import org.jsoup.nodes.Document
@@ -306,8 +307,7 @@ class PakistaniliveProvider(private val prefs: SharedPreferences? = null) : Main
                 if (localLink != null) {
                     callback(
                         newExtractorLink(
-                            "Pakistanilive",
-                            label,
+                            "Pakistanilive", FormatTag.tagged(label, localLink, ExtractorLinkType.DASH),
                             localLink,
                             type = ExtractorLinkType.DASH
                         ) {

@@ -1,5 +1,6 @@
 package com.kirmzi.plugin
 
+import cloudstreamshared.FormatTag
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
 import kotlinx.coroutines.async
@@ -400,7 +401,7 @@ class KirmziProvider(private val prefs: SharedPreferences? = null) : MainAPI() {
                     collected.add(
                         newExtractorLink(
                             source = "قرمزي TV",
-                            name = label,
+                            name = FormatTag.tagged(label, embedUrl, ExtractorLinkType.VIDEO),
                             url = embedUrl,
                             type = ExtractorLinkType.VIDEO
                         ) {
@@ -418,7 +419,7 @@ class KirmziProvider(private val prefs: SharedPreferences? = null) : MainAPI() {
                 collected.add(
                     newExtractorLink(
                         source = "قرمزي TV",
-                        name = label,
+                        name = FormatTag.tagged(label, mediaUrl, if (m3u8) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO),
                         url = mediaUrl,
                         type = if (m3u8) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
                     ) {

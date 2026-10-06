@@ -1,5 +1,6 @@
 package com.shortdramaar.plugin
 
+import cloudstreamshared.FormatTag
 import android.content.SharedPreferences
 import android.util.Log
 import com.lagradost.cloudstream3.*
@@ -1275,8 +1276,7 @@ class ShortDramaProvider(
                 if (localLink != null) {
                     callback(
                         newExtractorLink(
-                            "دراما قصيرة",
-                            label,
+                            "دراما قصيرة", FormatTag.tagged(label, localLink, ExtractorLinkType.DASH),
                             localLink,
                             type = ExtractorLinkType.DASH
                         ) {
@@ -1303,7 +1303,7 @@ class ShortDramaProvider(
                 } else muxedList
                 effectiveMuxed.forEach { (mUrl, mLabel, mHeight) ->
                     callback(
-                        newExtractorLink("دراما قصيرة", "$mLabel (Legacy)", mUrl, type = INFER_TYPE) {
+                        newExtractorLink("دراما قصيرة", FormatTag.tagged("$mLabel (Legacy)", mUrl, INFER_TYPE), mUrl, type = INFER_TYPE) {
                             this.referer = mainUrl
                             this.quality = mHeight
                         }

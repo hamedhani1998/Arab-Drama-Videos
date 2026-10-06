@@ -1,5 +1,6 @@
 package com.reelshort.plugin
 
+import cloudstreamshared.FormatTag
 import com.fasterxml.jackson.databind.DeserializationFeature
 import com.fasterxml.jackson.databind.JsonNode
 import com.fasterxml.jackson.databind.ObjectMapper
@@ -370,7 +371,7 @@ class ReelShortProvider(private val prefs: SharedPreferences? = null) : MainAPI(
                     val videoUrl = d?.get("video_url")?.takeIf { it.isTextual && it.asText().startsWith("http") }?.asText()
                     if (!videoUrl.isNullOrBlank()) {
                         collected.add(
-                            newExtractorLink(name, "ReelShort $serialNumber", videoUrl, ExtractorLinkType.M3U8) {
+                            newExtractorLink(name, FormatTag.tagged("ReelShort $serialNumber", videoUrl, ExtractorLinkType.M3U8), videoUrl, ExtractorLinkType.M3U8) {
                                 referer = mainUrl
                                 quality = getQualityFromName("1080p")
                             }
@@ -387,7 +388,7 @@ class ReelShortProvider(private val prefs: SharedPreferences? = null) : MainAPI(
             if (prefs?.getBoolean(ReelShortSettingsBottomSheet.KEY_SHOW_TRAILER, true) != false
                 && trailer.isNotBlank()) {
                 collected.add(
-                    newExtractorLink(name, "ReelShort $serialNumber (مقدمة)", trailer, ExtractorLinkType.M3U8) {
+                    newExtractorLink(name, FormatTag.tagged("ReelShort $serialNumber (مقدمة)", trailer, ExtractorLinkType.M3U8), trailer, ExtractorLinkType.M3U8) {
                         referer = mainUrl
                         quality = getQualityFromName("1080p")
                     }
@@ -421,7 +422,7 @@ class ReelShortProvider(private val prefs: SharedPreferences? = null) : MainAPI(
                             else -> "1080p"
                         }
                         val uri = if (next.startsWith("http")) next else master.substringBeforeLast("/") + "/" + next
-                        collected.add(newExtractorLink(name, "ReelShort $serialNumber ($qLabel)", uri, ExtractorLinkType.M3U8) {
+                        collected.add(newExtractorLink(name, FormatTag.tagged("ReelShort $serialNumber ($qLabel)", uri, ExtractorLinkType.M3U8), uri, ExtractorLinkType.M3U8) {
                             referer = mainUrl
                             quality = getQualityFromName(qLabel)
                         })
@@ -445,7 +446,7 @@ class ReelShortProvider(private val prefs: SharedPreferences? = null) : MainAPI(
                     return true
                 }
                 // احتياطي: إرجاع الماستر نفسه إن لم تُحلل الجودات
-                collected.add(newExtractorLink(name, "ReelShort $serialNumber", master, ExtractorLinkType.M3U8) {
+                collected.add(newExtractorLink(name, FormatTag.tagged("ReelShort $serialNumber", master, ExtractorLinkType.M3U8), master, ExtractorLinkType.M3U8) {
                     referer = mainUrl
                     quality = getQualityFromName("1080p")
                 })

@@ -1,5 +1,6 @@
 package nartoshared
 
+import cloudstreamshared.FormatTag
 import android.content.SharedPreferences
 import com.lagradost.cloudstream3.MainAPI
 import com.lagradost.cloudstream3.SubtitleFile
@@ -144,7 +145,7 @@ internal suspend fun loadNartoLinks(
             emitted.add(u)
             val type = inferStreamType(u, apiIsHls)
             collected.add(
-                newExtractorLink(source = api.name, name = label, url = u, type = type) {
+                newExtractorLink(source = api.name, name = FormatTag.tagged(label, u, type), url = u, type = type) {
                     referer = origin
                     quality = getQualityFromName(q)
                     headers = mapOf("Referer" to origin)
@@ -350,7 +351,7 @@ internal suspend fun loadNartoLinks(
             if (!raw.isNullOrBlank()) {
                 val t = inferStreamType(raw, apiHintFor(raw))
                 collected.add(
-                    newExtractorLink(source = api.name, name = "كامل", url = raw, type = t) {
+                    newExtractorLink(source = api.name, name = FormatTag.tagged("كامل", raw, t), url = raw, type = t) {
                         referer = origin
                         quality = getQualityFromName("480p")
                         headers = mapOf("Referer" to origin)

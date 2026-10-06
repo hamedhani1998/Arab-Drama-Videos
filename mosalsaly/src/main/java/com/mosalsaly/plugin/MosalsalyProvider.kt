@@ -1,5 +1,6 @@
 package com.mosalsaly.plugin
 
+import cloudstreamshared.FormatTag
 import android.util.Log
 import com.fasterxml.jackson.databind.DeserializationFeature
 import com.fasterxml.jackson.databind.ObjectMapper
@@ -1073,7 +1074,7 @@ class MosalsalyProvider(
             }
             val emitUrl = routeVideo(platform, lnk.kind, lnk.url,
                 mapOf("User-Agent" to MOS_UA, "Referer" to mainUrl))
-            collected.add(newExtractorLink(name, label, emitUrl, lnk.kind) {
+            collected.add(newExtractorLink(name, FormatTag.tagged(label, emitUrl, lnk.kind), emitUrl, lnk.kind) {
                 this.headers = mapOf("User-Agent" to MOS_UA, "Referer" to mainUrl)
                 // شغّل حقل referer نفسه (وليس فقط headers) — CronetDataSource يبني الطلب
                 // من ExtractorLink.referer وليس headers، وCDNs (مثل netshort) ترفض 403
@@ -1226,7 +1227,7 @@ class MosalsalyProvider(
                         Log.w(TAG, "goodshort no master bookId=$bookId ch=$chapterId len=${master?.length ?: -1}")
                         return false
                     }
-                    callback(newExtractorLink(name, "GoodShort $serial", cleanM3u8(m3u8), ExtractorLinkType.M3U8) {
+                    callback(newExtractorLink(name, FormatTag.tagged("GoodShort $serial", cleanM3u8(m3u8), ExtractorLinkType.M3U8), cleanM3u8(m3u8), ExtractorLinkType.M3U8) {
                         referer = mainUrl
                         quality = getQualityFromName("720p")
                     })
@@ -1267,7 +1268,7 @@ class MosalsalyProvider(
                     Log.w(TAG, "reelshort no video_url root=${root.length}")
                     return false
                 }
-                callback(newExtractorLink(name, "ReelShort $serial ($bookId)", videoUrl, ExtractorLinkType.M3U8) {
+                callback(newExtractorLink(name, FormatTag.tagged("ReelShort $serial ($bookId)", videoUrl, ExtractorLinkType.M3U8), videoUrl, ExtractorLinkType.M3U8) {
                     referer = REEL_MAIN
                     quality = getQualityFromName("720p")
                 })

@@ -1,5 +1,6 @@
 package com.aryarabia.plugin
 
+import cloudstreamshared.FormatTag
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
 import android.content.SharedPreferences
@@ -1503,8 +1504,7 @@ class AryProvider(
                 if (localLink != null) {
                     callback(
                         newExtractorLink(
-                            "ARY العربية",
-                            label,
+                            "ARY العربية", FormatTag.tagged(label, localLink, ExtractorLinkType.DASH),
                             localLink,
                             type = ExtractorLinkType.DASH
                         ) {
@@ -1532,7 +1532,7 @@ class AryProvider(
                 } else muxedList
                 effectiveMuxed.forEach { (mUrl, mLabel, mHeight) ->
                     callback(
-                        newExtractorLink("ARY العربية", "$mLabel (Legacy)", mUrl, type = INFER_TYPE) {
+                        newExtractorLink("ARY العربية", FormatTag.tagged("$mLabel (Legacy)", mUrl, INFER_TYPE), mUrl, type = INFER_TYPE) {
                             this.referer = mainUrl
                             this.quality = mHeight
                         }

@@ -1,5 +1,6 @@
 package com.drama4all.plugin
 
+import cloudstreamshared.FormatTag
 import com.fasterxml.jackson.annotation.JsonProperty
 import com.fasterxml.jackson.databind.DeserializationFeature
 import com.fasterxml.jackson.databind.ObjectMapper
@@ -316,7 +317,7 @@ class Drama4AllProvider(private val prefs: SharedPreferences? = null) : MainAPI(
                 // nt_ family: ملف مباشر واحد (R2 .mp4) — الجودة هي الوحيدة المتوفرة من المصدر
                 val q = qualityFromPath(vUrl)
                 callback(
-                    newExtractorLink(source = name, name = "ملف كامل ($q)", url = vUrl, type = ExtractorLinkType.VIDEO) {
+                    newExtractorLink(source = name, name = FormatTag.tagged("ملف كامل ($q)", vUrl, ExtractorLinkType.VIDEO), url = vUrl, type = ExtractorLinkType.VIDEO) {
                         referer = mainUrl
                         quality = getQualityFromName(q)
                         headers = mapOf("Referer" to mainUrl)
@@ -328,7 +329,7 @@ class Drama4AllProvider(private val prefs: SharedPreferences? = null) : MainAPI(
                 if (streamText.contains("#EXT-X-STREAM-INF")) {
                     // master كامل — يشمل كل الجودات المتوفرة، المشغّل يختارها
                     callback(
-                        newExtractorLink(source = name, name = "كل الجودات (متغير)", url = vUrl, type = ExtractorLinkType.M3U8) {
+                        newExtractorLink(source = name, name = FormatTag.tagged("كل الجودات (متغير)", vUrl, ExtractorLinkType.M3U8), url = vUrl, type = ExtractorLinkType.M3U8) {
                             referer = mainUrl
                             quality = getQualityFromName("1080p")
                             headers = mapOf("Referer" to mainUrl)
@@ -338,7 +339,7 @@ class Drama4AllProvider(private val prefs: SharedPreferences? = null) : MainAPI(
                     // ملف media واحد — الجودة الحقيقية موجودة في المسار (sf_ family: single 1080p)
                     val q = qualityFromPath(vUrl)
                     callback(
-                        newExtractorLink(source = name, name = q, url = vUrl, type = ExtractorLinkType.M3U8) {
+                        newExtractorLink(source = name, name = FormatTag.tagged(q, vUrl, ExtractorLinkType.M3U8), url = vUrl, type = ExtractorLinkType.M3U8) {
                             referer = mainUrl
                             quality = getQualityFromName(q)
                             headers = mapOf("Referer" to mainUrl)

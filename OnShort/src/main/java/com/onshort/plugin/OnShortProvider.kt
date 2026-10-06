@@ -1,5 +1,6 @@
 package com.onshort.plugin
 
+import cloudstreamshared.FormatTag
 import android.content.SharedPreferences
 import com.fasterxml.jackson.databind.DeserializationFeature
 import com.fasterxml.jackson.databind.JsonNode
@@ -620,7 +621,7 @@ class OnShortProvider(private val prefs: SharedPreferences? = null) : MainAPI() 
                 // من الوصول للمشغّل → فيديو FlexTV/DramaBox لا يشتغل.
                 // (الافتراضي true = يُبثّ كما كان تماماً؛ إطفاؤه في الإعدادات يخفيه فقط.)
                 if (prefs?.getBoolean(OnShortSettingsBottomSheet.KEY_SHOW_AUTO, true) != false) {
-                    collected.add(newExtractorLink(name, "Auto · $labelSource", mainPlay, effIsHls.let { if (it) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO }) {
+                    collected.add(newExtractorLink(name, FormatTag.tagged("Auto · $labelSource", mainPlay, effIsHls.let { if (it) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO }), mainPlay, effIsHls.let { if (it) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO }) {
                         this.headers = mapOf("User-Agent" to ONS_UA, "Referer" to mainUrl)
                     })
                 }
@@ -654,7 +655,7 @@ class OnShortProvider(private val prefs: SharedPreferences? = null) : MainAPI() 
                     if (minHeight > 0 && v.height < minHeight) continue
                     if (!seen.add(v.uri)) continue
                     val label = "${v.height}p"
-                    collected.add(newExtractorLink(name, "$label · $labelSource", v.uri, linkType(v.uri)) {
+                    collected.add(newExtractorLink(name, FormatTag.tagged("$label · $labelSource", v.uri, linkType(v.uri)), v.uri, linkType(v.uri)) {
                         this.quality = getQualityFromName("${v.height}p")
                         this.headers = mapOf("User-Agent" to ONS_UA, "Referer" to mainUrl)
                     })
@@ -663,7 +664,7 @@ class OnShortProvider(private val prefs: SharedPreferences? = null) : MainAPI() 
                 // لا يوجد candidates: main وحده. دلّ نوعه (m3u8 = HLS تكيفي كل الجودات،
                 // mp4 = مباشر). بلا جلب — يفتح فورًا.
                 if (prefs?.getBoolean(OnShortSettingsBottomSheet.KEY_SHOW_AUTO, true) != false) {
-                    collected.add(newExtractorLink(name, "Auto · $labelSource", mainPlay, linkType(mainPlay)) {
+                    collected.add(newExtractorLink(name, FormatTag.tagged("Auto · $labelSource", mainPlay, linkType(mainPlay)), mainPlay, linkType(mainPlay)) {
                         this.headers = mapOf("User-Agent" to ONS_UA, "Referer" to mainUrl)
                     })
                 }

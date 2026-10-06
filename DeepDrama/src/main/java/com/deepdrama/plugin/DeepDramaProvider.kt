@@ -1,5 +1,6 @@
 package com.deepdrama.plugin
 
+import cloudstreamshared.FormatTag
 import android.content.SharedPreferences
 import com.fasterxml.jackson.databind.DeserializationFeature
 import com.fasterxml.jackson.databind.JsonNode
@@ -635,7 +636,7 @@ class DeepDramaProvider(private val prefs: SharedPreferences? = null) : MainAPI(
         // 1) الـ master التكيفي — الخيار المضمون الذي يشمل كل الجودات.
         if (master != null) {
             val max = renditions.maxOfOrNull { it.height } ?: 1080
-            sink(newExtractorLink(name, "${if (primary) "★ " else ""}$tag · جميع الجودات", master, ExtractorLinkType.M3U8) {
+            sink(newExtractorLink(name, FormatTag.tagged("${if (primary) "★ " else ""}$tag · جميع الجودات", master, ExtractorLinkType.M3U8), master, ExtractorLinkType.M3U8) {
                 this.quality = getQualityFromName("${max}p")
                 this.headers = linkHeaders
             })
@@ -647,7 +648,7 @@ class DeepDramaProvider(private val prefs: SharedPreferences? = null) : MainAPI(
         //    الـ master لا مساره الكامل — ولهذا تبقى الروابط صالحة.
         renditions.forEach { r ->
             val bw = if (r.bandwidth > 0) " · ${(r.bandwidth / 1000)}k" else ""
-            sink(newExtractorLink(name, "${if (primary) "★ " else ""}$tag ${r.height}p$bw", r.url, ExtractorLinkType.M3U8) {
+            sink(newExtractorLink(name, FormatTag.tagged("${if (primary) "★ " else ""}$tag ${r.height}p$bw", r.url, ExtractorLinkType.M3U8), r.url, ExtractorLinkType.M3U8) {
                 this.quality = getQualityFromName("${r.height}p")
                 this.headers = linkHeaders
             })
@@ -658,7 +659,7 @@ class DeepDramaProvider(private val prefs: SharedPreferences? = null) : MainAPI(
         //     الـ master يردّ 403 «Access denied» بكل الترويسات (قيس 2026-10-02).
         server.extraHls.forEach { x ->
             val label = if (x.height > 0) "${x.height}p" else (server.altLabel.ifBlank { "جودة" })
-            sink(newExtractorLink(name, "${if (primary) "★ " else ""}$tag · ${label}", x.url, ExtractorLinkType.M3U8) {
+            sink(newExtractorLink(name, FormatTag.tagged("${if (primary) "★ " else ""}$tag · ${label}", x.url, ExtractorLinkType.M3U8), x.url, ExtractorLinkType.M3U8) {
                 this.quality = getQualityFromName(x.height.takeIf { it > 0 }?.let { "${it}p" } ?: "480p")
                 this.headers = linkHeaders
                 this.referer = "https://rumble.com/"
@@ -676,7 +677,7 @@ class DeepDramaProvider(private val prefs: SharedPreferences? = null) : MainAPI(
             } else {
                 val q = Regex("""/(\d{3,4})p/""").find(mp4)?.groupValues?.get(1)
                     ?: if (mp4.contains("1080")) "1080" else if (mp4.contains("720")) "720" else "480"
-                sink(newExtractorLink(name, "$tag MP4", mp4, ExtractorLinkType.VIDEO) {
+                sink(newExtractorLink(name, FormatTag.tagged("$tag MP4", mp4, ExtractorLinkType.VIDEO), mp4, ExtractorLinkType.VIDEO) {
                     this.quality = getQualityFromName("${q}p")
                     this.headers = linkHeaders
                 })

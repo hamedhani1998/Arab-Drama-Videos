@@ -1,5 +1,6 @@
 package com.minutedrama.plugin
 
+import cloudstreamshared.FormatTag
 import com.fasterxml.jackson.databind.DeserializationFeature
 import com.fasterxml.jackson.databind.JsonNode
 import com.fasterxml.jackson.databind.ObjectMapper
@@ -279,7 +280,7 @@ class MinuteDramaProvider(private val prefs: SharedPreferences? = null) : MainAP
 
             // مصدر الرئيسي — MP4 مباشر
             videoUrl?.let {
-                callback(newExtractorLink(name, "الحلقة $epNum", it, ExtractorLinkType.VIDEO) {
+                callback(newExtractorLink(name, FormatTag.tagged("الحلقة $epNum", it, ExtractorLinkType.VIDEO), it, ExtractorLinkType.VIDEO) {
                     referer = "$mainUrl/"
                     quality = getQualityFromName("720p")
                 })
@@ -292,7 +293,7 @@ class MinuteDramaProvider(private val prefs: SharedPreferences? = null) : MainAP
             // إطفاؤه يتخطى هذا البث فقط (نسخة CDN4)، ولا يمسّ الرابط الأساسي.
             if (prefs?.getBoolean(MinuteDramaSettingsBottomSheet.KEY_SHOW_BACKUP, true) != false) {
                 backupUrl?.let {
-                    callback(newExtractorLink(name, "الحلقة $epNum (احتياطي)", it, ExtractorLinkType.VIDEO) {
+                    callback(newExtractorLink(name, FormatTag.tagged("الحلقة $epNum (احتياطي)", it, ExtractorLinkType.VIDEO), it, ExtractorLinkType.VIDEO) {
                         referer = "$mainUrl/"
                         quality = getQualityFromName("720p")
                     })

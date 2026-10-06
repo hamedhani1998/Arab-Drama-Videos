@@ -1,5 +1,6 @@
 package com.reelree.plugin
 
+import cloudstreamshared.FormatTag
 import com.fasterxml.jackson.databind.DeserializationFeature
 import com.fasterxml.jackson.databind.ObjectMapper
 import com.fasterxml.jackson.module.kotlin.registerKotlinModule
@@ -449,7 +450,7 @@ class ReelreeProvider(private val prefs: SharedPreferences? = null) : MainAPI() 
                 ?.let { mt -> extractTracks(mt, playUrl).filter { it.kind == "AUDIO" } }
                 ?: emptyList()
             android.util.Log.i("Reelree", "full ${playUrl.take(70)} variants=${variants.size} q=$best audio=${audioFiles.size}")
-            callback(newExtractorLink(name, "الحلقة كاملة", playUrl, ExtractorLinkType.M3U8) {
+            callback(newExtractorLink(name, FormatTag.tagged("الحلقة كاملة", playUrl, ExtractorLinkType.M3U8), playUrl, ExtractorLinkType.M3U8) {
                 referer = mainUrl
                 // الجودة الحقيقية من master — 0 يعني «غير معروف» فيظهر بلا رقم
                 quality = if (best > 0) best else Qualities.Unknown.value
@@ -537,7 +538,7 @@ class ReelreeProvider(private val prefs: SharedPreferences? = null) : MainAPI() 
             }
         }.getOrDefault(epUrl.endsWith(".m3u8"))
         val hls = isHls
-        callback(newExtractorLink(name, "الحلقة $ep", playUrl,
+        callback(newExtractorLink(name, FormatTag.tagged("الحلقة $ep", playUrl, if (hls) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO), playUrl,
             if (hls) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO) {
             referer = mainUrl
             quality = perEpQuality(playUrl, hls)
@@ -700,7 +701,7 @@ private fun subtitleUrl(raw: String): String {
                     // رابط التشغيل الأساسي بلا تسمية جودة: playClarity في قائمة
                     // التشغيل **null دائماً** (مقيس 2026-10-02) — الجودات الحقيقية تأتي
                     // من /api/subtitles أدناه باسمها الصحيح.
-                    callback(newExtractorLink(name, "الحلقة $ep", voucher, ExtractorLinkType.VIDEO) {
+                    callback(newExtractorLink(name, FormatTag.tagged("الحلقة $ep", voucher, ExtractorLinkType.VIDEO), voucher, ExtractorLinkType.VIDEO) {
                         referer = mainUrl
                         quality = getQualityFromName("720p")
                     })
@@ -729,7 +730,7 @@ private fun subtitleUrl(raw: String): String {
                             if (clarity.isBlank()) continue
                             val label = "الحلقة $ep · $clarity"
                             if (!seenQ.add(label)) continue
-                            callback(newExtractorLink(name, label, qUrl, ExtractorLinkType.VIDEO) {
+                            callback(newExtractorLink(name, FormatTag.tagged(label, qUrl, ExtractorLinkType.VIDEO), qUrl, ExtractorLinkType.VIDEO) {
                                 referer = mainUrl
                                 quality = qualityOfLabel(clarity)
                             })
@@ -759,7 +760,7 @@ private fun subtitleUrl(raw: String): String {
                     val qUrl = q.get("url")?.asText() ?: q.get("directUrl")?.asText() ?: continue
                     if (!seenUrls.add(qUrl)) continue
                     val qLabel = q.get("quality")?.asText() ?: q.get("label")?.asText() ?: q.get("playClarity")?.asText().orEmpty()
-                    callback(newExtractorLink(name, "الحلقة $ep · ${qLabel.ifBlank { "جودة إضافية" }}",
+                    callback(newExtractorLink(name, FormatTag.tagged("الحلقة $ep · ${qLabel.ifBlank { "جودة إضافية" }}", qUrl, if (qUrl.endsWith(".m3u8")) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO),
                         qUrl, if (qUrl.endsWith(".m3u8")) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO) {
                         referer = mainUrl
                         quality = qualityOfLabel(qLabel)

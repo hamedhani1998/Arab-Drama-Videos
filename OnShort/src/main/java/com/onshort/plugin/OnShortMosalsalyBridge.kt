@@ -1,5 +1,6 @@
 package com.onshort.plugin
 
+import cloudstreamshared.FormatTag
 import com.fasterxml.jackson.databind.DeserializationFeature
 import com.fasterxml.jackson.databind.ObjectMapper
 import com.fasterxml.jackson.databind.node.ArrayNode
@@ -290,7 +291,7 @@ class OnShortMosalsalyBridge(private val prefs: android.content.SharedPreference
                     if (q.isNotBlank() && q != url) append(" · $q")
                 }
                 val emitUrl = if (needsDizi1(platform, kind, url)) wrapDizi1(url) else url
-                callback(newExtractorLink("OnShort", label, emitUrl, kind) {
+                callback(newExtractorLink("OnShort", FormatTag.tagged(label, emitUrl, kind), emitUrl, kind) {
                     this.headers = mapOf("User-Agent" to MOS_UA, "Referer" to MOS_MAIN)
                     this.referer = MOS_MAIN
                     if (q.isNotBlank()) this.quality = getQualityFromName(q)

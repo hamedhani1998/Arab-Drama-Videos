@@ -1,5 +1,6 @@
 package com.threesk.plugin
 
+import cloudstreamshared.FormatTag
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
 import kotlinx.coroutines.async
@@ -578,7 +579,7 @@ class ThreeSk(private val prefs: SharedPreferences? = null) : MainAPI() {
                 collected.add(
                     newExtractorLink(
                         source = serverLabel,
-                        name = serverLabel,
+                        name = FormatTag.tagged(serverLabel, link, ExtractorLinkType.M3U8),
                         url = link,
                         type = ExtractorLinkType.M3U8
                     ) {

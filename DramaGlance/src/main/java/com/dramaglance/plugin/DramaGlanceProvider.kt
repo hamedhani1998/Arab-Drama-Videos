@@ -1,5 +1,6 @@
 package com.dramaglance.plugin
 
+import cloudstreamshared.FormatTag
 import com.fasterxml.jackson.databind.ObjectMapper
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
@@ -268,7 +269,7 @@ class DramaGlanceProvider(private val prefs: SharedPreferences? = null) : MainAP
         // The preview playlist is a single variant: no #EXT-X-STREAM-INF, no
         // #EXT-X-MEDIA, no #EXT-X-KEY. So there is nothing to enumerate -- one
         // link, full browser headers (Cloudflare 403s anything less).
-        callback(newExtractorLink(name, "الحلقات المتاحة مجاناً", playUrl, ExtractorLinkType.M3U8) {
+        callback(newExtractorLink(name, FormatTag.tagged("الحلقات المتاحة مجاناً", playUrl, ExtractorLinkType.M3U8), playUrl, ExtractorLinkType.M3U8) {
             this.headers = browserHeaders()
             // CloudStream uses headers in app calls, but the video player builds
             // its own request from Referer -- set both or Cloudflare 403s it.

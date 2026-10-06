@@ -1,5 +1,6 @@
 package com.netshort.plugin
 
+import cloudstreamshared.FormatTag
 import com.fasterxml.jackson.databind.DeserializationFeature
 import com.fasterxml.jackson.databind.ObjectMapper
 import com.fasterxml.jackson.module.kotlin.registerKotlinModule
@@ -479,7 +480,7 @@ class NetShortProvider(private val prefs: SharedPreferences? = null) : MainAPI()
             val url = res.playVoucher ?: return false
             // رابط واحد فقط 720p — فترتيب الجودات هنا بلا أثر (لا تُخزَّن القائمة
             // ولا يُعاد ترتيبها: البث كما هو حرفياً).
-            callback(newExtractorLink(name, "NetShort 720p", url, ExtractorLinkType.M3U8) {
+            callback(newExtractorLink(name, FormatTag.tagged("NetShort 720p", url, ExtractorLinkType.M3U8), url, ExtractorLinkType.M3U8) {
                 referer = mainUrl
                 quality = getQualityFromName("720p")
             })

@@ -1,5 +1,6 @@
 package com.krmzi.plugin
 
+import cloudstreamshared.FormatTag
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.network.WebViewResolver
 import com.lagradost.cloudstream3.utils.*
@@ -412,7 +413,7 @@ class KrmziProvider(private val prefs: SharedPreferences? = null) : MainAPI() {
         collected.add(
             newExtractorLink(
                 source = "قرمزي ORG",
-                name = label,
+                name = FormatTag.tagged(label, url, type),
                 url = url,
                 type = type
             ) {

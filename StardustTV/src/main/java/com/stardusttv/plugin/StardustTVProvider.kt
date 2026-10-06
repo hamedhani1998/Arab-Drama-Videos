@@ -1,5 +1,6 @@
 package com.stardusttv.plugin
 
+import cloudstreamshared.FormatTag
 import com.fasterxml.jackson.databind.JsonNode
 import com.fasterxml.jackson.databind.ObjectMapper
 import com.fasterxml.jackson.module.kotlin.registerKotlinModule
@@ -235,7 +236,7 @@ class StardustTVProvider(private val prefs: SharedPreferences? = null) : MainAPI
             // رابط واحد فقط 720p — فترتيب الجودات هنا بلا أثر (لا تُخزَّن القائمة
             // ولا يُعاد ترتيبها: البث كما هو حرفياً).
             callback(
-                newExtractorLink(name, "StardustTV 720p", m3u8, ExtractorLinkType.M3U8) {
+                newExtractorLink(name, FormatTag.tagged("StardustTV 720p", m3u8, ExtractorLinkType.M3U8), m3u8, ExtractorLinkType.M3U8) {
                     referer = mainUrl
                     quality = getQualityFromName("720p")
                 }

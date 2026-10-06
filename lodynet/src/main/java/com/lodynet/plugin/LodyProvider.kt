@@ -1,5 +1,6 @@
 package com.lodynet.plugin
 
+import cloudstreamshared.FormatTag
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
 import kotlinx.coroutines.async
@@ -1034,7 +1035,7 @@ class LodyProvider(private val prefs: SharedPreferences? = null) : MainAPI() {
                     callback.invoke(
                         newExtractorLink(
                             source = "لودي نت",
-                            name = "${m.label} · ${m.driver.ifBlank { "server" }}",
+                            name = FormatTag.tagged("${m.label} · ${m.driver.ifBlank { "server" }}", l.url, l.type),
                             url = l.url,
                             type = l.type
                         ) {
@@ -1097,7 +1098,7 @@ class LodyProvider(private val prefs: SharedPreferences? = null) : MainAPI() {
         callback.invoke(
             newExtractorLink(
                 source = "لودي نت",
-                name = label,
+                name = FormatTag.tagged(label, url, type),
                 url = url,
                 type = type
             ) {
