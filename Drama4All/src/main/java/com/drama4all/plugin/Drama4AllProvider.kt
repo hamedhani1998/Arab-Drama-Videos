@@ -40,6 +40,34 @@ private data class SubtitleItem(
     val url: String? = null,
 )
 
+// أسماء لغاتٍ أرسلها الموقع بحروفٍ محلّيةّ لا تعرفها مكتبة التطبيق ولا رمز ISO
+// يُشتقّ منها (قِيس على cloudstream.jar: `getLangTag()` يرجع لها null في المسارين
+// فيبقى المسار بلا اسم). ما عداها يتولّاه `SubtitleHelper` نفسه: `بالعربية` و
+// `ภาษาไทย` و`français` و`English` و`Bahasa Indonesia` كلّها تُردّ رمزاً صحيحاً.
+private val NATIVE_SUB_LANG = mapOf(
+    "日本語" to "ja",
+    "繁體中文" to "zh",
+    "简体中文" to "zh",
+    "中文" to "zh",
+    "한국어" to "ko",
+    "हिन्दी" to "hi",
+    "हिंदी" to "hi",
+)
+
+// تحويل تسمية اللغة إلى الرمز الذي يقبله المشغّل. القاعدة مقيسة لا مفترضة:
+// `SubtitleFile.getLangTag()` = `fromCodeToLangTagIETF(lang)` وإلاّ
+// `fromLanguageToTagIETF(lang, true)`؛ والتطبيق يشتقّ «اليابانية» من الرمز نفسه،
+// فالرمز هو المُدخل والتسمية العربية هي المخرج — لا تُمرَّر التسمية كما هي.
+// يرجع null لغةً مجهولةً فعلاً (يتعامل معها المتّصل بجواره).
+private fun normalizeSubLang(raw: String): String? {
+    if (raw.isEmpty()) return null
+    // رمز جاهز (ar / en / zh-TW …) — نتحقّق بالدالة نفسها التي يستعملها المشغّل
+    if (SubtitleHelper.fromCodeToLangTagIETF(raw) != null) return raw
+    NATIVE_SUB_LANG[raw.lowercase()]?.let { return it }
+    // الباقي: أسماء إنجليزية ومحلّية يعرفها التطبيق نفسه
+    return SubtitleHelper.fromLanguageToTagIETF(raw, true)
+}
+
 class Drama4AllProvider(private val prefs: SharedPreferences? = null) : MainAPI() {
     override var name = "Drama4All"
     override var mainUrl = "https://drama4all.com"
@@ -275,22 +303,41 @@ class Drama4AllProvider(private val prefs: SharedPreferences? = null) : MainAPI(
             val item = signedEpisode(internal, ep, m.groupValues[1]) ?: return false
             val vUrl = item.videoUrl ?: return false
 
-            // 1) كل الترجمات حسب اللغة — نُرسل كل لغة مرة واحدة فقط.
-            //    API يعطي تسميات لغة جاهزة (مثل "بالعربية" / "English" / "ar") وقد يُكرّر نفس الرابط
-            //    (مِثل ملفي .vtt عربيين متطابقين في sf_ أو نفس .srt عبر لغات). نستبعد التكرار بالرابط
-            //    ثم نتجاهل تكرار نفس اللغة لنفس الحلقة.
+            // 1) كل الترجمات — رابط مطلق + رمز لغة، ولغة واحدة لا تُكرَّر.
+            //    قيست عائلتا الموقع على هذه الحلقة:
+            //    • `sf_` تُعطى رابطاً مطلقاً على cdn1.nsstorage.space برمز `ar` — تعمل كما هي.
+            //    • `nt_` (narto) تُعطى مساراً نسبياً `/local_subtitles/…` بتسميات محلّيةّ
+            //      (`بالعربية` / `日本語` / `한국어` …). المسار النسبي يفشل حتماً:
+            //      `PlayerSubtitleHelper.getSubtitleData` يبني `SubtitleData` من `url`
+            //      كما هو بلا أيّ إضافة لـ mainUrl (مقيس على cloudstream.jar)، فيقرّر
+            //      المشغّل أنه «unknown url type». فنسبقه بـ mainUrl نحن.
+            //    الرموز: انظر `normalizeSubLang` — التسمية لا تُمرَّر كما هي أبداً.
+            //    التكرار: بالرابط أولاً (قد يُعاد نفس الملف) ثم بالرمز بعد التحويل،
+            //    فالصيغتان `français` و`fr` لا تُنتجان لغتين للحلقة الواحدة.
             val seenSub = HashSet<String>()
             val seenLang = HashSet<String>()
             item.subs?.forEach { s ->
-                val lang = s.lang?.trim() ?: return@forEach
-                val subUrl = s.url?.trim() ?: return@forEach
-                if (subUrl.isEmpty() || !seenSub.add(subUrl)) return@forEach
-                if (lang.isEmpty()) { // رابط بلا تسمية لغة -> نمرّره مرة واحدة
-                    try { subtitleCallback(newSubtitleFile("ترجمة", subUrl)) } catch (e: Exception) {}
-                    return@forEach
+                val rawUrl = s.url?.trim() ?: return@forEach
+                if (rawUrl.isEmpty() || !seenSub.add(rawUrl)) return@forEach
+                val subUrl = when {
+                    rawUrl.startsWith("http://") || rawUrl.startsWith("https://") -> rawUrl
+                    rawUrl.startsWith("//") -> "https:$rawUrl"
+                    rawUrl.startsWith("/") -> mainUrl + rawUrl
+                    else -> "$mainUrl/$rawUrl"
                 }
-                if (!seenLang.add(lang)) return@forEach // نفس اللغة مكررة -> مرة واحدة
-                try { subtitleCallback(newSubtitleFile(lang, subUrl)) } catch (e: Exception) {}
+                val rawLang = s.lang?.trim().orEmpty()
+                val lang = when {
+                    rawLang.isEmpty() -> "ترجمة" // بلا تسمية أصلاً -> مرّة واحدة كما كان
+                    // لغة غير معروفة فعلاً: نُبقي تسميتها بدل أن نُسمّيها «ترجمة»
+                    // تسميةً كاذبة — الرمز المجهول يُعالَج في getLangTag() بالاسم نفسه.
+                    else -> normalizeSubLang(rawLang) ?: rawLang
+                }
+                if (!seenLang.add(lang)) return@forEach
+                try {
+                    subtitleCallback(newSubtitleFile(lang, subUrl) {
+                        this.headers = mapOf("Referer" to mainUrl)
+                    })
+                } catch (e: Exception) {}
             }
 
             // 2) الجودة الحقيقية من مسار الرابط: nsstorage يبني المسار على هيئة /{lang}/{N}p/{hash}/...
