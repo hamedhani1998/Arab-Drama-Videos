@@ -108,13 +108,16 @@ class DramadunyamProvider(private val prefs: SharedPreferences? = null) : MainAP
     //   فتضاف/تُسحَب صفوف القسم الأمامي فوراً حسب إعداد «إظهار القسم الأمامي».
     override val mainPage: List<MainPageData>
         get() {
+            // مطابقةٌ حرفية لما يبنيه `mainPageOf`: (name=الثاني، data=الأول،
+            // horizontalImages=الافتراضي false) — أي تمرير `true` هنا كان يغيّر
+            // شكل بطاقات صفوف المنصات كلّها.
             val accent = if (showFront()) {
                 listOf(
-                    MainPageData("الأحدث", DUN_FRONT_LATEST, true),
-                    MainPageData("الأكثر مشاهدة", DUN_FRONT_TOP, true)
+                    MainPageData("الأحدث", DUN_FRONT_LATEST),
+                    MainPageData("الأكثر مشاهدة", DUN_FRONT_TOP)
                 )
             } else emptyList()
-            return accent + mainPagePlatforms.map { (k, v) -> MainPageData(v, k, true) }
+            return accent + mainPagePlatforms.map { (k, v) -> MainPageData(v, k) }
         }
     private val mainPagePlatforms: List<Pair<String, String>> = listOf(
         "NetShort" to "مسلسلات NetShort",
