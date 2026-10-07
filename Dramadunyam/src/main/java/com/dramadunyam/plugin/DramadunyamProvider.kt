@@ -1,0 +1,465 @@
+package com.dramadunyam.plugin
+
+import android.content.SharedPreferences
+import android.util.Log
+import cloudstreamshared.FormatTag
+import com.fasterxml.jackson.annotation.JsonProperty
+import com.fasterxml.jackson.databind.DeserializationFeature
+import com.fasterxml.jackson.databind.ObjectMapper
+import com.fasterxml.jackson.module.kotlin.registerKotlinModule
+import com.lagradost.cloudstream3.*
+import com.lagradost.cloudstream3.utils.*
+import java.net.URLDecoder
+import java.util.TreeMap
+
+private val mapper = ObjectMapper().registerKotlinModule()
+    .configure(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES, false)
+
+private const val TAG = "Dramadunyam"
+
+/** استجابة `/api/series` أو `/api/search` المترقّمة. */
+private data class DunItem(
+    val id: Long? = null,
+    val slug: String? = null,
+    val title: String? = null,
+    val cover: String? = null,
+    val platform: String? = null,
+    @JsonProperty("total_episodes") val totalEpisodes: Int? = null,
+    @JsonProperty("available_episodes") val availableEpisodes: Int? = null,
+)
+
+private data class DunListResponse(val data: List<DunItem>? = null)
+
+/** استجابة `/api/series/{slug}` — تفاصيل مسلسل واحد. */
+private data class DunTag(val slug: String? = null, val name: String? = null)
+
+private data class DunDetail(
+    val id: Long? = null,
+    val slug: String? = null,
+    val title: String? = null,
+    val cover: String? = null,
+    val description: String? = null,
+    val platform: String? = null,
+    @JsonProperty("total_episodes") val totalEpisodes: Int? = null,
+    @JsonProperty("available_episodes") val availableEpisodes: Int? = null,
+    val tags: List<DunTag>? = null,
+    val genre: String? = null,
+)
+
+/** استجابة `/play/{seriesId}/{n}` — رابط بثٍّ واحد مع ترجماته المضمّنة. */
+private data class DunSubtitle(val dil: String? = null, val src: String? = null)
+
+private data class PlayResponse(
+    val delivery: String? = null,
+    val type: String? = null,
+    val url: String? = null,
+    @JsonProperty("source_tag") val sourceTag: String? = null,
+    @JsonProperty("expires_at") val expiresAt: String? = null,
+    val altyazilar: List<DunSubtitle>? = null,
+)
+
+// أسماء لغاتٍ يرسلها الموقع بحروفٍ محلّيةّ لا تعرفها مكتبة التطبيق ولا رمز ISO
+// يُشتقّ منها (قِيس على cloudstream.jar: `getLangTag()` يرجع لها null في المسارين
+// فيبقى المسار بلا اسم). ما عداها يتولّاه `SubtitleHelper` نفسه.
+private val NATIVE_SUB_LANG = mapOf(
+    "日本語" to "ja",
+    "繁體中文" to "zh",
+    "简体中文" to "zh",
+    "中文" to "zh",
+    "한국어" to "ko",
+    "हिन्दी" to "hi",
+    "हिंदी" to "hi",
+)
+
+/**
+ * تحويل تسمية اللغة إلى الرمز الذي يقبله المشغّل. القاعدة مقيسة لا مفترضة:
+ * `SubtitleFile.getLangTag()` = `fromCodeToLangTagIETF(lang)` وإلاّ
+ * `fromLanguageToTagIETF(lang, true)`؛ والتطبيق يشتقّ «العربية» من الرمز نفسه،
+ * فالرمز هو المُدخل والتسمية العربية هي المخرج — لا تُمرَّر التسمية كما هي.
+ */
+private fun normalizeSubLang(raw: String): String? {
+    if (raw.isEmpty()) return null
+    if (SubtitleHelper.fromCodeToLangTagIETF(raw) != null) return raw
+    NATIVE_SUB_LANG[raw.lowercase()]?.let { return it }
+    return SubtitleHelper.fromLanguageToTagIETF(raw, true)
+}
+
+class DramadunyamProvider(private val prefs: SharedPreferences? = null) : MainAPI() {
+    override var name = "Dramadunyam"
+    override var mainUrl = "https://dramadunyam.com"
+    override var lang = "ar"
+    override val hasMainPage = true
+    override val supportedTypes = setOf(TvType.TvSeries)
+
+    // ★ كل منصّات الموقع (43) صفّاً في الصفحة الرئيسية — الأسماء التي يعتمدها
+    //   الموقع في مسار `platform` لاستعلام `/api/series`.
+    override val mainPage = mainPageOf(
+        "NetShort" to "مسلسلات NetShort",
+        "DramaWave" to "مسلسلات DramaWave",
+        "DramaBox" to "مسلسلات DramaBox",
+        "PineDrama" to "مسلسلات PineDrama",
+        "ReelShort" to "مسلسلات ReelShort",
+        "FreeReels" to "مسلسلات FreeReels",
+        "ShortMax" to "مسلسلات ShortMax",
+        "FlexTV" to "مسلسلات FlexTV",
+        "FlickReels" to "مسلسلات FlickReels",
+        "StarDust" to "مسلسلات StarDust",
+        "MoboReels" to "مسلسلات MoboReels",
+        "ShortWave" to "مسلسلات ShortWave",
+        "Storyreel" to "مسلسلات Storyreel",
+        "FlareFlow" to "مسلسلات FlareFlow",
+        "KalosTV" to "مسلسلات KalosTV",
+        "SerialPlus" to "مسلسلات SerialPlus",
+        "GoodShort" to "مسلسلات GoodShort",
+        "DramaBite" to "مسلسلات DramaBite",
+        "CubeTV" to "مسلسلات CubeTV",
+        "HappyShort" to "مسلسلات HappyShort",
+        "StarShort" to "مسلسلات StarShort",
+        "ShotShort" to "مسلسلات ShotShort",
+        "RapidTV" to "مسلسلات RapidTV",
+        "Playlet" to "مسلسلات Playlet",
+        "RadReels" to "مسلسلات RadReels",
+        "Joyreels" to "مسلسلات Joyreels",
+        "RaptDrama" to "مسلسلات RaptDrama",
+        "iDrama" to "مسلسلات iDrama",
+        "BiliTV" to "مسلسلات BiliTV",
+        "BonusTV" to "مسلسلات BonusTV",
+        "Reelife" to "مسلسلات Reelife",
+        "ShortBox" to "مسلسلات ShortBox",
+        "GoldDrama" to "مسلسلات GoldDrama",
+        "VibeShort" to "مسلسلات VibeShort",
+        "SodaReels" to "مسلسلات SodaReels",
+        "MicroDrama" to "مسلسلات MicroDrama",
+        "Vigloo" to "مسلسلات Vigloo",
+        "DramaPops" to "مسلسلات DramaPops",
+        "DramaRush" to "مسلسلات DramaRush",
+        "Shorten" to "مسلسلات Shorten",
+        "MeloShort" to "مسلسلات MeloShort",
+        "TopDrama" to "مسلسلات TopDrama",
+        "Melolo" to "مسلسلات Melolo",
+    )
+
+    private fun showSubs(): Boolean =
+        prefs?.getBoolean(DramadunyamSettingsBottomSheet.KEY_SHOW_SUBTITLES, true) != false
+
+    private fun descOrder(): Boolean =
+        prefs?.getString(DramadunyamSettingsBottomSheet.KEY_EPISODE_ORDER, "as_is") == "desc"
+
+    private fun searchScope(): String =
+        prefs?.getString(DramadunyamSettingsBottomSheet.KEY_SEARCH_SCOPE, "ar") ?: "ar"
+
+    // ── التذكرة `dd_bilet` ───────────────────────────────────────────────────
+    //
+    // الموقع يرفض كل `/api/*` و`/play/*` بلا هذه التذكرة (412 `{"error":"bilet"}`).
+    // `app` بلا cookie jar (مقيس على MainActivityKt) فلا تُحفظ تلقائياً؛ نأخذها
+    // من `Set-Cookie` صفحة `/ar/` ونمرّرها في كل طلب صراحةً. صلاحيتها 12 ساعة؛
+    // وعند 412 نُعيد التسخين مرةً واحدة ثم نُعيد الطلب.
+    private var cachedTicket: String? = null
+
+    private suspend fun warmTicket(): String? {
+        cachedTicket?.takeIf { it.isNotBlank() }?.let { return it }
+        val t = try {
+            app.get("$mainUrl/ar/", referer = mainUrl).cookies["dd_bilet"]
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            Log.e(TAG, "ticket warm FAILED", e)
+            null
+        }
+        cachedTicket = t?.takeIf { it.isNotBlank() }
+        return cachedTicket
+    }
+
+    /** تذكرة + رؤوس اختيارية، أو null إن تعذّر التسخين. */
+    private fun authHeaders(extra: Map<String, String>): Map<String, String>? {
+        val t = cachedTicket?.takeIf { it.isNotBlank() }
+            ?: return null
+        return extra + mapOf("Cookie" to "dd_bilet=$t")
+    }
+
+    /** 412 = تذكرة فاسدة/منتهية؛ صفحة تحدّي = يعترض الخادم. كلاهما يُعاد تسخينه. */
+    private fun needsRewarm(r: com.lagradost.nicehttp.NiceResponse): Boolean {
+        if (r.code == 412) return true
+        val txt = r.text
+        return txt.contains("Just a moment", ignoreCase = true)
+    }
+
+    /**
+     * طلبٌ بجرعةٍ من الحيل: التذكرة صراحةً، وإعادة تسخينٍ واحدة إذا رُفض الطلب
+     * (412/تحدّي)، كرّها في محاولة واحدة أخرى قبل اليأس.
+     */
+    private suspend fun getWithTicket(
+        url: String,
+        referer: String? = null,
+        extra: Map<String, String> = emptyMap()
+    ): com.lagradost.nicehttp.NiceResponse? {
+        warmTicket() ?: return null
+        val h1 = authHeaders(extra) ?: return null
+        var r = app.get(url, referer = referer ?: mainUrl, headers = h1)
+        if (needsRewarm(r)) {
+            cachedTicket = null
+            warmTicket() ?: return null
+            val h2 = authHeaders(extra) ?: return null
+            r = app.get(url, referer = referer ?: mainUrl, headers = h2)
+        }
+        return r
+    }
+
+    /** رابط مطلق — الموقع يرسل مسارات نسبية والمشغّل لا يضيف mainUrl. */
+    private fun abs(u: String): String = when {
+        u.startsWith("http://") || u.startsWith("https://") -> u
+        u.startsWith("//") -> "https:$u"
+        u.startsWith("/") -> mainUrl + u
+        else -> "$mainUrl/$u"
+    }
+
+    /** آخر جزء من المسار، مفكوك الترميز — هو `slug` في رابط المسلسل. */
+    private fun slugFrom(url: String): String? {
+        val tail = url.substringAfterLast('/').substringBefore('?')
+        if (tail.isBlank()) return null
+        return try {
+            URLDecoder.decode(tail, "UTF-8")
+        } catch (e: Exception) {
+            tail
+        }
+    }
+
+    private fun DunItem.toSearch(): SearchResponse? {
+        val t = title?.takeIf { it.isNotBlank() } ?: return null
+        val s = slug?.takeIf { it.isNotBlank() } ?: return null
+        return newTvSeriesSearchResponse(t, "$mainUrl/ar/series/$s", TvType.TvSeries) {
+            posterUrl = cover?.takeIf { it.isNotBlank() }?.let { abs(it) }
+            episodes = availableEpisodes?.takeIf { it > 0 }
+                ?: totalEpisodes?.takeIf { it > 0 }
+        }
+    }
+
+    override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse? {
+        return try {
+            val pn = if (page <= 1) 1 else page
+            val r = getWithTicket(
+                "$mainUrl/api/series?page=$pn&limit=40&sort=yeni&platform=${request.data}&lang=ar",
+                referer = mainUrl
+            ) ?: return null
+            if (!r.isSuccessful) {
+                Log.e(TAG, "series HTTP ${r.code} page=$pn platform=${request.data}")
+                return null
+            }
+            val data = mapper.readValue(r.text, DunListResponse::class.java).data.orEmpty()
+            val items = data.mapNotNull { it.toSearch() }
+            if (items.isEmpty()) null else newHomePageResponse(request.name, items)
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            throw e // الإلغاء ليس فشل شبكة (قِيس: NartoDrama 2026-10-06)
+        } catch (e: Exception) {
+            Log.e(TAG, "getMainPage FAILED page=$page data=${request.data}", e)
+            null
+        }
+    }
+
+    override suspend fun search(query: String): List<SearchResponse>? {
+        return try {
+            val q = query.trim()
+            if (q.isEmpty()) return emptyList()
+            val scope = searchScope()
+            val qs = java.net.URLEncoder.encode(q, "UTF-8")
+
+            // `lang=ar` وحده هو ما يُعيد العناوين العربية (مقيس: «من الكراهية
+            // إلى الحب» = 0 بدونه، 1 به) — بلاه تعود العناوين التركية الأصلية.
+            val mine = if (scope != "orig") {
+                val r = getWithTicket("$mainUrl/api/search?q=$qs&limit=18&lang=ar", referer = "$mainUrl/ar/search")
+                    ?: return null
+                if (r.isSuccessful) mapper.readValue(r.text, DunListResponse::class.java).data.orEmpty()
+                    .mapNotNull { it.toSearch() } else emptyList()
+            } else emptyList()
+
+            val orig = if (scope != "ar") {
+                val r = getWithTicket("$mainUrl/api/search?q=$qs&limit=18", referer = "$mainUrl/ar/search")
+                    ?: return null
+                if (r.isSuccessful) mapper.readValue(r.text, DunListResponse::class.java).data.orEmpty()
+                    .mapNotNull { it.toSearch() } else emptyList()
+            } else emptyList()
+
+            if (scope == "both") {
+                val mineUrls = mine.map { it.url }.toSet()
+                mine + orig.filter { it.url !in mineUrls }
+            } else if (scope == "orig") orig else mine
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            Log.e(TAG, "search FAILED q=$query", e)
+            null
+        }
+    }
+
+    override suspend fun load(url: String): LoadResponse? {
+        return try {
+            val slug = slugFrom(url) ?: return null
+            val r = getWithTicket("$mainUrl/api/series/$slug?lang=ar", referer = mainUrl) ?: return null
+            if (!r.isSuccessful) {
+                Log.e(TAG, "detail HTTP ${r.code} slug=$slug")
+                return null
+            }
+            val d = mapper.readValue(r.text, DunDetail::class.java)
+            val title = d.title?.takeIf { it.isNotBlank() } ?: return null
+
+            // الحلقات أرقامٌ صحيحة 1..availableEpisodes — لا HTML؛ نضمّن معرّف
+            // المسلسل في `data` كي لا يعود بثّ الحلقة ليفتح صفحتها أو يسأل API.
+            val count = d.availableEpisodes?.takeIf { it > 0 }
+                ?: d.totalEpisodes?.takeIf { it > 0 }
+                ?: return null
+            val base = "$mainUrl/ar/series/${d.slug?.takeIf { it.isNotBlank() } ?: slug}"
+            val eps = TreeMap<Int, String>()
+            for (i in 1..count) eps[i] = "$base/episode-$i|id|${d.id}"
+
+            val ordered = if (descOrder()) eps.entries.toList().reversed() else eps.entries.toList()
+            val episodes = ordered.map { (num, data) ->
+                newEpisode(data) {
+                    episode = num
+                    name = "الحلقة $num"
+                }
+            }
+            val tags = d.tags?.mapNotNull { it.name?.takeIf { s -> s.isNotBlank() } }
+                ?: d.genre?.takeIf { it.isNotBlank() }?.let { listOf(it) }
+                ?: emptyList()
+            Log.d(TAG, "load title=$title episodes=${episodes.size}")
+
+            newTvSeriesLoadResponse(title, url, TvType.TvSeries, episodes) {
+                posterUrl = d.cover?.takeIf { it.isNotBlank() }?.let { abs(it) }
+                plot = d.description?.takeIf { it.isNotBlank() }
+                this.tags = tags
+            }
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            Log.e(TAG, "load FAILED $url", e)
+            null
+        }
+    }
+
+    override suspend fun loadLinks(
+        data: String,
+        isCasting: Boolean,
+        subtitleCallback: (SubtitleFile) -> Unit,
+        callback: (ExtractorLink) -> Unit
+    ): Boolean {
+        return try {
+            // data = "$url|id|$seriesId" — الرابطُ نفسُه، ثم المعرّف أنظف من أي HTML.
+            val parts = data.split("|")
+            val rawUrl = parts[0].trim()
+            if (rawUrl.isBlank()) {
+                Log.e(TAG, "loadLinks empty url data=$data")
+                return false
+            }
+            val epUrl = abs(rawUrl)
+            val ep = Regex("""episode-(\d+)""").find(epUrl)?.groupValues?.get(1)?.toIntOrNull() ?: return false
+
+            // المعرّف محمول في `data`؛ إن لم يوجد فمن API التفاصيل (مسار الحلقة).
+            val seriesId = parts.getOrNull(2)?.toLongOrNull() ?: run {
+                val slug = slugFrom(epUrl) ?: run {
+                    Log.e(TAG, "loadLinks no slug data=$data")
+                    return false
+                }
+                val r = getWithTicket("$mainUrl/api/series/$slug?lang=ar", referer = mainUrl) ?: return false
+                if (!r.isSuccessful) {
+                    Log.e(TAG, "detail HTTP ${r.code} slug=$slug")
+                    return false
+                }
+                mapper.readValue(r.text, DunDetail::class.java).id ?: run {
+                    Log.e(TAG, "loadLinks no seriesId slug=$slug")
+                    return false
+                }
+            }
+
+            // 503 مؤقتة قد يردّها الخادم — الموقع نفسه يعيد المحاولة ×4/~3ث.
+            var play: PlayResponse? = null
+            for (attempt in 1..3) {
+                val r = getWithTicket("$mainUrl/play/$seriesId/$ep", referer = mainUrl) ?: return false
+                if (r.isSuccessful) {
+                    play = mapper.readValue(r.text, PlayResponse::class.java)
+                    break
+                }
+                if (r.code != 503) {
+                    Log.e(TAG, "play HTTP ${r.code} series=$seriesId ep=$ep")
+                    return false
+                }
+                Log.d(TAG, "play 503 retry $attempt series=$seriesId ep=$ep")
+                kotlinx.coroutines.delay(1500)
+            }
+            val p = play ?: return false
+
+            // كل الترجمات المضمّنة — دائمًا مطلقة على dramaflix.net، ورمز اللغة
+            // في `dil`؛ ثم لا رابطٌ مكرّر ولا لغةٌ مكرّرة.
+            if (showSubs()) {
+                val seenUrl = HashSet<String>()
+                val seenLang = HashSet<String>()
+                p.altyazilar.orEmpty().forEach { s ->
+                    val subRaw = s.src?.trim().orEmpty()
+                    if (subRaw.isEmpty()) return@forEach
+                    val subUrl = abs(subRaw)
+                    if (!seenUrl.add(subUrl)) return@forEach
+                    val rawLang = s.dil?.trim().orEmpty()
+                    val lang = normalizeSubLang(rawLang) ?: rawLang.ifEmpty { "ترجمة" }
+                    if (!seenLang.add(lang)) return@forEach
+                    try {
+                        subtitleCallback(newSubtitleFile(lang, subUrl) {
+                            this.headers = mapOf("Referer" to mainUrl)
+                        })
+                    } catch (_: Exception) {
+                    }
+                }
+            }
+
+            // الصيغة: `type` يقول hls/mp4، وله روابط بلا امتداد إطلاقاً
+            // (mp4 حملة تنتهي بـ`mime_type=video_mp4`) فنُمرّره إلى FormatTag
+            // ليكتب [MP4] لا [VIDEO] — انظر FormatTag.label.
+            val typeStr = p.type.orEmpty().lowercase()
+            val raw = p.url?.trim().orEmpty()
+            if (raw.isEmpty()) {
+                Log.e(TAG, "play empty url series=$seriesId ep=$ep")
+                return false
+            }
+            val vUrl = abs(raw)
+            val declared = when {
+                typeStr == "mp4" -> "MP4"
+                typeStr == "hls" -> "M3U8"
+                else -> null
+            }
+            val linkType = if (typeStr == "hls" || vUrl.contains(".m3u8")) ExtractorLinkType.M3U8
+            else ExtractorLinkType.VIDEO
+
+            // اسم المصدر يلصق بطريقة التسليم إن وُجدت (direct/relay/psig) —
+            // يكشف التسمية العربية، وإلا اكتفِ باسم الحلقة وعلامة الصيغة.
+            val serverName = when (p.sourceTag?.lowercase()) {
+                "direct" -> "مباشر"
+                "relay" -> "وسيط"
+                "relay_auth" -> "وسيط مُوثّق"
+                else -> p.sourceTag?.takeIf { it.isNotBlank() } ?: "الحلقة $ep"
+            }
+            callback(
+                newExtractorLink(
+                    source = name,
+                    name = FormatTag.tagged(serverName, vUrl, linkType, declared),
+                    url = vUrl,
+                    type = linkType
+                ) {
+                    referer = mainUrl
+                    qOf(vUrl)?.let { quality = getQualityFromName(it) }
+                    headers = mapOf("Referer" to mainUrl)
+                }
+            )
+            true
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            Log.e(TAG, "loadLinks FATAL data=$data", e)
+            false
+        }
+    }
+
+    /** الجودة الحقيقية من المسار (`…_720/main.m3u8`) — إن غابت لا نخترع اسماً. */
+    private fun qOf(url: String): String? {
+        Regex("""_(\d{3,4})/""").find(url)?.let { return it.groupValues[1] + "p" }
+        Regex("""/(\d{3,4})p/""").find(url)?.let { return it.groupValues[1] + "p" }
+        return null
+    }
+}

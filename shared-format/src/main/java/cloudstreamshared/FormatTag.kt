@@ -22,8 +22,16 @@ object FormatTag {
 
     private const val SEP = " · "
 
-    /** الصيغة كما تُقرأ من الرابط، ثم من النوع المُعلن عند غياب الامتداد. */
-    fun label(url: String, type: ExtractorLinkType?): String {
+    /**
+     * الصيغة كما تُقرأ من الرابط، ثم من `declared` (ما أعلنه الموقع في استجابته)
+     * عند غياب الامتداد، ثم من النوع المُصرَّح به.
+     *
+     * لماذا `declared` أصلاً: روابط mp4 موقّعة تحمل `mime_type=video_mp4` بلا
+     * `.mp4` في المسار إطلاقاً، فاقتراع النوع وحده يعطي `[VIDEO]` وهي mp4
+     * بالفعل (قِيس: directdrama و dramadunyam). الرابط المُقيس له الأولوية
+     * دائماً — فالامتداد حقيقةٌ مقيسة، وإعلان الموقع مجرّد ادعاء.
+     */
+    fun label(url: String, type: ExtractorLinkType?, declared: String? = null): String {
         val u = url.lowercase()
 
         // قائمة المتابعة — يُذكر بها أن صيغة الحاوية M3U8 وليس نوع الملف
@@ -42,8 +50,11 @@ object FormatTag {
         if (u.contains(".m4a")) return "M4A"
         if (u.contains(".wav")) return "WAV"
 
-        // بلا امتداد (روابط موقّعة أو خلف بروكسي) — نُعلن النوع المُصرَّح به،
-        // و«TS» لا يُستنتج من كلمة داخل المسار لأن .ts قد يصادف حرفاً.
+        // بلا امتداد (روابط موقّعة أو خلف بروكسي) — نُعلن ما أعلنه الموقع إن
+        // أُعلن، وإلا فنوع الاستدعاء، و«TS» لا يُستنتج من كلمة داخل المسار
+        // لأن .ts قد يصادف حرفاً.
+        val fromDeclared = declared?.trim()?.uppercase()
+        if (!fromDeclared.isNullOrEmpty()) return fromDeclared
         return when (type) {
             ExtractorLinkType.M3U8 -> "M3U8"
             ExtractorLinkType.DASH -> "DASH"
@@ -57,9 +68,12 @@ object FormatTag {
     /**
      * الاسم بعد إضافة الوسم. إن كان الاسم يحمل الصيغة أصلاً (تُظهرها بعض
      * المصادر في تسميتها اليدوية) لا يُكرَّر الوسم.
+     *
+     * [declared] يُمرَّر إلى [label] كما هو — انظر شرحه هناك (روابط بلا
+     * امتداد يعلن الموقع صيغتها في استجابته).
      */
-    fun tagged(name: String, url: String, type: ExtractorLinkType?): String {
-        val tag = label(url, type)
+    fun tagged(name: String, url: String, type: ExtractorLinkType?, declared: String? = null): String {
+        val tag = label(url, type, declared)
         val plain = name.ifBlank { "تشغيل" }
         if (plain.contains(tag, ignoreCase = true)) return plain
         return plain + SEP + "[" + tag + "]"
