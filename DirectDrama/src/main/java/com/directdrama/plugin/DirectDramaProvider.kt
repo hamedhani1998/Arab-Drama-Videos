@@ -88,12 +88,12 @@ class DirectDramaProvider(private val prefs: SharedPreferences? = null) : MainAP
     override var name = "DirectDrama"
     override var mainUrl = "https://directdrama.com"
     override var lang = "ar"
-    override val hasMainPage = true
     override val supportedTypes = setOf(TvType.TvSeries)
 
     // ★ كل منصات الموقع (27) صفّاً في الصفحة الرئيسية — قُيست عناوينها من
     //   `/ar/platform` نفسها: «مسلسلات {الاسم} القصيرة» هو عنوان صفحة المنصة.
-    override val mainPage = mainPageOf(
+    //   تُبنى مرّة واحدة ثم يقصّها `mainPage` حسب إعداد عدد الصفوف.
+    private val allPlatformRows = mainPageOf(
         "pinedrama" to "مسلسلات PineDrama القصيرة",
         "reelshort" to "مسلسلات ReelShort القصيرة",
         "flextv" to "مسلسلات FlexTV القصيرة",
@@ -122,6 +122,21 @@ class DirectDramaProvider(private val prefs: SharedPreferences? = null) : MainAP
         "stardusttv" to "مسلسلات StarDust TV القصيرة",
         "snackshort" to "مسلسلات SnackShort القصيرة",
     )
+
+    // ★ خصائص ديناميكية: تُقرأ مع كل رسم للواجهة، فالمفاتيح من ورقة الإعدادات
+    //   تُطبَّق بلا إعادة تشغيل. `hasMainPage=false` يُخفي المصدر من الصفحة
+    //   الرئيسية كليّاً.
+    override val hasMainPage: Boolean
+        get() = prefs?.getBoolean(DirectDramaSettingsBottomSheet.KEY_SHOW_HOME, true) != false
+
+    override val mainPage: List<MainPageData>
+        get() {
+            val raw = prefs?.getString(DirectDramaSettingsBottomSheet.KEY_HOME_ROWS, "all") ?: "all"
+            if (raw == "all") return allPlatformRows
+            val n = raw.toIntOrNull() ?: return allPlatformRows
+            return if (n in 1 until allPlatformRows.size) allPlatformRows.take(n)
+            else allPlatformRows
+        }
 
     private fun showSubs(): Boolean =
         prefs?.getBoolean(DirectDramaSettingsBottomSheet.KEY_SHOW_SUBTITLES, true) != false
@@ -315,8 +330,13 @@ class DirectDramaProvider(private val prefs: SharedPreferences? = null) : MainAP
             Log.d(TAG, "load title=$title episodes=${episodes.size} total=$total")
 
             if (episodes.isEmpty()) return null
+            // الغلاف قد يأتي نسبياً من JSON-LD (`image: "/img/…"`) والمشغّل لا يضيف
+            // mainUrl، فنبنيه مطلقاً. وخلفية النتيجة (`backgroundPosterUrl`) كانت
+            // تبقى null دائماً فما رُسم تمويهُ أعلى صفحة التفاصيل.
+            val posterAbs = poster?.takeIf { it.isNotBlank() }?.let { abs(it) }
             newTvSeriesLoadResponse(title, url, TvType.TvSeries, episodes) {
-                posterUrl = poster
+                posterUrl = posterAbs
+                backgroundPosterUrl = posterAbs
                 plot = description
                 this.tags = tags
             }

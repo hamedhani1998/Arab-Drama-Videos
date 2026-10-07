@@ -67,6 +67,8 @@ class DirectDramaSettingsBottomSheet(private val prefs: SharedPreferences) : Bot
         // «dd_» محجوزة لـDeepDrama فأخذنا «ddr_»).
         const val KEY_EPISODE_ORDER = "ddr_episode_order"     // "as_is" | "desc"
         const val KEY_SHOW_SUBTITLES = "ddr_show_subtitles"   // Boolean — الافتراضي true
+        const val KEY_SHOW_HOME = "ddr_show_home"             // Boolean — الواجهة الرئيسية كلها
+        const val KEY_HOME_ROWS = "ddr_home_rows"             // "all" | "10" | "18" — عدد صفوف المنصات
 
         fun show(fm: FragmentManager, prefs: SharedPreferences) {
             DirectDramaSettingsBottomSheet(prefs).show(fm, "ddr_settings")
@@ -83,6 +85,38 @@ class DirectDramaSettingsBottomSheet(private val prefs: SharedPreferences) : Bot
             preferenceManager.setSharedPreferencesName(PREFS_NAME)
 
             preferenceScreen = preferenceManager.createPreferenceScreen(ctx)
+
+            // ── الواجهة الرئيسية ────────────────────────────────────────────
+            // صفوف المنصات الـ27 كلها صفحة HTML كاملة (~438 كيلوبايت، 3–10 ثوانٍ
+            // للخادم) والتطبيق ينتظر **كل** الصفوف قبل رسم الصفحة الأولى، فعدد
+            // الصفوف هنا هو مفتاح سرعة الواجهة مباشرة.
+            val homeCategory = PreferenceCategory(ctx)
+            homeCategory.title = "الواجهة الرئيسية"
+            preferenceScreen.addPreference(homeCategory)
+
+            // إظهار/إخفاء الصفحة الرئيسية كاملة — يقرأها `hasMainPage` ديناميكياً.
+            val showHomePref = SwitchPreferenceCompat(ctx).apply {
+                key = KEY_SHOW_HOME
+                title = "إظهار الواجهة الرئيسية"
+                summary = "إيقافها يُخفي كل صفوف المنصات من مصدر CloudStream"
+                setDefaultValue(true)
+            }
+            homeCategory.addPreference(showHomePref)
+
+            val homeRowsPref = ListPreference(ctx).apply {
+                key = KEY_HOME_ROWS
+                title = "عدد صفوف المنصات"
+                summary = "افتراضي: كل الصفوف (27) — تقليلها يسرّع فتح الواجهة"
+                summaryProvider = ListPreference.SimpleSummaryProvider.getInstance()
+                entryValues = arrayOf("all", "18", "10")
+                entries = arrayOf(
+                    "كل الصفوف (27)",
+                    "18 صفّاً",
+                    "10 صفوف"
+                )
+                setDefaultValue("all")
+            }
+            homeCategory.addPreference(homeRowsPref)
 
             val playbackCategory = PreferenceCategory(ctx)
             playbackCategory.title = "خيارات التشغيل"
@@ -119,6 +153,8 @@ class DirectDramaSettingsBottomSheet(private val prefs: SharedPreferences) : Bot
                     prefs.edit().apply {
                         remove(KEY_EPISODE_ORDER)
                         remove(KEY_SHOW_SUBTITLES)
+                        remove(KEY_SHOW_HOME)
+                        remove(KEY_HOME_ROWS)
                     }.apply()
                     Toast.makeText(ctx, "تمت إعادة الضبط", Toast.LENGTH_SHORT).show()
                     true

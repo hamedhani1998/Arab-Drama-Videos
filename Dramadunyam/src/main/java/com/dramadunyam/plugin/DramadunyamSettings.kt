@@ -69,6 +69,9 @@ class DramadunyamSettingsBottomSheet(private val prefs: SharedPreferences) : Bot
         const val KEY_SHOW_SUBTITLES = "dun_show_subtitles"    // Boolean — الافتراضي true
         const val KEY_SEARCH_SCOPE = "dun_search_scope"        // "ar" | "orig" | "both"
         const val KEY_SHOW_FRONT = "dun_show_front"            // Boolean — القسم الأمامي
+        const val KEY_SHOW_HOME = "dun_show_home"              // Boolean — الواجهة الرئيسية كلها
+        const val KEY_SHOW_PLATFORMS = "dun_show_platforms"    // Boolean — صفوف المنصات
+        const val KEY_HOME_ROWS = "dun_home_rows"              // "all" | "20" | "10" — عدد صفوف المنصات
 
         fun show(fm: FragmentManager, prefs: SharedPreferences) {
             DramadunyamSettingsBottomSheet(prefs).show(fm, "dun_settings")
@@ -90,6 +93,16 @@ class DramadunyamSettingsBottomSheet(private val prefs: SharedPreferences) : Bot
             frontCategory.title = "الواجهة الرئيسية"
             preferenceScreen.addPreference(frontCategory)
 
+            // ★ المفتاح الأم: إخفاء الواجهة الرئيسية كلها. `hasMainPage` خاصية
+            //   ديناميكية فيُسحَب المصدر من الصفحة الرئيسية فوراً عند الإيقاف.
+            val showHomePref = SwitchPreferenceCompat(ctx).apply {
+                key = KEY_SHOW_HOME
+                title = "إظهار الواجهة الرئيسية"
+                summary = "إيقافها يُخفي الصفحة الرئيسية للمصدر كليّاً"
+                setDefaultValue(true)
+            }
+            frontCategory.addPreference(showHomePref)
+
             // إظهار/إخفاء القسم الأمامي — صفّا «الأحدث» و«الأكثر مشاهدة» فوق
             // صفوف المنصات. الافتراضي مفعّل؛ إلغاؤه يُسقط الصفّين عند الرسم
             // لأن `mainPage` خاصية ديناميكية تقرأ هذا المفتاح في كل رسم.
@@ -100,6 +113,33 @@ class DramadunyamSettingsBottomSheet(private val prefs: SharedPreferences) : Bot
                 setDefaultValue(true)
             }
             frontCategory.addPreference(showFrontPref)
+
+            // صفوف المنصات (43 طلباً موزّعة على بوابة تزامن) — إخفاؤها يترك
+            // الواجهة قسمين خفيفين فقط (API واحد لكلٍّ منهما).
+            val showPlatformsPref = SwitchPreferenceCompat(ctx).apply {
+                key = KEY_SHOW_PLATFORMS
+                title = "إظهار قوائم المنصات"
+                summary = "43 صفّاً لكل منصة — إيقافها يُخفّف الواجهة كثيراً"
+                setDefaultValue(true)
+            }
+            frontCategory.addPreference(showPlatformsPref)
+
+            // عدد صفوف المنصات المعروضة — كل صف صفحة طلبٍ، فتقليل العدد
+            // يقصّ زمن فتح الواجهة الرئيسية مباشرة.
+            val homeRowsPref = ListPreference(ctx).apply {
+                key = KEY_HOME_ROWS
+                title = "عدد صفوف المنصات"
+                summary = "افتراضي: كل الصفوف (43)"
+                summaryProvider = ListPreference.SimpleSummaryProvider.getInstance()
+                entryValues = arrayOf("all", "20", "10")
+                entries = arrayOf(
+                    "كل الصفوف (43)",
+                    "20 صفّاً",
+                    "10 صفوف"
+                )
+                setDefaultValue("all")
+            }
+            frontCategory.addPreference(homeRowsPref)
 
             val playbackCategory = PreferenceCategory(ctx)
             playbackCategory.title = "خيارات التشغيل"
@@ -160,6 +200,9 @@ class DramadunyamSettingsBottomSheet(private val prefs: SharedPreferences) : Bot
                         remove(KEY_SHOW_SUBTITLES)
                         remove(KEY_SEARCH_SCOPE)
                         remove(KEY_SHOW_FRONT)
+                        remove(KEY_SHOW_HOME)
+                        remove(KEY_SHOW_PLATFORMS)
+                        remove(KEY_HOME_ROWS)
                     }.apply()
                     Toast.makeText(ctx, "تمت إعادة الضبط", Toast.LENGTH_SHORT).show()
                     true

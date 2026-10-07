@@ -9,6 +9,11 @@ import com.fasterxml.jackson.databind.ObjectMapper
 import com.fasterxml.jackson.module.kotlin.registerKotlinModule
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.sync.withPermit
 import java.net.URLDecoder
 import java.util.TreeMap
 
@@ -98,7 +103,11 @@ class DramadunyamProvider(private val prefs: SharedPreferences? = null) : MainAP
     override var name = "Dramadunyam"
     override var mainUrl = "https://dramadunyam.com"
     override var lang = "ar"
-    override val hasMainPage = true
+
+    // ★ المفتاح الأم: `hasMainPage` ديناميكي فيُسحَب المصدر من الصفحة الرئيسية
+    //   كليّاً فور إطفاء «إظهار الواجهة الرئيسية» في ورقة الإعدادات.
+    override val hasMainPage: Boolean
+        get() = showHome()
     override val supportedTypes = setOf(TvType.TvSeries)
 
     // ★ قسم الواجهة الأمامية — صفّان فوق صفوف المنصات: «الأحدث» و«الأكثر
@@ -117,7 +126,13 @@ class DramadunyamProvider(private val prefs: SharedPreferences? = null) : MainAP
                     MainPageData("الأكثر مشاهدة", DUN_FRONT_TOP)
                 )
             } else emptyList()
-            return accent + mainPagePlatforms.map { (k, v) -> MainPageData(v, k) }
+            // صفوف المنصات اختيارية (إعداد «إظهار قوائم المنصات»).
+            if (!showPlatforms()) return accent
+            val rows = mainPagePlatforms.map { (k, v) -> MainPageData(v, k) }
+            // حدّ عدد الصفوف: كل صف طلب API، فتقليله يقصّ زمن فتح الواجهة.
+            val raw = prefs?.getString(DramadunyamSettingsBottomSheet.KEY_HOME_ROWS, "all") ?: "all"
+            val n = raw.toIntOrNull()
+            return if (n != null && n in 1 until rows.size) rows.take(n) else rows
         }
     private val mainPagePlatforms: List<Pair<String, String>> = listOf(
         "NetShort" to "مسلسلات NetShort",
@@ -177,6 +192,30 @@ class DramadunyamProvider(private val prefs: SharedPreferences? = null) : MainAP
     private fun showFront(): Boolean =
         prefs?.getBoolean(DramadunyamSettingsBottomSheet.KEY_SHOW_FRONT, true) != false
 
+    private fun showHome(): Boolean =
+        prefs?.getBoolean(DramadunyamSettingsBottomSheet.KEY_SHOW_HOME, true) != false
+
+    private fun showPlatforms(): Boolean =
+        prefs?.getBoolean(DramadunyamSettingsBottomSheet.KEY_SHOW_PLATFORMS, true) != false
+
+    // ── بوابة التزامن على API ────────────────────────────────────────────────
+    //
+    // قياس حيّ 2026-10-07: 43 طلباً متزامناً (شكل الصفحة الرئيسية كما يرسلها
+    // التطبيق فعلاً) تحصل منها **42 على 403** Turnstile خلال 4.3 ثوانٍ — هذا
+    // هو أصل «أخطاء كل المنصات». أمّا موجات من 4 طلبات بفاصل 0.5 ثانية بعد
+    // اكتمال كل موجة فنجحت 43/43 في 11.4 ثانية. فالبوابة هنا تُحاكي الموجة
+    // الآمنة: أربع رخص، وتأخير نصف ثانية داخل الرخصة قبل كل طلب، فأول أربع
+    // تنطلق معاً وأمّا التالية فبعد ربع يستقرّ — لا يبقى سقف تزامن 4 ولا معدل
+    // يقفز فوق ~4 طلبات/ثانية.
+    private val apiGate = Semaphore(4)
+
+    /** يمرّر [block] عبر البوابة (أربع جلسات كحدّ أقصى + نصف ثانية تمهيد). */
+    private suspend fun <T> gated(block: suspend () -> T): T =
+        apiGate.withPermit {
+            delay(500)
+            block()
+        }
+
     // ── التذكرة `dd_bilet` ───────────────────────────────────────────────────
     //
     // الموقع يرفض كل `/api/*` و`/play/*` بلا هذه التذكرة (412 `{"error":"bilet"}`).
@@ -188,27 +227,35 @@ class DramadunyamProvider(private val prefs: SharedPreferences? = null) : MainAP
     // الخادم لطلبٍ عادٍ. صلاحيتها 12 ساعة؛ وعند 412 نُعيد التسخين مرةً واحدة.
     private var cachedTicket: String? = null
 
+    // ★ تسخين أحادي: الصفوف تُطلَق متزامنة، ولو دخل 40 طلباً `warmTicket` معاً
+    //   لأُنزلت 40 طلباً على `/api/config` دفعة واحدة وهي أول ما يثير Turnstile.
+    //   القفل يجعل الأول يسخّن والبقية تنتظره ثم تقرأ النتيجة من الذاكرة.
+    private val ticketLock = Mutex()
+
     private suspend fun warmTicket(): String? {
         cachedTicket?.takeIf { it.isNotBlank() }?.let { return it }
-        val t = try {
-            // المصدر المقيس للتذكرة اليوم. `/ar/` احتياطٌ لأيامٍ سابقة كان يسقطها.
-            val rConfig = app.get("$mainUrl/api/config", referer = mainUrl)
-            val c1 = rConfig.cookies["dd_bilet"]?.takeIf { it.isNotBlank() }
-            if (c1 != null) {
-                c1
-            } else {
-                app.get("$mainUrl/ar/", referer = mainUrl).cookies["dd_bilet"]
-                    ?.takeIf { it.isNotBlank() }
+        ticketLock.withLock {
+            cachedTicket?.takeIf { it.isNotBlank() }?.let { return it }
+            val t = try {
+                // المصدر المقيس للتذكرة اليوم. `/ar/` احتياطٌ لأيامٍ سابقة كان يسقطها.
+                val rConfig = app.get("$mainUrl/api/config", referer = mainUrl)
+                val c1 = rConfig.cookies["dd_bilet"]?.takeIf { it.isNotBlank() }
+                if (c1 != null) {
+                    c1
+                } else {
+                    app.get("$mainUrl/ar/", referer = mainUrl).cookies["dd_bilet"]
+                        ?.takeIf { it.isNotBlank() }
+                }
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                Log.e(TAG, "ticket warm FAILED", e)
+                null
             }
-        } catch (e: kotlinx.coroutines.CancellationException) {
-            throw e
-        } catch (e: Exception) {
-            Log.e(TAG, "ticket warm FAILED", e)
-            null
+            cachedTicket = t
+            if (t == null) Log.e(TAG, "ticket empty — site refused dd_bilet")
+            return cachedTicket
         }
-        cachedTicket = t
-        if (t == null) Log.e(TAG, "ticket empty — site refused dd_bilet")
-        return cachedTicket
     }
 
     /** تذكرة + رؤوس اختيارية، أو null إن تعذّر التسخين. */
@@ -334,25 +381,37 @@ class DramadunyamProvider(private val prefs: SharedPreferences? = null) : MainAP
                 DUN_FRONT_LATEST, DUN_FRONT_TOP -> {
                     if (page > 1) return null
                     // فشل التحميل → null (حالة خطأ صريحة) لا صفٌّ فارغ يبدو كسراً.
-                    val rows = if (request.data == DUN_FRONT_LATEST) fetchLatestRow()
-                    else fetchTopRow()
+                    // `gated` هنا لأن صفّي الأمامي يُطلَقان مع الـ43 صفاً دفعةً واحدة.
+                    val rows = gated {
+                        if (request.data == DUN_FRONT_LATEST) fetchLatestRow()
+                        else fetchTopRow()
+                    }
                     return rows?.let { newHomePageResponse(it, false) }
                 }
             }
-            val r = getWithTicket(
-                "$mainUrl/api/series?page=$pn&limit=40&sort=yeni&platform=${request.data}&lang=ar",
-                referer = mainUrl
-            ) ?: return null
-            if (!r.isSuccessful) {
-                Log.e(TAG, "series HTTP ${r.code} page=$pn platform=${request.data}")
-                return null
+            // ★ البوابة إلزامية على كل صف: التطبيق يُطلق الصفوف متزامنة، وقياس
+            //   2026-10-07 أثبت أن 43 طلباً في لحظة واحدة تعطي 42×403 Turnstile
+            //   خلال 4.3 ثانية — وهو سبب «أخطاء كل المنصات». موجات من 4 + نصف
+            //   ثانية بينها تكمل كل الصفوف في 11.4 ثانية بلا رفض واحد.
+            gated {
+                val r = getWithTicket(
+                    "$mainUrl/api/series?page=$pn&limit=40&sort=yeni&platform=${request.data}&lang=ar",
+                    referer = mainUrl
+                ) ?: return@gated null
+                if (!r.isSuccessful) {
+                    Log.e(TAG, "series HTTP ${r.code} page=$pn platform=${request.data}")
+                    return@gated null
+                }
+                val data = mapper.readValue(r.text, DunListResponse::class.java).data.orEmpty()
+                val items = data.mapNotNull { it.toSearch() }
+                if (items.isEmpty()) {
+                    // 200 + JSON صالح + `data: []` = المنصة فارغة فعلاً على الموقع
+                    // (قِيس: Joyreels وBiliTV على IP سليم، 6 صيغ بلا فرق). صفٌّ فارغ
+                    // أمين، أمّا null فتعرض صفّ خطأ يوهم بأن الفحص فشل.
+                    Log.d(TAG, "series genuinely empty platform=${request.data}")
+                    newHomePageResponse(request.name, emptyList())
+                } else newHomePageResponse(request.name, items)
             }
-            val data = mapper.readValue(r.text, DunListResponse::class.java).data.orEmpty()
-            val items = data.mapNotNull { it.toSearch() }
-            if (items.isEmpty()) {
-                Log.e(TAG, "series empty page=$pn platform=${request.data} len=${r.text.length}")
-                null
-            } else newHomePageResponse(request.name, items)
         } catch (e: kotlinx.coroutines.CancellationException) {
             throw e // الإلغاء ليس فشل شبكة (قِيس: NartoDrama 2026-10-06)
         } catch (e: Exception) {
@@ -429,7 +488,12 @@ class DramadunyamProvider(private val prefs: SharedPreferences? = null) : MainAP
             Log.d(TAG, "load title=$title episodes=${episodes.size}")
 
             newTvSeriesLoadResponse(title, url, TvType.TvSeries, episodes) {
-                posterUrl = d.cover?.takeIf { it.isNotBlank() }?.let { abs(it) }
+                // الغلاف نفسه يغذّي الخلفية: `ResultViewModel2` يأخذ
+                // `backgroundPosterUrl ?: posterUrl`، لكن بقاء الحقل null يجعل
+                // أعلى صفحة التفاصيل بلا تمويه في بعض المسارات.
+                val coverAbs = d.cover?.takeIf { it.isNotBlank() }?.let { abs(it) }
+                posterUrl = coverAbs
+                backgroundPosterUrl = coverAbs
                 plot = d.description?.takeIf { it.isNotBlank() }
                 this.tags = tags
             }
