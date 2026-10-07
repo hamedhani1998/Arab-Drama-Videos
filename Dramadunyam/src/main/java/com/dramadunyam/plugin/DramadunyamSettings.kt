@@ -68,6 +68,7 @@ class DramadunyamSettingsBottomSheet(private val prefs: SharedPreferences) : Bot
         const val KEY_EPISODE_ORDER = "dun_episode_order"      // "as_is" | "desc"
         const val KEY_SHOW_SUBTITLES = "dun_show_subtitles"    // Boolean — الافتراضي true
         const val KEY_SEARCH_SCOPE = "dun_search_scope"        // "ar" | "orig" | "both"
+        const val KEY_SHOW_FRONT = "dun_show_front"            // Boolean — القسم الأمامي
 
         fun show(fm: FragmentManager, prefs: SharedPreferences) {
             DramadunyamSettingsBottomSheet(prefs).show(fm, "dun_settings")
@@ -84,6 +85,21 @@ class DramadunyamSettingsBottomSheet(private val prefs: SharedPreferences) : Bot
             preferenceManager.setSharedPreferencesName(PREFS_NAME)
 
             preferenceScreen = preferenceManager.createPreferenceScreen(ctx)
+
+            val frontCategory = PreferenceCategory(ctx)
+            frontCategory.title = "الواجهة الرئيسية"
+            preferenceScreen.addPreference(frontCategory)
+
+            // إظهار/إخفاء القسم الأمامي — صفّا «الأحدث» و«الأكثر مشاهدة» فوق
+            // صفوف المنصات. الافتراضي مفعّل؛ إلغاؤه يُسقط الصفّين عند الرسم
+            // لأن `mainPage` خاصية ديناميكية تقرأ هذا المفتاح في كل رسم.
+            val showFrontPref = SwitchPreferenceCompat(ctx).apply {
+                key = KEY_SHOW_FRONT
+                title = "إظهار القسم الأمامي"
+                summary = "الأحدث والأكثر مشاهدة فوق قوائم المنصات"
+                setDefaultValue(true)
+            }
+            frontCategory.addPreference(showFrontPref)
 
             val playbackCategory = PreferenceCategory(ctx)
             playbackCategory.title = "خيارات التشغيل"
@@ -143,6 +159,7 @@ class DramadunyamSettingsBottomSheet(private val prefs: SharedPreferences) : Bot
                         remove(KEY_EPISODE_ORDER)
                         remove(KEY_SHOW_SUBTITLES)
                         remove(KEY_SEARCH_SCOPE)
+                        remove(KEY_SHOW_FRONT)
                     }.apply()
                     Toast.makeText(ctx, "تمت إعادة الضبط", Toast.LENGTH_SHORT).show()
                     true

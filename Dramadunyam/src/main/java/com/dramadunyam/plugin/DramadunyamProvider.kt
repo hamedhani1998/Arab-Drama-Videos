@@ -30,6 +30,9 @@ private data class DunItem(
 
 private data class DunListResponse(val data: List<DunItem>? = null)
 
+/** استجابة أقسام الواجهة الأمامية: `/api/yeni-eklenenler` و`/api/siralama`. */
+private data class DunFeedResponse(val items: List<DunItem>? = null)
+
 /** استجابة `/api/series/{slug}` — تفاصيل مسلسل واحد. */
 private data class DunTag(val slug: String? = null, val name: String? = null)
 
@@ -57,6 +60,13 @@ private data class PlayResponse(
     @JsonProperty("expires_at") val expiresAt: String? = null,
     val altyazilar: List<DunSubtitle>? = null,
 )
+
+// ★ إشارات صفوف القسم الأمامي — محمولة في `MainPageData.data` لصفّي
+//   «الأحدث» و«الأكثر مشاهدة»؛ يقرؤها `getMainPage` ويميّزها عن مفاتيح
+//   المنصات (التي تشبه أسماءً حقيقية كـ"NetShort"). علامة "dun-" لا يصدرها
+//   الموقعُ في `platform` إطلاقاً، فالتزامن معها آمن.
+private const val DUN_FRONT_LATEST = "dun-front-latest"
+private const val DUN_FRONT_TOP = "dun-front-top"
 
 // أسماء لغاتٍ يرسلها الموقع بحروفٍ محلّيةّ لا تعرفها مكتبة التطبيق ولا رمز ISO
 // يُشتقّ منها (قِيس على cloudstream.jar: `getLangTag()` يرجع لها null في المسارين
@@ -91,9 +101,22 @@ class DramadunyamProvider(private val prefs: SharedPreferences? = null) : MainAP
     override val hasMainPage = true
     override val supportedTypes = setOf(TvType.TvSeries)
 
-    // ★ كل منصّات الموقع (43) صفّاً في الصفحة الرئيسية — الأسماء التي يعتمدها
-    //   الموقع في مسار `platform` لاستعلام `/api/series`.
-    override val mainPage = mainPageOf(
+    // ★ قسم الواجهة الأمامية — صفّان فوق صفوف المنصات: «الأحدث» و«الأكثر
+    //   مشاهدة». كلاهما يعرض كل منصات الموقع معاً (يوفّرهما الموقع نفسُه عبر
+    //   `/api/yeni-eklenenler` و`/api/siralama`). مكوّن (خاصيتان ديناميكيتان:
+    //   `mainPage` تُقرأ عند رسم الواجهة، والواجهة تطلب الأقسام عند أول صفحة)،
+    //   فتضاف/تُسحَب صفوف القسم الأمامي فوراً حسب إعداد «إظهار القسم الأمامي».
+    override val mainPage: List<MainPageData>
+        get() {
+            val accent = if (showFront()) {
+                listOf(
+                    MainPageData("الأحدث", DUN_FRONT_LATEST, true),
+                    MainPageData("الأكثر مشاهدة", DUN_FRONT_TOP, true)
+                )
+            } else emptyList()
+            return accent + mainPagePlatforms.map { (k, v) -> MainPageData(v, k, true) }
+        }
+    private val mainPagePlatforms: List<Pair<String, String>> = listOf(
         "NetShort" to "مسلسلات NetShort",
         "DramaWave" to "مسلسلات DramaWave",
         "DramaBox" to "مسلسلات DramaBox",
@@ -147,6 +170,9 @@ class DramadunyamProvider(private val prefs: SharedPreferences? = null) : MainAP
 
     private fun searchScope(): String =
         prefs?.getString(DramadunyamSettingsBottomSheet.KEY_SEARCH_SCOPE, "ar") ?: "ar"
+
+    private fun showFront(): Boolean =
+        prefs?.getBoolean(DramadunyamSettingsBottomSheet.KEY_SHOW_FRONT, true) != false
 
     // ── التذكرة `dd_bilet` ───────────────────────────────────────────────────
     //
@@ -245,14 +271,71 @@ class DramadunyamProvider(private val prefs: SharedPreferences? = null) : MainAP
         val s = slug?.takeIf { it.isNotBlank() } ?: return null
         return newTvSeriesSearchResponse(t, "$mainUrl/ar/series/$s", TvType.TvSeries) {
             posterUrl = cover?.takeIf { it.isNotBlank() }?.let { abs(it) }
-            episodes = availableEpisodes?.takeIf { it > 0 }
-                ?: totalEpisodes?.takeIf { it > 0 }
+            if (availableEpisodes != null) episodes = availableEpisodes
+            else totalEpisodes?.takeIf { it > 0 }?.let { episodes = it }
+        }
+    }
+
+    /** «الأحدث» — قسم الواجهة الأمامية. الموقع يسمّيه «أضيف حديثًا». */
+    private suspend fun fetchLatestRow(): List<HomePageList>? {
+        val r = getWithTicket(
+            "$mainUrl/api/yeni-eklenenler?sayfa=1&adet=40&lang=ar",
+            referer = mainUrl
+        ) ?: return null
+        if (!r.isSuccessful) {
+            Log.e(TAG, "yeni-eklenenler HTTP ${r.code}")
+            return null
+        }
+        return try {
+            mapper.readValue(r.text, DunFeedResponse::class.java).items.orEmpty()
+                .mapNotNull { it.toSearch() }
+                .takeIf { it.isNotEmpty() }
+                ?.let { listOf(HomePageList("الأحدث", it, true)) }
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            Log.e(TAG, "yeni-eklenenler parse FAILED", e)
+            null
+        }
+    }
+
+    /** «الأكثر مشاهدة» — قسم واجهة بتصنيف (sıralama). أسبوعي، مرتبط باللغة. */
+    private suspend fun fetchTopRow(): List<HomePageList>? {
+        val r = getWithTicket(
+            "$mainUrl/api/siralama?donem=hafta&lang=ar",
+            referer = mainUrl
+        ) ?: return null
+        if (!r.isSuccessful) {
+            Log.e(TAG, "siralama HTTP ${r.code}")
+            return null
+        }
+        return try {
+            mapper.readValue(r.text, DunFeedResponse::class.java).items.orEmpty()
+                .mapNotNull { it.toSearch() }
+                .takeIf { it.isNotEmpty() }
+                ?.let { listOf(HomePageList("الأكثر مشاهدة", it, true)) }
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            Log.e(TAG, "siralama parse FAILED", e)
+            null
         }
     }
 
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse? {
         return try {
             val pn = if (page <= 1) 1 else page
+            when (request.data) {
+                // صفّا القسم الأمامي — «الأحدث» و«الأكثر مشاهدة». طلبهما عند الصفحة 1
+                // فقط، والصفحة الأولى هي التي تعرضهما (لا ترقيم لهما).
+                DUN_FRONT_LATEST, DUN_FRONT_TOP -> {
+                    if (page > 1) return null
+                    // فشل التحميل → null (حالة خطأ صريحة) لا صفٌّ فارغ يبدو كسراً.
+                    val rows = if (request.data == DUN_FRONT_LATEST) fetchLatestRow()
+                    else fetchTopRow()
+                    return rows?.let { newHomePageResponse(it, false) }
+                }
+            }
             val r = getWithTicket(
                 "$mainUrl/api/series?page=$pn&limit=40&sort=yeni&platform=${request.data}&lang=ar",
                 referer = mainUrl
