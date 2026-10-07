@@ -151,22 +151,34 @@ class DramadunyamProvider(private val prefs: SharedPreferences? = null) : MainAP
     // ── التذكرة `dd_bilet` ───────────────────────────────────────────────────
     //
     // الموقع يرفض كل `/api/*` و`/play/*` بلا هذه التذكرة (412 `{"error":"bilet"}`).
-    // `app` بلا cookie jar (مقيس على MainActivityKt) فلا تُحفظ تلقائياً؛ نأخذها
-    // من `Set-Cookie` صفحة `/ar/` ونمرّرها في كل طلب صراحةً. صلاحيتها 12 ساعة؛
-    // وعند 412 نُعيد التسخين مرةً واحدة ثم نُعيد الطلب.
+    // `app` بلا cookie jar (مقيس على MainActivityKt) فلا تُحفظ تلقائياً. تذكرة
+    // اليوم تُسقَط في **`Set-Cookie` لنقطة `/api/config`** (قيس 2026-10-07):
+    // صفحة `/ar/` تعود 200 بلا أي dd_bilet في الرؤوس، فلا جدوى من تسخينها.
+    // `/api/config` يردّ أيضاً `{"turnstile":{"aktif":true,"zorunlu":false}}`
+    // — التذكرة محمية بـTurnstile لكنه غير إلزامي (zorunlu=false)، فيُصدرها
+    // الخادم لطلبٍ عادٍ. صلاحيتها 12 ساعة؛ وعند 412 نُعيد التسخين مرةً واحدة.
     private var cachedTicket: String? = null
 
     private suspend fun warmTicket(): String? {
         cachedTicket?.takeIf { it.isNotBlank() }?.let { return it }
         val t = try {
-            app.get("$mainUrl/ar/", referer = mainUrl).cookies["dd_bilet"]
+            // المصدر المقيس للتذكرة اليوم. `/ar/` احتياطٌ لأيامٍ سابقة كان يسقطها.
+            val rConfig = app.get("$mainUrl/api/config", referer = mainUrl)
+            val c1 = rConfig.cookies["dd_bilet"]?.takeIf { it.isNotBlank() }
+            if (c1 != null) {
+                c1
+            } else {
+                app.get("$mainUrl/ar/", referer = mainUrl).cookies["dd_bilet"]
+                    ?.takeIf { it.isNotBlank() }
+            }
         } catch (e: kotlinx.coroutines.CancellationException) {
             throw e
         } catch (e: Exception) {
             Log.e(TAG, "ticket warm FAILED", e)
             null
         }
-        cachedTicket = t?.takeIf { it.isNotBlank() }
+        cachedTicket = t
+        if (t == null) Log.e(TAG, "ticket empty — site refused dd_bilet")
         return cachedTicket
     }
 
@@ -193,10 +205,14 @@ class DramadunyamProvider(private val prefs: SharedPreferences? = null) : MainAP
         referer: String? = null,
         extra: Map<String, String> = emptyMap()
     ): com.lagradost.nicehttp.NiceResponse? {
-        warmTicket() ?: return null
+        warmTicket() ?: run {
+            Log.e(TAG, "getWithTicket no ticket $url")
+            return null
+        }
         val h1 = authHeaders(extra) ?: return null
         var r = app.get(url, referer = referer ?: mainUrl, headers = h1)
         if (needsRewarm(r)) {
+            Log.d(TAG, "re-warm after ${r.code} $url")
             cachedTicket = null
             warmTicket() ?: return null
             val h2 = authHeaders(extra) ?: return null
@@ -247,7 +263,10 @@ class DramadunyamProvider(private val prefs: SharedPreferences? = null) : MainAP
             }
             val data = mapper.readValue(r.text, DunListResponse::class.java).data.orEmpty()
             val items = data.mapNotNull { it.toSearch() }
-            if (items.isEmpty()) null else newHomePageResponse(request.name, items)
+            if (items.isEmpty()) {
+                Log.e(TAG, "series empty page=$pn platform=${request.data} len=${r.text.length}")
+                null
+            } else newHomePageResponse(request.name, items)
         } catch (e: kotlinx.coroutines.CancellationException) {
             throw e // الإلغاء ليس فشل شبكة (قِيس: NartoDrama 2026-10-06)
         } catch (e: Exception) {
