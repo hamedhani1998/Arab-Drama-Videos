@@ -42,6 +42,12 @@ private fun encPath(s: String): String = URLEncoder.encode(s, "UTF-8").replace("
  *     ★ التمييز يكون **بالمحتوى لا بشكل الرابط**: شرطٌ زمنيّ وحده كان يُسقط
  *       الشكل الجرِيذي فتعود صفحة التفاصيل فارغة بلا رسالة.
  *
+ *  ★ ثلاثة أزرار، ومعالجتان: رامبل **بلا مستخرِج مدمج في CloudStream إطلاقاً**
+ *    (قِيس على `cloudstream.jar` — لا صنف يطابق `rumble`)، فتُقرأ صفحته
+ *    ويُبنى رابطه وترجمته العربية يدوياً؛ وvoe وvidaraa بمستخرِجات مدمجة
+ *    تُمرَّر مع إعادة تسمية تُظهر الدقة والصيغة، لأنّ المشغّل لا يعرض سوى
+ *    `ExtractorLink.name` وهو الحقل الوحيد الذي يبلغ المستخدم نوع الجودة.
+ *
  *  ★ الرئيسية تعرض 20 بطاقة `xr-card` **كلها من العائلة الثانية** (قِيس)،
  *    والبحث `/?s=` يعرض `xr-card` كذلك. أما `/المسلسلات/` فتعرض 24 بطاقة
  *    `series-card` من العائلة الأولى. لذلك يجب دعم الاثنتين وإلا ظهرت
@@ -413,8 +419,15 @@ class DeepDramaProvider(private val prefs: SharedPreferences?) : MainAPI() {
     }
 
     /**
-     * روابط صفحة مقال: أزرار `xr-server-btn data-src` (رامبل / voe.sx / vidaraa)
-     * تُمرَّر إلى مستخرِجات CloudStream المدمجة. قِيس أنها كلها تردّ 200.
+     * روابط صفحة مقال: أزرار `xr-server-btn data-src` — رامبل / voe.sx / vidaraa.
+     *
+     * ★ ترتيب الأزرار هو ترتيب الموقع، والمشغّل يشغّل الرابط الأول كما يفعل
+     *   الموقع نفسه، فلا يُقلَب الترتيب بين السيرفرات.
+     *
+     * ★ ولماذا التسمية على عاتقنا: المشغّل لا يعرض سوى `ExtractorLink.name`،
+     *   واسم المستخرِج المدمج لا يقول شيئاً عن الجودة. فنُعيد بناء كل رابط
+     *   باسمٍ يحمل اسم السيرفر ثم الدقة ثم وسم الصيغة، تاركين `url`
+     *   و`referer` و`headers` و`quality` و`type` كما هي تماماً.
      */
     private suspend fun loadPostLinks(
         postUrl: String,
@@ -435,11 +448,248 @@ class DeepDramaProvider(private val prefs: SharedPreferences?) : MainAPI() {
         var ok = false
         for (s in servers.distinct()) {
             val hit = try {
-                loadExtractor(s, postUrl, subtitleCallback, callback)
+                if (hostIs(s, "rumble.com")) resolveRumble(s, subtitleCallback, callback)
+                else labelledExtractor(s, postUrl, subtitleCallback, callback)
             } catch (e: Exception) { false }
             if (hit) ok = true
         }
         return ok
+    }
+
+    /** مضيف الرابط بأحرف صغيرة، وسلسلة فارغة إن تعذّر تحليله. */
+    private fun hostOf(u: String): String = try {
+        java.net.URI(u).host?.lowercase() ?: ""
+    } catch (e: Exception) { "" }
+
+    /**
+     * مطابقة بلاحقة المضيف الكاملة: `notrumble.com` لا يُعدّ `rumble.com`،
+     * وهذا هو الفرق بين استضافةٍ صدفةٍ ومُستضِفٍ حقيقي.
+     */
+    private fun hostIs(u: String, domain: String): Boolean {
+        val h = hostOf(u)
+        return h == domain || h.endsWith(".$domain")
+    }
+
+    /** اسم السيرفر في صفحة المقال — من المضيف لا من نصّ الزرّ («Server 1»). */
+    private fun postServerLabel(src: String): String = when {
+        hostIs(src, "rumble.com") -> "رامبل Rumble"
+        hostIs(src, "voe.sx") -> "فو VOE"
+        hostIs(src, "vidaraa.cc") -> "فيدارا Vidaraa"
+        else -> hostOf(src).removePrefix("www.").ifBlank { "خادم" }
+    }
+
+    /**
+     * العقدة JSON المعلَّقة بـ`"<key>":` — تُقرأ **بموازنة الأقواس** لا
+     * بنمطٍ كسول، فالقيم تحتوي أقواساً داخلية يبتلعها `.*`، والأقواس داخل
+     * السلاسل النصّية لا تُعدّ (درسٌ مقيس في مصادر أخرى من هذا المخزن).
+     */
+    private fun nodeText(scope: String, key: String): String? {
+        val m = Regex("\"" + Regex.escape(key) + "\"\\s*:\\s*\\{").find(scope) ?: return null
+        val open = scope.indexOf('{', m.range.first)
+        if (open < 0) return null
+        var depth = 0
+        var inStr = false
+        var esc = false
+        for (i in open until scope.length) {
+            val c = scope[i]
+            if (inStr) when {
+                esc -> esc = false
+                c == '\\' -> esc = true
+                c == '"' -> inStr = false
+                else -> {}
+            }
+            else when (c) {
+                '"' -> inStr = true
+                '{' -> depth++
+                '}' -> { depth--; if (depth == 0) return scope.substring(open, i + 1) }
+                else -> {}
+            }
+        }
+        return null
+    }
+
+    /**
+     * الدقة المعلَّنة في قائمة الأم — طلبٌ واحد صغير لا يُحسّ في سرعة
+     * البدء (قِيس: قائمة vidaraa مئةٌ و٧٤ بايتاً). وكلّ عطلٍ يُبتلع: الوسم
+     * زيادةٌ على الاسم، وغيابه لا يُسقط الرابط ولا يؤخّره.
+     *
+     * لا تُطلب إلا من رابط `.m3u8` فعلاً؛ أما ملفّ mp4 فلا دقة تُقرأ منه
+     * بطلبٍ واحد، فتُترك التسمية بلا دقة بدل تخمينٍ كاذب.
+     */
+    private suspend fun masterInfo(url: String): Pair<String, Int>? {
+        if (!url.contains(".m3u8", true)) return null
+        val text = try {
+            app.get(url, headers = headers(), timeout = 6000L).text
+        } catch (e: Exception) { return null }
+        val hits = Regex("""RESOLUTION=(\d+)x(\d+)""", RegexOption.IGNORE_CASE)
+            .findAll(text).toList()
+        if (hits.isEmpty()) return null
+        val label = hits.map { it.groupValues[1] + "x" + it.groupValues[2] }
+            .distinct().take(3).joinToString("/")
+        val maxH = hits.maxOf { it.groupValues[2].toIntOrNull() ?: 0 }
+        return label to maxH
+    }
+
+    /**
+     * مستخرِجٌ مدمج (voe / vidaraa) مع إعادة تسمية ما يُخرجه.
+     *
+     * تُجمع النتائج أولاً لا تُمرَّر مباشرة: فلا يُعاد البناء إلا بعد نجاح
+     * المستخرِج فعلاً، ولا يُكرَّر رابطٌ يعيده مرّتين، ولغة الترجمة تمرّ
+     * على `subLangLabel` لأنّ المستخرِج قد يرسل «Arabic» لا رمزاً ISO
+     * فيقع وسمٌ فارغ ولا يُحفظ اختيار المستخدم بين الحلقات.
+     */
+    private suspend fun labelledExtractor(
+        src: String,
+        postUrl: String,
+        subtitleCallback: (SubtitleFile) -> Unit,
+        callback: (ExtractorLink) -> Unit
+    ): Boolean {
+        val label = postServerLabel(src)
+        val links = ArrayList<ExtractorLink>()
+        val subs = ArrayList<SubtitleFile>()
+        val hit = try {
+            loadExtractor(src, postUrl, { subs.add(it) }) { links.add(it) }
+        } catch (e: Exception) { false }
+        if (!hit) return false
+
+        val hdr = headers()
+        val seen = HashSet<String>()
+        var emitted = 0
+        for (l in links) {
+            if (!seen.add(l.url)) continue
+            val info = masterInfo(l.url)
+            val title = if (info == null) label else "$label · ${info.first}"
+            val qv = if (l.quality != Qualities.Unknown.value) l.quality
+            else info?.second?.takeIf { it > 0 }?.let { getQualityFromName(it.toString() + "p") }
+                ?: l.quality
+            callback(newExtractorLink(
+                source = name,
+                name = FormatTag.tagged(title, l.url, l.type),
+                url = l.url,
+                type = l.type
+            ) {
+                this.quality = qv
+                this.referer = l.referer
+                this.headers = l.headers.ifEmpty { hdr }
+                this.extractorData = l.extractorData
+                this.audioTracks = l.audioTracks
+            })
+            emitted++
+        }
+
+        for (sf in subs) {
+            try {
+                subtitleCallback(newSubtitleFile(subLangLabel(sf.lang), sf.url) {
+                    this.headers = sf.headers
+                })
+            } catch (e: Exception) { }
+        }
+        return emitted > 0
+    }
+
+    /**
+     * رامبل — لا مستخرِج مدمج له، فتُقرأ بيانات صفحة التضمين نفسها.
+     *
+     * قِيس (2026-10-08) على `embed/v7dsibs`: العقدة `m.f["<id>"]` تحمل
+     * `ua` (وربما `u`) وفيها `hls.auto.url` قائمة الأم، و`tar` جوداتٌ
+     * مفردةٌ مفتاحُها `240/360/480/720` و`meta` يحمل الدقة الحقيقية،
+     * و`cc` ترجماتٌ منها العربية. كلّها رُجِّحت **حيّةً** بطلبٍ يطابق شكل
+     * المشغّل لا بطلبٍ اعتباطيّ:
+     *   القائمة الأم 200 بـ`application/vnd.apple.mpegurl` وأربعة `RESOLUTION`؛
+     *   وكلّ جرعة `tar` 200 و206 بجسم MPEG-TS؛ والترجمة 200 بـ`WEBVTT`.
+     *
+     * لماذا نُخرج الجودات المفردة أيضاً: المستخدم يطلب صراحةً معرفة أنّ
+     * الجودة 720 أو 480 أو 240، وقائمة الأم وحدها تُخفيها خلف «تلقائي».
+     */
+    private suspend fun resolveRumble(
+        embedUrl: String,
+        subtitleCallback: (SubtitleFile) -> Unit,
+        callback: (ExtractorLink) -> Unit
+    ): Boolean {
+        val html = try {
+            app.get(embedUrl, headers = headers()).text
+        } catch (e: Exception) { return false }
+
+        // نبدأ من `m.f[` كي لا يطابق `"u":{` شيءٌ آخر في الصفحة.
+        val anchor = html.indexOf("m.f[")
+        val scope = if (anchor >= 0) html.substring(anchor) else html
+        val uaText = nodeText(scope, "ua") ?: nodeText(scope, "u") ?: return false
+        val ua = try { mapper.readTree(uaText) } catch (e: Exception) { null } ?: return false
+        if (!ua.isObject) return false
+
+        val label = postServerLabel(embedUrl)
+        val hdr = headers()
+
+        val hls = ua.get("hls")
+        val master = hls?.get("auto")?.get("url")?.asText()
+            ?: hls?.get("url")?.asText()
+        if (!master.isNullOrBlank() && !master.contains(".m3u8", true)) return false
+
+        // (المفتاح ← الرابط). مفاتيح رامبل هي تسمياتها نفسها: 240/360/480/720.
+        val rends = ArrayList<Triple<Int, String, String>>()
+        val tar = ua.get("tar")
+        if (tar != null && tar.isObject) {
+            val names = tar.fieldNames()
+            while (names.hasNext()) {
+                val k = names.next()
+                val node = tar.get(k)
+                val u = node?.get("url")?.asText()?.takeIf { it.isNotBlank() } ?: continue
+                val h = node.get("meta")?.get("h")?.asInt() ?: 0
+                rends.add(Triple(k.toIntOrNull() ?: h, k, u))
+            }
+        }
+
+        val collected = ArrayList<ExtractorLink>()
+        val top = rends.maxOfOrNull { it.first } ?: 0
+
+        if (!master.isNullOrBlank()) {
+            collected.add(newExtractorLink(
+                source = name,
+                name = FormatTag.tagged("$label · تلقائي", master, ExtractorLinkType.M3U8),
+                url = master,
+                type = ExtractorLinkType.M3U8
+            ) {
+                this.quality = if (top > 0) getQualityFromName(top.toString() + "p")
+                else Qualities.Unknown.value
+                this.headers = hdr
+            })
+        }
+        for ((sortKey, key, u) in rends.sortedByDescending { it.first }) {
+            collected.add(newExtractorLink(
+                source = name,
+                name = FormatTag.tagged("$label · ${key}p", u, ExtractorLinkType.M3U8),
+                url = u,
+                type = ExtractorLinkType.M3U8
+            ) {
+                this.quality = getQualityFromName(key + "p")
+                this.headers = hdr
+            })
+        }
+        if (collected.isEmpty()) return false
+        ordered(collected).forEach { callback(it) }
+
+        // `cc` — ترجمات صفحة التضمين، منها العربية: مسار VTT مطلق.
+        val ccText = nodeText(scope, "cc")
+        if (ccText != null) {
+            try {
+                val cc = mapper.readTree(ccText)
+                if (cc.isObject) {
+                    val arr = mapper.createArrayNode()
+                    val langs = cc.fieldNames()
+                    while (langs.hasNext()) {
+                        val lang = langs.next()
+                        val p = cc.get(lang)?.get("path")?.asText()?.takeIf { it.isNotBlank() }
+                            ?: continue
+                        val o = mapper.createObjectNode()
+                        o.put("language", lang)
+                        o.put("url", p)
+                        arr.add(o)
+                    }
+                    emitSubtitles(arr, subtitleCallback)
+                }
+            } catch (e: Exception) { }
+        }
+        return true
     }
 
     private suspend fun emitSubtitles(subs: JsonNode?, subtitleCallback: (SubtitleFile) -> Unit) {
