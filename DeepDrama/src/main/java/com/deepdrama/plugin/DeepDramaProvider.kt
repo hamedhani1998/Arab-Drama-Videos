@@ -30,12 +30,17 @@ private fun encPath(s: String): String = URLEncoder.encode(s, "UTF-8").replace("
  *     والروابط من `wp-json/deep-drama/v1/episode/{id}/{number}`.
  *     هذه هي التي تصلح لها «حلقة» و«خادم».
  *
- *  ٢) عائلة «المقالات» (`post`) — الصفحة `/2026/10/<slug>.html`:
- *     لا `data-id` فيها إطلاقاً (قِيس: صفر)، ولذلك **لا** تصلح معها واجهة
+ *  ٢) عائلة «المقالات» (`post`) — **شكلان للرابط** لصفحة واحدة وقاعدة واحدة:
+ *     `/2026/10/<slug>.html` (تاريخية) و`/<عربي>-<12hex>/` (جذرية، وهي التي
+ *     أبلغ عنها المستخدم: `قفص-الأكاذيب-الناعم-489202ca647677b3`). كلاهما
+ *     يحمل `xr-post-container` + `xr-server-btn` و`xr-card` ويخلو من `dd_series`
+ *     (قِيس: `data-id` صفر فيهما معاً) — ولذلك **لا** تصلح معها واجهة
  *     `playlist`/`episode` (قِيس: `playlist/13612` ⇒ 404). الروابط فيها
  *     مخزَّنة كأزرارٍ مباشرة: `<button class="xr-server-btn" data-src="…">`
  *     وتشير إلى مضيفات جاهزة (رامبل / voe.sx / vidaraa) — «سيرفرات خاصة»
  *     كما وصفها المستخدم. فيديو واحد لكل صفحة ⇒ فيلم لا مسلسل.
+ *     ★ التمييز يكون **بالمحتوى لا بشكل الرابط**: شرطٌ زمنيّ وحده كان يُسقط
+ *       الشكل الجرِيذي فتعود صفحة التفاصيل فارغة بلا رسالة.
  *
  *  ★ الرئيسية تعرض 20 بطاقة `xr-card` **كلها من العائلة الثانية** (قِيس)،
  *    والبحث `/?s=` يعرض `xr-card` كذلك. أما `/المسلسلات/` فتعرض 24 بطاقة
@@ -100,9 +105,39 @@ class DeepDramaProvider(private val prefs: SharedPreferences?) : MainAPI() {
 
     private fun stripTags(s: String): String = s.replace(Regex("<[^>]*>"), "").trim()
 
-    /** صفحات المقالات: `/2026/10/xxx.html` (وقِيس أن `data-id` فيها صفر). */
-    private fun isPostUrl(u: String): Boolean =
-        Regex("""/20\d\d/\d\d/[^/]+\.html""").containsMatchIn(u)
+    /** الشكل التاريخي فقط — بقي شرطَ احتياطٍ في [isPostPage] لا حكماً وحده. */
+    private val datePostRe = Regex("""/20\d\d/\d\d/[^/]+\.html""")
+
+    /** فكّ ترميز الـURL كي تُقارَن العربية بعربية الصفحة لا بـ`%d8%a3`. */
+    private fun decodedUrl(u: String): String = try {
+        java.net.URLDecoder.decode(u, "UTF-8")
+    } catch (e: Exception) { u }
+
+    /** عائلة المسلسلات: `/مسلسل/<slug>-<id>/` وصفحة المشاهدة `/مشاهدة/…`. */
+    private fun isSeriesUrl(u: String): Boolean {
+        val d = decodedUrl(u)
+        return d.contains("/مسلسل/") || d.contains("/مشاهدة/")
+    }
+
+    /**
+     * هل الصفحة من عائلة «المقالات»؟ — **بالمحتوى لا بشكل الرابط**.
+     *
+     * قِيس (2026-10-08): قالب المقال يحمل `xr-post-container` و`xr-server-btn`
+     * و`xr-card` ويخلو من `wp-json/wp/v2/dd_series/`، وتحقّق ذلك على **شكلين**
+     * من الروابط: التاريخية `/2026/09/x.html` والجذرية
+     * `/قفص-الأكاذيب-الناعم-489202ca647677b3/` — وكلاهما يعطي نفس العدّادات
+     * (١ و٣ و٣٠ وصفر). وأما صفحات المسلسلات (وبما فيها `/مشاهدة/`) فتحمل
+     * `dd_series` ولا تحمل أيّ من علامتَي المقال.
+     *
+     * لماذا ليس شرطاً زمنياً: الشكل الجرِيذي **لا** يطابق `/20\d\d/\d\d/…`
+     * فكان `load()` يعود بـ`null` — أي لا تفاصيل ولا روابط، بلا أي سجلّ.
+     */
+    private fun isPostPage(u: String, html: String): Boolean {
+        if (html.contains("wp-json/wp/v2/dd_series/")) return false
+        if (html.contains("xr-server-btn") || html.contains("xr-post-container")) return true
+        if (datePostRe.containsMatchIn(u)) return true
+        return !isSeriesUrl(u)
+    }
 
     private fun parseCards(html: String): List<DdCard> {
         val out = ArrayList<DdCard>()
@@ -129,7 +164,7 @@ class DeepDramaProvider(private val prefs: SharedPreferences?) : MainAPI() {
             val title = listOfNotNull(h3, alt).firstOrNull { !it.isNullOrBlank() } ?: continue
             val src = xrSrcRe.find(body)?.groupValues?.get(1)?.trim()
                 ?.takeIf { !it.startsWith("data:") }
-            out.add(DdCard(title, url, src, isPostUrl(url)))
+            out.add(DdCard(title, url, src, movie = !isSeriesUrl(url)))
         }
         return out
     }
@@ -207,7 +242,7 @@ class DeepDramaProvider(private val prefs: SharedPreferences?) : MainAPI() {
                 ?.trim()?.takeIf { it.isNotBlank() }
 
             // ★ صفحة مقال: فيديو واحد بخوادم مباشرة — لا playlist ولا حلقات.
-            if (isPostUrl(url)) {
+            if (isPostPage(url, html)) {
                 return newMovieLoadResponse(title, url, TvType.Movie, "post|$url") {
                     this.posterUrl = poster
                     this.plot = plot
