@@ -73,7 +73,13 @@ class DramaTipProvider(private val prefs: SharedPreferences? = null) : MainAPI()
     )
 
     // صف فرعي لكل منصة — مفتاح الصف = slug، يُمرَّر في request.data.
-    override val mainPage = mainPageOf(*platformRows.map { (slug, label) -> slug to label }.toTypedArray())
+    // الصف الأول «واجهة رئيسية» = قائمة /ar (ItemList JSON-LD) بأحدث المسلسلات.
+    override val mainPage = mainPageOf(
+        *listOf("home" to "واجهة رئيسية")
+            .plus(platformRows)
+            .map { (slug, label) -> slug to label }
+            .toTypedArray()
+    )
 
     private fun reqHeaders() = mapOf(
         "User-Agent" to TIP_UA,
@@ -104,12 +110,15 @@ class DramaTipProvider(private val prefs: SharedPreferences? = null) : MainAPI()
         } catch (_: Exception) { listOf(doc) }
     }
 
-    // كل mainEntity يحمل itemListElement (بطاقات كتالوج).
+    // كل mainEntity يحمل itemListElement (بطاقات كتالوج). أما الرئيسية /ar
+    // فتعرض عقدة ItemList تحمل itemListElement مباشرةً (دون mainEntity) —
+    // نقيب عنهما معًا ليغذي صفّ «واجهة رئيسية».
     private fun collections(html: String): List<org.json.JSONObject> {
         val out = mutableListOf<org.json.JSONObject>()
         for (node in graphNodes(jsonLdDoc(html))) {
             val me = node.optJSONObject("mainEntity")
             if (me != null && me.has("itemListElement")) out.add(me)
+            else if (node.has("itemListElement")) out.add(node)
         }
         return out
     }
@@ -135,8 +144,10 @@ class DramaTipProvider(private val prefs: SharedPreferences? = null) : MainAPI()
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse? {
         return try {
             if (page > 1) return null // لا ترقيم (قِيس: كل الصيغ تعيد الـ 24 نفسها)
-            val slug = request.data?.takeIf { it.isNotBlank() } ?: return null
-            val h = fetchText("$TIP_MAIN/source/${escapeSlug(slug)}") ?: return null
+            val slug = request.data.takeIf { it.isNotBlank() } ?: return null
+            // الصف «واجهة رئيسية»: قائمة البطاقات من الصفحة الرئيسية نفسها (/ar).
+            val url = if (slug == "home") "$TIP_MAIN/" else "$TIP_MAIN/source/${escapeSlug(slug)}"
+            val h = fetchText(url) ?: return null
             val items = parseCollection(h, java.util.HashSet())
             newHomePageResponse(request.name, items)
         } catch (e: Exception) { null }
@@ -306,75 +317,110 @@ class DramaTipProvider(private val prefs: SharedPreferences? = null) : MainAPI()
                 ?: Regex(""""source":"([^"]+)"""").find(f)?.groupValues?.get(1)
                 ?: name
 
+            // العامل على كلمة/فِرق الحلقة: كل enc محصورٌ في كائنه — نُصنّفه
+            // بموضع كائنه (لا نافذة سياق قد تتسرّب إلى الجار):
+            //   chain[]  → فيديو أساس (type + source/refresh)
+            //   subtitle → ترجمة (format + language)
+            //   nextSourceFirst → فيديو بديل (type قبل enc)
+            // تأسّست على قياس ٢٠٢٦-١٠-٠٨: NetShort وMyDramaWave يومها.
+            // (لوغاريتم «after-160» كان يلتهم الفيديو البديل فيجعله ترجمةً →
+            //    «لايوجد روابط تشغيل».)
             val collected = mutableListOf<ExtractorLink>()
-            var video = 0
-            val seen = mutableSetOf<String>()
+            val seenPlain = mutableSetOf<String>()
             var sentSub = false
+            val showSubs = prefs?.getBoolean(DramaTipSettingsBottomSheet.KEY_SHOW_SUBTITLES, true) ?: true
 
-            // كل blobs (فيديو + ترجمة) — نفس النمط: "enc":"base64".
-            // التصنيف بنيوي (كهيكل JSON ذاته): لا نعتمد نافذة سياق قد تختلط
-            // (بلوب nextSourceFirst يجاور كائن subtitle فيتسرّب format:webvtt إليه).
-            // — كائن الترجمة يحمل format + language (بلا source/refresh).
-            // — كائن الفيديو يحمل type + (source أو refresh) (بلا format/language)،
-            //   و plain يحتوي mime_type=video_mp4 (أو .m3u8/..mpd).
-            for (m in Regex(""""enc":"([A-Za-z0-9+/=]+)"""").findAll(f)) {
-                val rawEnc = m.groupValues[1]
-                // «نافذة قصيرة بعد enc» فقط — داخل كائن الترجمة توجد format/language؛
-                // في كائن الفيديو توجد type/source/refresh (لا format ولا language).
-                val after = f.substring(m.range.last + 1, minOf(f.length, m.range.last + 160))
-                val before = f.substring(maxOf(0, m.range.first - 140), m.range.first)
-                val fmt = Regex(""""format":\s*"([^"]+)"""").find(after)?.groupValues?.get(1)
-                val langRaw = Regex(""""language":\s*"([^"]+)"""").find(after)?.groupValues?.get(1)
-                val typeRaw = Regex(""""type":\s*"([^"]+)"""").find(after)?.groupValues?.get(1)
-                    ?: Regex(""""type":\s*"([^"]+)"""").find(before)?.groupValues?.get(1)
-                val hasFormatLang = fmt != null || langRaw != null
+            // احصر كل enc داخل كائنه بموضعه (لا «نافذة سياق» قد تتسرّب إلى الجار):
+            //   chain[]  → فيديو أساس (أول سيرفر)
+            //   subtitle → ترجمة (format + language)
+            //   nextSourceFirst → فيديو بديل (type قبل enc)
+            val sf = f.indexOf("\"sourceFirst\"")
+            val subIdx = f.indexOf("\"subtitle\"")
+            val nsf = f.indexOf("\"nextSourceFirst\"")
+            val chainEnd = when {
+                subIdx >= 0 -> subIdx
+                nsf >= 0 -> nsf
+                else -> f.length
+            }
+            val subEnd = if (nsf >= 0) nsf else f.length
+            val chainStart = if (sf >= 0) f.indexOf("\"chain\":[", sf) else -1
 
-                val plain = try { decryptEnc(rawEnc) } catch (e: Exception) { logE("decrypt: ${e.message}"); continue }
-                if (plain.isBlank() || !seen.add(plain)) continue
-
-                // الترجمة حقيقتها: كائن يجسّد format/language (بلا type/source)،
-                // أو plain يحمل mime_type=text_plain (.srt/.vtt).
-                val isSub = hasFormatLang ||
-                    plain.lowercase().contains("mime_type=text_plain") ||
-                    plain.trim().endsWith(".srt")
-
-                if (isSub) {
-                    val lang = langRaw?.substringBefore('_')?.substringBefore('-')?.takeIf { it.isNotBlank() } ?: "ar"
-                    try {
-                        subtitleCallback(newSubtitleFile(subLangLabel(lang), plain))
-                        sentSub = true
-                    } catch (e: Exception) { logE("subtitle: ${e.message}") }
-                    continue
+            // ١) chain[] — فيديو الأساس (قد يكون أكثر من واحد)
+            if (chainStart >= 0 && chainStart < chainEnd) {
+                for (m in Regex(""""enc":"([A-Za-z0-9+/=]+)"""").findAll(f.substring(chainStart, chainEnd))) {
+                    val plain = decryptOrSkip(m.groupValues[1]) ?: continue
+                    if (!seenPlain.add(plain)) continue
+                    emitVideo(source, plain, collected, null)
                 }
-
-                video++
-                val label = if (video <= 1) source else "$source · بديل"
-                val lower = plain.lowercase()
-                val extType = when {
-                    lower.contains(".mpd") || lower.contains("application/dash+xml") -> ExtractorLinkType.DASH
-                    lower.contains(".m3u8") || lower.contains("application/vnd.apple.mpegurl") -> ExtractorLinkType.M3U8
-                    else -> ExtractorLinkType.VIDEO
-                }
-                val mime = Regex("""mime_type=([^&]+)""").find(plain)?.groupValues?.get(1)
-                val declared = when {
-                    extType == ExtractorLinkType.M3U8 || extType == ExtractorLinkType.DASH -> null
-                    extType == ExtractorLinkType.VIDEO && mime != null && mime.contains("mp4") -> "MP4"
-                    else -> declaredFromType(typeRaw)
-                }
-                val tagged = FormatTag.tagged(label, plain, extType, declared)
-                collected.add(newExtractorLink(name, tagged, plain, extType) {
-                    this.headers = reqHeaders()
-                })
             }
 
-            // رؤية: إن فُكّ فيديوٌ واحد على الأقل
-            if (collected.isNotEmpty()) {
-                collected.forEach { callback(it) }
-                logD("DramaTip.loadLinks $source ep=$ep video=${collected.size} sub=$sentSub")
+            // ٢) subtitle — الترجمة
+            if (subIdx >= 0 && subIdx < subEnd) {
+                val seg = f.substring(subIdx, subEnd)
+                val m = Regex(""""enc":"([A-Za-z0-9+/=]+)"""").find(seg)
+                if (m != null) {
+                    val plain = decryptOrSkip(m.groupValues[1])
+                    if (plain != null && showSubs) {
+                        val langM = Regex(""""language":\s*"([^"]+)"""").find(seg)
+                        val lang = langM?.groupValues?.get(1)?.substringBefore('_')?.substringBefore('-')
+                            ?.takeIf { it.isNotBlank() } ?: "ar"
+                        subtitleCallback(newSubtitleFile(subLangLabel(lang), plain))
+                        sentSub = true
+                    }
+                }
+            }
+
+            // ٣) nextSourceFirst — فيديو بديل
+            if (nsf >= 0) {
+                val seg = f.substring(nsf, minOf(f.length, nsf + 2600))
+                val m = Regex(""""enc":"([A-Za-z0-9+/=]+)"""").find(seg)
+                val typeM = Regex(""""type":\s*"([^"]+)"""").find(seg)
+                if (m != null) {
+                    val plain = decryptOrSkip(m.groupValues[1])
+                    if (plain != null && seenPlain.add(plain)) {
+                        emitVideo("$source · بديل", plain, collected, typeM?.groupValues?.get(1))
+                    }
+                }
+            }
+
+            // الترتيب حسب إعدادات المستخدم (افتراضي = ترتيب الصفحة كما هو).
+            val order = prefs?.getString(DramaTipSettingsBottomSheet.KEY_QUALITY_ORDER, "default")
+            val ordered = when (order) {
+                "asc" -> collected.sortedBy { it.quality }
+                "desc" -> collected.sortedByDescending { it.quality }
+                else -> collected
+            }
+
+            if (ordered.isNotEmpty()) {
+                ordered.forEach { callback(it) }
+                logD("DramaTip.loadLinks $source ep=$ep video=${ordered.size} sub=$sentSub")
                 return true
             }
             logE("DramaTip.loadLinks $source ep=$ep decrypted nothing")
             false
         } catch (e: Exception) { logE("loadLinks: ${e.message}"); false }
+    }
+
+    // يعطي plain النصّ المكشوف أو null عند تعذّر فكّه.
+    private fun decryptOrSkip(enc: String): String? = try { decryptEnc(enc) } catch (e: Exception) { logE("decrypt: ${e.message}"); null }
+
+    // يُنشئ رابط إخراج من نصٍّ مصدري.
+    private suspend fun emitVideo(source0: String, plain: String, collected: MutableList<ExtractorLink>, typeRaw: String?) {
+        val lower = plain.lowercase()
+        val extType = when {
+            lower.contains(".mpd") || lower.contains("application/dash+xml") -> ExtractorLinkType.DASH
+            lower.contains(".m3u8") || lower.contains("application/vnd.apple.mpegurl") -> ExtractorLinkType.M3U8
+            else -> ExtractorLinkType.VIDEO
+        }
+        val mime = Regex("""mime_type=([^&]+)""").find(plain)?.groupValues?.get(1)
+        val declared = when {
+            extType == ExtractorLinkType.M3U8 || extType == ExtractorLinkType.DASH -> null
+            extType == ExtractorLinkType.VIDEO && mime != null && mime.contains("mp4") -> "MP4"
+            else -> declaredFromType(typeRaw)
+        }
+        val tagged = FormatTag.tagged(source0, plain, extType, declared)
+        collected.add(newExtractorLink(name, tagged, plain, extType) {
+            this.headers = reqHeaders()
+        })
     }
 }
