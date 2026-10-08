@@ -633,13 +633,15 @@ class DramadunyamProvider(private val prefs: SharedPreferences? = null) : MainAP
             val linkType = if (typeStr == "hls" || vUrl.contains(".m3u8")) ExtractorLinkType.M3U8
             else ExtractorLinkType.VIDEO
 
-            // اسم المصدر يلصق بطريقة التسليم إن وُجدت (direct/relay/psig) —
-            // يكشف التسمية العربية، وإلا اكتفِ باسم الحلقة وعلامة الصيغة.
-            val serverName = when (p.sourceTag?.lowercase()) {
+            // اسم المصدر = `delivery` لا `source_tag` — قِيس 2026-10-08 على 16
+            // منصّة: source_tag رمزٌ عشوائي جديد لكل حلقة (mem3cz/4frcxd/…)
+            // لا علاقة له بالتسليم، فكان يُصدر اسم مُهاتَر في قائمة المصادر.
+            // `psig` لم يُقَس قيمته فيبقى اسم الحلقة — لا نخترع تسمية لم نرها.
+            val serverName = when (p.delivery?.lowercase()) {
                 "direct" -> "مباشر"
                 "relay" -> "وسيط"
                 "relay_auth" -> "وسيط مُوثّق"
-                else -> p.sourceTag?.takeIf { it.isNotBlank() } ?: "الحلقة $ep"
+                else -> "الحلقة $ep"
             }
             callback(
                 newExtractorLink(
@@ -662,10 +664,19 @@ class DramadunyamProvider(private val prefs: SharedPreferences? = null) : MainAP
         }
     }
 
-    /** الجودة الحقيقية من المسار (`…_720/main.m3u8`) — إن غابت لا نخترع اسماً. */
+    /**
+     * الجودة الحقيقية من المسار — إن غابت لا نخترع اسماً.
+     * الأنماط قِيست فعلاً 2026-10-08: `-ld.m3u8`=540×960 و`-sd.m3u8`=720×1280
+     * على crazymaple وwolftv، وDramaBox يحقن `.720p.` في اسم الملف، وGoodShort
+     * يمرّر `?q=720p`. و`-hd` غير مقاس فلا يُخمَّن.
+     */
     private fun qOf(url: String): String? {
         Regex("""_(\d{3,4})/""").find(url)?.let { return it.groupValues[1] + "p" }
         Regex("""/(\d{3,4})p/""").find(url)?.let { return it.groupValues[1] + "p" }
+        Regex("""\.(\d{3,4})p\.""").find(url)?.let { return it.groupValues[1] + "p" }
+        Regex("""[?&]q=(\d{3,4})p\b""").find(url)?.let { return it.groupValues[1] + "p" }
+        if (Regex("""-ld\.""").containsMatchIn(url)) return "540p"
+        if (Regex("""-sd\.""").containsMatchIn(url)) return "720p"
         return null
     }
 }

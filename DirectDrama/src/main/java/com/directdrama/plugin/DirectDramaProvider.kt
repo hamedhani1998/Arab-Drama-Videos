@@ -469,10 +469,19 @@ class DirectDramaProvider(private val prefs: SharedPreferences? = null) : MainAP
         }
     }
 
-    /** الجودة الحقيقية من المسار (`…_720/main.m3u8`) — إن غابت لا نخترع اسماً. */
+    /**
+     * الجودة الحقيقية من المسار — إن غابت لا نخترع اسماً.
+     * الأنماط نفسها المقيسة على Dramadunyam 2026-10-08 (نفس عائلات المُضيفات):
+     * `-ld.`=540 و`-sd.`=720 مقاسان، و`.720p.` و`q=720p` شكلان مُدرجان؛
+     * و`-hd` غير مقاس فلا يُخمَّن.
+     */
     private fun qOf(url: String): String? {
         Regex("""_(\d{3,4})/""").find(url)?.let { return it.groupValues[1] + "p" }
         Regex("""/(\d{3,4})p/""").find(url)?.let { return it.groupValues[1] + "p" }
+        Regex("""\.(\d{3,4})p\.""").find(url)?.let { return it.groupValues[1] + "p" }
+        Regex("""[?&]q=(\d{3,4})p\b""").find(url)?.let { return it.groupValues[1] + "p" }
+        if (Regex("""-ld\.""").containsMatchIn(url)) return "540p"
+        if (Regex("""-sd\.""").containsMatchIn(url)) return "720p"
         return null
     }
 }
