@@ -69,6 +69,8 @@ class DirectDramaSettingsBottomSheet(private val prefs: SharedPreferences) : Bot
         const val KEY_EPISODE_ORDER = "ddr_episode_order"     // "as_is" | "desc"
         const val KEY_SHOW_SUBTITLES = "ddr_show_subtitles"   // Boolean — الافتراضي true
         const val KEY_SHOW_HOME = "ddr_show_home"             // Boolean — الواجهة الرئيسية كلها
+        const val KEY_SHOW_FRONT = "ddr_show_front"           // Boolean — صفّا الواجهة الأمامية
+        const val KEY_SHOW_PLATFORMS = "ddr_show_platforms"   // Boolean — صفوف المنصات الـ27
         const val KEY_HOME_ROWS = "ddr_home_rows"             // "all" | "10" | "18" — عدد صفوف المنصات
         const val KEY_HIDDEN_ROWS = "ddr_hidden_rows"         // Set<String> — مفاتيح الأقسام المخفية
 
@@ -89,9 +91,9 @@ class DirectDramaSettingsBottomSheet(private val prefs: SharedPreferences) : Bot
             preferenceScreen = preferenceManager.createPreferenceScreen(ctx)
 
             // ── الواجهة الرئيسية ────────────────────────────────────────────
-            // صفوف المنصات الـ27 كلها صفحة HTML كاملة (~438 كيلوبايت، 3–10 ثوانٍ
-            // للخادم) والتطبيق ينتظر **كل** الصفوف قبل رسم الصفحة الأولى، فعدد
-            // الصفوف هنا هو مفتاح سرعة الواجهة مباشرة.
+            // كل صفٍّ هنا صفحة HTML كاملة (~438 كيلوبايت، 3–10 ثوانٍ للخادم)
+            // والتطبيق ينتظر **كل** الصفوف قبل رسم الصفحة الأولى، فعدد الصفوف
+            // هو مفتاح سرعة الواجهة مباشرة: صفّا الواجهة الأمامية (2) + المنصات (27).
             val homeCategory = PreferenceCategory(ctx)
             homeCategory.title = "الواجهة الرئيسية"
             preferenceScreen.addPreference(homeCategory)
@@ -100,10 +102,29 @@ class DirectDramaSettingsBottomSheet(private val prefs: SharedPreferences) : Bot
             val showHomePref = SwitchPreferenceCompat(ctx).apply {
                 key = KEY_SHOW_HOME
                 title = "إظهار الواجهة الرئيسية"
-                summary = "إيقافها يُخفي كل صفوف المنصات من مصدر CloudStream"
+                summary = "إيقافها تُخفي كل أقسام المصدر من CloudStream"
                 setDefaultValue(true)
             }
             homeCategory.addPreference(showHomePref)
+
+            // ★ أقسام الواجهة الأمامية — صفّان **قبل** صفوف المنصات (طلب المستخدم
+            //   2026-10-08 «بالمقدَّمة قبل المنصات»): «الأكثر رواجًا» من
+            //   `/ar/popular` و«الأحدث إضافة» من `/ar/new-releases`.
+            val showFrontPref = SwitchPreferenceCompat(ctx).apply {
+                key = KEY_SHOW_FRONT
+                title = "إظهار قسم الواجهة الأمامية"
+                summary = "صفّا «الأكثر رواجًا» و«الأحدث إضافة» قبل المنصات"
+                setDefaultValue(true)
+            }
+            homeCategory.addPreference(showFrontPref)
+
+            val showPlatformsPref = SwitchPreferenceCompat(ctx).apply {
+                key = KEY_SHOW_PLATFORMS
+                title = "إظهار قوائم المنصات"
+                summary = "إيقافها يُبقي أقسام الواجهة الأمامية وحدها"
+                setDefaultValue(true)
+            }
+            homeCategory.addPreference(showPlatformsPref)
 
             val homeRowsPref = ListPreference(ctx).apply {
                 key = KEY_HOME_ROWS
@@ -121,10 +142,11 @@ class DirectDramaSettingsBottomSheet(private val prefs: SharedPreferences) : Bot
             homeCategory.addPreference(homeRowsPref)
 
             // ★ التحكم المقطَّع: كل قسم على حدة. القيم = مفاتيح `MainPageData.data`
-            //   نفسها (مفاتيح المنصات الـ27). دلالة الاختيار مقلوبة عمداً:
-            //   المؤشَّر = مُخفى، وبلا اختيار يظهر كل شيء — وإلا لاضطرّ
-            //   المستخدم لتأشير 26 من 27 قسماً لإخفاء واحد.
-            //   القائمة تُبنى من `DDR_PLATFORM_ROWS` (مصدر واحد للحقيقة مع `mainPage`).
+            //   نفسها: صفّا الواجهة الأمامية (`DDR_FRONT_ROWS`) ثم منصات الـ27.
+            //   دلالة الاختيار مقلوبة عمداً: المؤشَّر = مُخفى، وبلا اختيار يظهر
+            //   كل شيء — وإلا لاضطرّ المستخدم لتأشير 28 قسماً لإخفاء واحد.
+            //   القائمة تُبنى من `DDR_FRONT_ROWS + DDR_PLATFORM_ROWS`
+            //   (مصدر واحد للحقيقة مع `mainPage`).
             val hiddenRowsPref = MultiSelectListPreference(ctx).apply {
                 key = KEY_HIDDEN_ROWS
                 title = "إخفاء أقسام محدَّدة"
@@ -132,8 +154,8 @@ class DirectDramaSettingsBottomSheet(private val prefs: SharedPreferences) : Bot
                     val n = it.values?.size ?: 0
                     if (n == 0) "بلا اختيار: كل الأقسام ظاهرة" else "$n قسماً مُخفياً عن الواجهة"
                 }
-                entryValues = DDR_PLATFORM_ROWS.map { it.first }.toTypedArray()
-                entries = DDR_PLATFORM_ROWS.map { it.second }.toTypedArray()
+                entryValues = (DDR_FRONT_ROWS + DDR_PLATFORM_ROWS).map { it.first }.toTypedArray()
+                entries = (DDR_FRONT_ROWS + DDR_PLATFORM_ROWS).map { it.second }.toTypedArray()
             }
             homeCategory.addPreference(hiddenRowsPref)
 
@@ -173,6 +195,8 @@ class DirectDramaSettingsBottomSheet(private val prefs: SharedPreferences) : Bot
                         remove(KEY_EPISODE_ORDER)
                         remove(KEY_SHOW_SUBTITLES)
                         remove(KEY_SHOW_HOME)
+                        remove(KEY_SHOW_FRONT)
+                        remove(KEY_SHOW_PLATFORMS)
                         remove(KEY_HOME_ROWS)
                         remove(KEY_HIDDEN_ROWS)
                     }.apply()

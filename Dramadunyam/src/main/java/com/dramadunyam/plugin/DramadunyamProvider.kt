@@ -181,10 +181,12 @@ class DramadunyamProvider(private val prefs: SharedPreferences? = null) : MainAP
             val rows = DUN_PLATFORM_ROWS.map { (k, v) -> MainPageData(v, k) }
                 .filter { it.data !in hidden }
             // حدّ عدد الصفوف: كل صف طلب API، فتقليله يقصّ زمن فتح الواجهة
-            // (يُطبَّق بعد إسقاط المخفية كي يبقى المطلوب ظاهراً كاملاً).
+            // (يُطبَّق بعد إسقاط المخفية كي يبقى المطلوب ظاهراً كاملاً، وعلى
+            // صفوف المنصات وحدها — وإلا لضاع صفّا الواجهة الأمامية عند أي حدّ).
             val raw = prefs?.getString(DramadunyamSettingsBottomSheet.KEY_HOME_ROWS, "all") ?: "all"
             val n = raw.toIntOrNull()
-            return if (n != null && n in 1 until rows.size) rows.take(n) else rows
+            val capped = if (n != null && n in 1 until rows.size) rows.take(n) else rows
+            return accent + capped
         }
     private fun showSubs(): Boolean =
         prefs?.getBoolean(DramadunyamSettingsBottomSheet.KEY_SHOW_SUBTITLES, true) != false

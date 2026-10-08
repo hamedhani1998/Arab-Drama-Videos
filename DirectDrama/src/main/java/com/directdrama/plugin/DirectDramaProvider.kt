@@ -10,6 +10,7 @@ import com.fasterxml.jackson.databind.ObjectMapper
 import com.fasterxml.jackson.module.kotlin.registerKotlinModule
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
+import kotlinx.coroutines.delay
 import org.jsoup.nodes.Document
 import java.net.URLEncoder
 import java.util.TreeMap
@@ -52,6 +53,24 @@ internal val DDR_PLATFORM_ROWS: List<Pair<String, String>> = listOf(
     "snackshort" to "مسلسلات SnackShort القصيرة",
 )
 
+/**
+ * صفّا الواجهة الأمامية — **قبل** صفوف المنصات (طلب المستخدم 2026-10-08:
+ * «أضِف أقسام الشاشة بجانب المنصات» ثم «بالمقدَّمة قبل المنصات»). كلاهما
+ * صفٌّ عابر للمنصات يوفّره الموقع نفسه: `/ar/popular` و`/ar/new-releases`.
+ *
+ * قياس 2026-10-08: ٣٦ بطاقة في كلٍّ منهما، وبطاقاتهما من **شكل بطاقة المنصة
+ * ذاتها** (`img[alt]` بقوسين و`aria-label` بعد فاصلة تحمل عدد الحلقات) فالحلّ
+ * واحد لا حلّان؛ والترقيم كصفحة المنصة: `/{page}` (قِيس `/ar/popular/2`
+ * يعيد ٣٦ بطاقة أخرى).
+ */
+internal const val DDR_FRONT_POPULAR = "ddr-front-popular"
+internal const val DDR_FRONT_NEW = "ddr-front-new"
+
+internal val DDR_FRONT_ROWS: List<Pair<String, String>> = listOf(
+    DDR_FRONT_POPULAR to "الأكثر رواجًا",
+    DDR_FRONT_NEW to "الأحدث إضافة",
+)
+
 /** `/api/series/suggest` — عشرة نتائج بلا ترقيم صفحات. */
 private data class SuggestItem(
     val id: Long? = null,
@@ -85,6 +104,8 @@ private data class StreamResponse(
     val url: String? = null,
     val renditions: List<StreamRendition>? = null,
     val subtitles: List<StreamSubtitle>? = null,
+    /** بصمة المصدر — تُرسَل في `?failed=` لطلب مصدرٍ بديل (آلية الموقع نفسه). */
+    val sourceTag: String? = null,
 )
 
 /** `self.__next_f.push([1,"…"])` — الدفعة ١ نصٌّ مُهرَّب يحمل كل الحلقات بمعرّفاتها. */
@@ -128,6 +149,10 @@ class DirectDramaProvider(private val prefs: SharedPreferences? = null) : MainAP
     //   يقصّها `mainPage` حسب الإعدادات.
     private val allPlatformRows = mainPageOf(*DDR_PLATFORM_ROWS.toTypedArray())
 
+    // ★ صفّا الواجهة الأمامية — من `DDR_FRONT_ROWS` (نفس المصدر الذي تشترك
+    //   معه ورقة الإعدادات في قائمة «إخفاء الأقسام»). يوضعان **قبل** المنصات.
+    private val frontRows = mainPageOf(*DDR_FRONT_ROWS.toTypedArray())
+
     // ★ خصائص ديناميكية: تُقرأ مع كل رسم للواجهة، فالمفاتيح من ورقة الإعدادات
     //   تُطبَّق بلا إعادة تشغيل. `hasMainPage=false` يُخفي المصدر من الصفحة
     //   الرئيسية كليّاً.
@@ -136,19 +161,30 @@ class DirectDramaProvider(private val prefs: SharedPreferences? = null) : MainAP
 
     // ★ الإخفاء الجزئي: مجموعة مفاتيح الأقسام المخفية من ورقة الإعدادات
     //   (`ddr_hidden_rows`) — كل قسم يُحدَّد بالظهور أو الإخفاء على حدة.
-    //   القيم = مفاتيح `MainPageData.data` نفسها. مجموعة خالية = الكل ظاهر.
+    //   القيم = مفاتيح `MainPageData.data` نفسها: صفّا الواجهة الأمامية
+    //   (`DDR_FRONT_ROWS`) ثم مفاتيح المنصات الـ27. مجموعة خالية = الكل ظاهر.
     private fun hiddenRows(): Set<String> =
         prefs?.getStringSet(DirectDramaSettingsBottomSheet.KEY_HIDDEN_ROWS, null) ?: emptySet()
 
     override val mainPage: List<MainPageData>
         get() {
+            val hidden = hiddenRows()
+            // صفّا الواجهة الأمامية أوّلاً — طلب المستخدم 2026-10-08:
+            // «بالمقدَّمة قبل المنصات».
+            val front = if (showFront()) frontRows.filter { it.data !in hidden } else emptyList()
+            if (!showPlatforms()) return front
             // الإخفاء يسبق حدّ العدد كي يبقى المطلوب ظاهراً كاملاً.
-            val rows = allPlatformRows.filter { it.data !in hiddenRows() }
+            val rows = allPlatformRows.filter { it.data !in hidden }
             val raw = prefs?.getString(DirectDramaSettingsBottomSheet.KEY_HOME_ROWS, "all") ?: "all"
-            if (raw == "all") return rows
-            val n = raw.toIntOrNull() ?: return rows
-            return if (n in 1 until rows.size) rows.take(n) else rows
+            val n = raw.toIntOrNull() ?: return front + rows
+            return front + (if (n in 1 until rows.size) rows.take(n) else rows)
         }
+
+    private fun showFront(): Boolean =
+        prefs?.getBoolean(DirectDramaSettingsBottomSheet.KEY_SHOW_FRONT, true) != false
+
+    private fun showPlatforms(): Boolean =
+        prefs?.getBoolean(DirectDramaSettingsBottomSheet.KEY_SHOW_PLATFORMS, true) != false
 
     private fun showSubs(): Boolean =
         prefs?.getBoolean(DirectDramaSettingsBottomSheet.KEY_SHOW_SUBTITLES, true) != false
@@ -184,10 +220,20 @@ class DirectDramaProvider(private val prefs: SharedPreferences? = null) : MainAP
     // الحلقة ١» العائم)، وعنوانه في `img[alt]` بين قوسين مِعْتَتَبَتَيْن، وعدد
     // حلقاته في `aria-label` بعد الفاصلة. الصفحة تحتوي ٧٢ رابطاً لـ36 مسلسلاً
     // (بطاقة + زر تشغيل لكلٍّ منها) فنُزيل تكرار الرابط قبل البناء.
+    //   صفّا الواجهة الأمامية (`DDR_FRONT_ROWS`) يمرّان بنفس المحلّل: قياس
+    // 2026-10-08 وجد بطاقة `/ar/popular` و`/ar/new-releases` من الشكل ذاته
+    // حرفياً (٣٦ بطاقة، `alt` بقوسين، `aria-label` بعد فاصلة، والعدّاد في
+    // 35 و33 من 36). والترقيم `/{page}` كصفحة المنصة.
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse? {
         return try {
-            val url = if (page <= 1) "$mainUrl/ar/platform/${request.data}"
-            else "$mainUrl/ar/platform/${request.data}/$page"
+            val url = when {
+                request.data == DDR_FRONT_POPULAR ->
+                    if (page <= 1) "$mainUrl/ar/popular" else "$mainUrl/ar/popular/$page"
+                request.data == DDR_FRONT_NEW ->
+                    if (page <= 1) "$mainUrl/ar/new-releases" else "$mainUrl/ar/new-releases/$page"
+                page <= 1 -> "$mainUrl/ar/platform/${request.data}"
+                else -> "$mainUrl/ar/platform/${request.data}/$page"
+            }
             val doc = app.get(url, referer = mainUrl).document
             val seen = HashSet<String>()
             val items = doc.select("""a[href^="/ar/series/"]""").mapNotNull { a ->
@@ -375,97 +421,241 @@ class DirectDramaProvider(private val prefs: SharedPreferences? = null) : MainAP
             val ep = Regex("""episode-(\d+)""").find(epUrl)?.groupValues?.get(1)?.toIntOrNull() ?: return false
 
             // 1) صفحة الحلقة → نص الطيران → معرّف الحلقة (لا يظهر في أي مكان آخر).
-            val html = app.get(epUrl, referer = mainUrl).text
+            //    صفحةٌ واحدة تفشل في الشبكة تعني «لا يوجد روابط» لحلقة سليمة، فمحاولة ثانية.
+            val html = fetchHtml(epUrl) ?: run {
+                Log.e(TAG, "loadLinks episode page FAILED ep=$ep url=$epUrl")
+                return false
+            }
             val blob = flightBlob(html)
-            val id = Regex("""\{"id":(\d+),"number":$ep[,}]""").find(blob)?.groupValues?.get(1)
+            val id = Regex("""\{"id":(\d+),"number":$ep[,}]""").find(blob)?.groupValues?.get(1)?.toLongOrNull()
                 ?: run {
                     Log.e(TAG, "loadLinks no episode id ep=$ep url=$epUrl")
                     return false
                 }
 
             // 2) `/api/stream/` يرفض بلا Referer (403 مقيس) — نُرسله كصفحة الحلقة.
-            val r = app.get("$mainUrl/api/stream/$id?locale=ar", referer = epUrl)
-            if (!r.isSuccessful) {
-                Log.e(TAG, "stream HTTP ${r.code} ep=$ep")
-                return false
-            }
-            val node = mapper.readValue(r.text, StreamResponse::class.java)
+            //    وقد يردّ `503 source_busy` أو 429 مؤقتاً: فشلٌ واحد هنا يعرض
+            //    «لا يوجد روابط» لحلقة تعمل، فنعيد على الأخطاء المؤقتة.
+            val primary = fetchStream(id, epUrl, failedTag = null) ?: return false
 
-            // 3) كل الترجمات — رابط مطلق + رمز لغة، ولغة واحدة لا تُكرَّر.
-            //    مساراتها نسبية (`/subs/1751101/ar.vtt`) والمشغّل لا يضيف mainUrl
-            //    إلى SubtitleFile.url أبداً (مقيس على cloudstream.jar) فنبنيه نحن.
-            if (showSubs()) {
-                val seenUrl = HashSet<String>()
-                val seenLang = HashSet<String>()
-                node.subtitles.orEmpty().forEach { s ->
-                    val rawUrl = s.url?.trim().orEmpty()
-                    if (rawUrl.isEmpty()) return@forEach
-                    val subUrl = abs(rawUrl)
-                    if (!seenUrl.add(subUrl)) return@forEach
-                    val rawLang = (s.lang?.trim().orEmpty().ifEmpty { s.label?.trim().orEmpty() })
-                    val lang = normalizeSubLang(rawLang) ?: rawLang.ifEmpty { "ترجمة" }
-                    if (!seenLang.add(lang)) return@forEach
-                    try {
-                        subtitleCallback(newSubtitleFile(subLangLabel(lang), subUrl) {
-                            this.headers = mapOf("Referer" to mainUrl)
-                        })
-                    } catch (_: Exception) {
-                    }
-                }
-            }
-
-            // 4) الصيغة: `type` يقول hls/mp4، وله روابط بلا امتداد إطلاقاً
-            //    (حملة mp4 تنتهي بـ`mime_type=video_mp4`) فنُمرّره إلى FormatTag
-            //    ليكتب [MP4] لا [VIDEO] — انظر FormatTag.label.
-            val typeStr = node.type.orEmpty().lowercase()
-            val rawUrl = node.url?.trim().orEmpty()
-            if (rawUrl.isEmpty()) {
+            // 3) فحص الحيولة: حين يموت المضيف (قياس 2026-10-08:
+            //    `flareflow.dotkosong.web.id` = NXDOMAIN حقيقي و`videotv.vividshort.com`
+            //    حيّ) نطلب مصدراً بديلاً بالآلية نفسها التي يستخدمها موقع DirectDrama
+            //    في صفحات JSّه: `?locale=ar&refresh=1&failed=<sourceTag>`. البديل الحيّ
+            //    يُبثَّ **أوّلاً** كي يسبقه المشغّل (هو يختار الرابط الأول دائماً).
+            val seenSubUrl = HashSet<String>()
+            val seenSubLang = HashSet<String>()
+            val primaryUrl = primary.url?.trim().orEmpty().takeIf { it.isNotBlank() }?.let { abs(it) }
+            if (primaryUrl == null) {
                 Log.e(TAG, "stream empty url ep=$ep")
                 return false
             }
-            val vUrl = abs(rawUrl)
-            val declared = when {
-                typeStr == "mp4" -> "MP4"
-                typeStr == "hls" -> "M3U8"
-                else -> null
-            }
-            val linkType = if (typeStr == "hls" || vUrl.contains(".m3u8")) ExtractorLinkType.M3U8
-            else ExtractorLinkType.VIDEO
-
-            callback(
-                newExtractorLink(source = name, name = FormatTag.tagged("الحلقة $ep", vUrl, linkType, declared), url = vUrl, type = linkType) {
-                    referer = mainUrl
-                    qOf(vUrl)?.let { quality = getQualityFromName(it) }
-                    headers = mapOf("Referer" to mainUrl)
+            if (probeHealth(primaryUrl) == Health.DEAD) {
+                val alt = primary.sourceTag?.takeIf { it.isNotBlank() }?.let { fetchStream(id, epUrl, it) }
+                val altUrl = alt?.url?.trim().orEmpty().takeIf { it.isNotBlank() }?.let { abs(it) }
+                if (alt != null && altUrl != null && altUrl != primaryUrl &&
+                    probeHealth(altUrl) == Health.ALIVE
+                ) {
+                    // اسمُ الرابط هو ما يعرضه المشغّل، فالبديل يميَّز بمُضيفه كي لا
+                    // يظهر صفٌّ متطابق مع الأساسي بلا فرق.
+                    val altHost = runCatching { java.net.URL(altUrl).host }
+                        .getOrNull()?.removePrefix("www.").orEmpty()
+                    Log.i(TAG, "loadLinks alternate alive ep=$ep ${altUrl.take(70)}")
+                    emitStream(alt, ep, seenSubUrl, seenSubLang, subtitleCallback, callback,
+                        labelSuffix = if (altHost.isBlank()) " · بديل" else " · $altHost")
+                    emitStream(primary, ep, seenSubUrl, seenSubLang, subtitleCallback, callback)
+                    return true
                 }
-            )
-
-            // الجودات الإضافية إن أعلنتها الاستجابة (قياسياً المصفوفة فارغة،
-            // فلا تُصدر شيئاً) — بعد الرابط الأساسي دائماً حتى لا تحلّ محلّه.
-            node.renditions.orEmpty().forEach { rd ->
-                val ru = rd.url?.trim().orEmpty()
-                if (ru.isEmpty()) return@forEach
-                val u = abs(ru)
-                if (u == vUrl) return@forEach
-                val label = rd.height?.takeIf { it > 0 }?.let { "${it}p" }
-                    ?: rd.name?.takeIf { it.isNotBlank() }
-                    ?: "جودة إضافية"
-                val rType = if (u.contains(".m3u8")) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
-                val rDeclared = if (u.contains(".m3u8")) "M3U8" else declared
-                callback(
-                    newExtractorLink(source = name, name = FormatTag.tagged(label, u, rType, rDeclared), url = u, type = rType) {
-                        referer = mainUrl
-                        rd.height?.takeIf { it > 0 }?.let { quality = getQualityFromName("${it}p") }
-                        headers = mapOf("Referer" to mainUrl)
-                    }
-                )
+                // لا بديل حيّ: يبقى الأساسي. «تعذّر الفحص» ليس حُكم إسقاط — وإلا
+                // حُوِّلت حلقةٌ تعمل إلى «لا يوجد روابط».
+                Log.i(TAG, "loadLinks primary DEAD ep=$ep alt=${altUrl ?: "none"} — emit primary anyway")
             }
+            emitStream(primary, ep, seenSubUrl, seenSubLang, subtitleCallback, callback)
             true
         } catch (e: kotlinx.coroutines.CancellationException) {
             throw e
         } catch (e: Exception) {
             Log.e(TAG, "loadLinks FATAL data=$data", e)
             false
+        }
+    }
+
+    /** حكم فحص الرابط — ميتٌ وتعذّر الفحص منفصلان عمداً (قِيس NartoDrama). */
+    private enum class Health { ALIVE, DEAD, UNKNOWN }
+
+    /**
+     * مهلة قصيرة: رابط ميت يُمهَل٢٫٥ ثانية لا عشر — وإلا طالت مهلة `loadLinks`
+     * نفسها حتى يعرض التطبيق «لا روابط» (قِيس Mosalsaly `probeMedia`).
+     * بلا `Range`: رأس Range يقلب الحُكم على بعض المضيفات (قِيس joyreels).
+     * نقرأ رأساً صغيراً من الجسد ثم نغلق — لا تحميل ملف كامل.
+     */
+    private fun probeHealth(url: String): Health = try {
+        val conn = java.net.URL(url).openConnection() as java.net.HttpURLConnection
+        conn.requestMethod = "GET"
+        conn.connectTimeout = 2500
+        conn.readTimeout = 3500
+        conn.instanceFollowRedirects = true
+        conn.setRequestProperty("Referer", mainUrl)
+        val code = try {
+            conn.responseCode
+        } finally {
+            // نقرأ رأساً صغيراً فقط (64 بايت) ثم نقطع: الجسم قد يكون mp4 بـ٩ ميغابايت.
+            runCatching {
+                conn.inputStream?.use { ins -> ins.read(ByteArray(64)) }
+            }
+            conn.disconnect()
+        }
+        val verdict = when {
+            code in 200..399 -> Health.ALIVE
+            // حُكم قاطع على هذا الرابط/المضيف — لا يُعدَّل بتكرار الطلب.
+            code in listOf(401, 403, 404, 410, 451) -> Health.DEAD
+            else -> Health.UNKNOWN   // 408/429/5xx مؤقّتة: لا حُكم
+        }
+        Log.i(TAG, "probe $verdict http=$code ${url.take(80)}")
+        verdict
+    } catch (e: java.net.UnknownHostException) {
+        Log.i(TAG, "probe DEAD dns ${url.take(80)}")
+        Health.DEAD
+    } catch (e: javax.net.ssl.SSLException) {
+        // شهادة مرفوضة عند كل عميل صارم — والمشغّل منهم (قِيس reelree/cdn.narto).
+        Log.i(TAG, "probe DEAD ssl ${e.message?.take(40)} ${url.take(70)}")
+        Health.DEAD
+    } catch (e: Exception) {
+        Log.i(TAG, "probe UNKNOWN ${e.javaClass.simpleName} ${url.take(70)}")
+        Health.UNKNOWN
+    }
+
+    /**
+     * جلب نصّ الصفحة — محاولتان، لأن صفحاً واحداً يفشل تعني «لا يوجد روابط»
+     * لحلقةٍ سليمة (نفاد اتصال قصير لا يُذكر في أي سجلّ).
+     */
+    private suspend fun fetchHtml(url: String): String? {
+        repeat(2) { i ->
+            if (i > 0) delay(600L)
+            try {
+                return app.get(url, referer = mainUrl).text
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                Log.w(TAG, "fetchHtml try=$i FAILED ${e.javaClass.simpleName} ${url.take(70)}")
+            }
+        }
+        return null
+    }
+
+    /**
+     * `/api/stream/{id}?locale=ar` — ومنه فرعُ البديل `&refresh=1&failed=<sourceTag>`
+     * (الآلية نفسها في JS الموقع: `fetch("/api/stream/".concat(id,"?",l))` حيث
+     * `l = "locale=…&refresh=1&failed=…"`. نعيد على الأخطاء المؤقتة فقط:
+     * `503 source_busy` مقيسٌ هنا، و`410 source_unavailable` يعني عدم توفّر البديل.
+     */
+    private suspend fun fetchStream(id: Long, referer: String, failedTag: String?): StreamResponse? {
+        val query = buildString {
+            append("?locale=ar")
+            if (!failedTag.isNullOrBlank()) {
+                append("&refresh=1&failed=").append(URLEncoder.encode(failedTag, "UTF-8"))
+            }
+        }
+        repeat(3) { i ->
+            if (i > 0) delay(700L * i)
+            val r = try {
+                app.get("$mainUrl/api/stream/$id$query", referer = referer)
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                Log.w(TAG, "stream try=$i FAILED ${e.javaClass.simpleName} id=$id")
+                return@repeat
+            }
+            if (r.isSuccessful) {
+                return try {
+                    mapper.readValue(r.text, StreamResponse::class.java)
+                } catch (e: Exception) {
+                    Log.e(TAG, "stream parse FAILED id=$id", e)
+                    null
+                }
+            }
+            Log.w(TAG, "stream HTTP ${r.code} try=$i id=$id failedTag=$failedTag")
+            if (r.code !in listOf(403, 408, 429, 500, 502, 503, 504)) return null
+        }
+        return null
+    }
+
+    /**
+     * إصدار استجابة بثّ واحدة كاملة: الترجمات (رابط مطلق + رمز لغة، ولغة واحدة
+     * لا تُكرَّر — مجموعتا الفرز تمرَّران بين النداءات كي لا تُكرَّر الترجمة عند
+     * إصدار الأساسي بعد البديل)، ثم الرابط الأساسي، ثم الجودات الإضافية.
+     */
+    private suspend fun emitStream(
+        node: StreamResponse,
+        ep: Int,
+        seenSubUrl: MutableSet<String>,
+        seenSubLang: MutableSet<String>,
+        subtitleCallback: (SubtitleFile) -> Unit,
+        callback: (ExtractorLink) -> Unit,
+        labelSuffix: String = "",
+    ) {
+        // الترجمة — مساراتها نسبية (`/subs/1751101/ar.vtt`) والمشغّل لا يضيف mainUrl
+        // إلى SubtitleFile.url أبداً (مقيس على cloudstream.jar) فنبنيه نحن.
+        if (showSubs()) {
+            node.subtitles.orEmpty().forEach { s ->
+                val rawUrl = s.url?.trim().orEmpty()
+                if (rawUrl.isEmpty()) return@forEach
+                val subUrl = abs(rawUrl)
+                if (!seenSubUrl.add(subUrl)) return@forEach
+                val rawLang = (s.lang?.trim().orEmpty().ifEmpty { s.label?.trim().orEmpty() })
+                val lang = normalizeSubLang(rawLang) ?: rawLang.ifEmpty { "ترجمة" }
+                if (!seenSubLang.add(lang)) return@forEach
+                try {
+                    subtitleCallback(newSubtitleFile(subLangLabel(lang), subUrl) {
+                        this.headers = mapOf("Referer" to mainUrl)
+                    })
+                } catch (_: Exception) {
+                }
+            }
+        }
+
+        // الصيغة: `type` يقول hls/mp4، وله روابط بلا امتداد إطلاقاً
+        // (حملة mp4 تنتهي بـ`mime_type=video_mp4`) فنُمرّره إلى FormatTag
+        // ليكتب [MP4] لا [VIDEO] — انظر FormatTag.label.
+        val typeStr = node.type.orEmpty().lowercase()
+        val rawUrl = node.url?.trim().orEmpty()
+        if (rawUrl.isEmpty()) return
+        val vUrl = abs(rawUrl)
+        val declared = when {
+            typeStr == "mp4" -> "MP4"
+            typeStr == "hls" -> "M3U8"
+            else -> null
+        }
+        val linkType = if (typeStr == "hls" || vUrl.contains(".m3u8")) ExtractorLinkType.M3U8
+        else ExtractorLinkType.VIDEO
+
+        callback(
+            newExtractorLink(source = name, name = FormatTag.tagged("الحلقة $ep$labelSuffix", vUrl, linkType, declared), url = vUrl, type = linkType) {
+                referer = mainUrl
+                qOf(vUrl)?.let { quality = getQualityFromName(it) }
+                headers = mapOf("Referer" to mainUrl)
+            }
+        )
+
+        // الجودات الإضافية إن أعلنتها الاستجابة (قياسياً المصفوفة فارغة،
+        // فلا تُصدر شيئاً) — بعد الرابط الأساسي دائماً حتى لا تحلّ محلّه.
+        node.renditions.orEmpty().forEach { rd ->
+            val ru = rd.url?.trim().orEmpty()
+            if (ru.isEmpty()) return@forEach
+            val u = abs(ru)
+            if (u == vUrl) return@forEach
+            val label = rd.height?.takeIf { it > 0 }?.let { "${it}p" }
+                ?: rd.name?.takeIf { it.isNotBlank() }
+                ?: "جودة إضافية"
+            val rType = if (u.contains(".m3u8")) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
+            val rDeclared = if (u.contains(".m3u8")) "M3U8" else declared
+            callback(
+                newExtractorLink(source = name, name = FormatTag.tagged(label, u, rType, rDeclared), url = u, type = rType) {
+                    referer = mainUrl
+                    rd.height?.takeIf { it > 0 }?.let { quality = getQualityFromName("${it}p") }
+                    headers = mapOf("Referer" to mainUrl)
+                }
+            )
         }
     }
 
