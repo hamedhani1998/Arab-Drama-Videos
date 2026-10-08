@@ -11,6 +11,7 @@ import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
 import androidx.fragment.app.FragmentManager
 import androidx.preference.ListPreference
+import androidx.preference.MultiSelectListPreference
 import androidx.preference.Preference
 import androidx.preference.PreferenceCategory
 import androidx.preference.PreferenceFragmentCompat
@@ -72,6 +73,7 @@ class DramadunyamSettingsBottomSheet(private val prefs: SharedPreferences) : Bot
         const val KEY_SHOW_HOME = "dun_show_home"              // Boolean — الواجهة الرئيسية كلها
         const val KEY_SHOW_PLATFORMS = "dun_show_platforms"    // Boolean — صفوف المنصات
         const val KEY_HOME_ROWS = "dun_home_rows"              // "all" | "20" | "10" — عدد صفوف المنصات
+        const val KEY_HIDDEN_ROWS = "dun_hidden_rows"          // Set<String> — مفاتيح الأقسام المخفية
 
         fun show(fm: FragmentManager, prefs: SharedPreferences) {
             DramadunyamSettingsBottomSheet(prefs).show(fm, "dun_settings")
@@ -141,6 +143,25 @@ class DramadunyamSettingsBottomSheet(private val prefs: SharedPreferences) : Bot
             }
             frontCategory.addPreference(homeRowsPref)
 
+            // ★ التحكم المقطَّع: كل قسم على حدة. القيم = مفاتيح `MainPageData.data`
+            //   نفسها (الأحدث/الأكثر مشاهدة + مفاتيح المنصات الأربع والأربعون).
+            //   دلالة الاختيار مقلوبة عمداً: المؤشَّر = مُخفى، وبلا اختيار يظهر
+            //   كل شيء — وإلا لاضطرّ المستخدم لتأشير 42 من 45 قسماً لإخفاء واحد.
+            //   القائمة تُبنى من `DUN_PLATFORM_ROWS` (مصدر واحد للحقيقة مع `mainPage`).
+            val hiddenRowsPref = MultiSelectListPreference(ctx).apply {
+                key = KEY_HIDDEN_ROWS
+                title = "إخفاء أقسام محدَّدة"
+                summaryProvider = Preference.SummaryProvider<MultiSelectListPreference> {
+                    val n = it.values?.size ?: 0
+                    if (n == 0) "بلا اختيار: كل الأقسام ظاهرة" else "$n قسماً مُخفياً عن الواجهة"
+                }
+                entryValues = (listOf(DUN_FRONT_LATEST, DUN_FRONT_TOP) +
+                    DUN_PLATFORM_ROWS.map { it.first }).toTypedArray()
+                entries = (listOf("الأحدث", "الأكثر مشاهدة") +
+                    DUN_PLATFORM_ROWS.map { it.second }).toTypedArray()
+            }
+            frontCategory.addPreference(hiddenRowsPref)
+
             val playbackCategory = PreferenceCategory(ctx)
             playbackCategory.title = "خيارات التشغيل"
             preferenceScreen.addPreference(playbackCategory)
@@ -203,6 +224,7 @@ class DramadunyamSettingsBottomSheet(private val prefs: SharedPreferences) : Bot
                         remove(KEY_SHOW_HOME)
                         remove(KEY_SHOW_PLATFORMS)
                         remove(KEY_HOME_ROWS)
+                        remove(KEY_HIDDEN_ROWS)
                     }.apply()
                     Toast.makeText(ctx, "تمت إعادة الضبط", Toast.LENGTH_SHORT).show()
                     true

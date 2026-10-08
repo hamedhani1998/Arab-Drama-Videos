@@ -69,9 +69,58 @@ private data class PlayResponse(
 // ★ إشارات صفوف القسم الأمامي — محمولة في `MainPageData.data` لصفّي
 //   «الأحدث» و«الأكثر مشاهدة»؛ يقرؤها `getMainPage` ويميّزها عن مفاتيح
 //   المنصات (التي تشبه أسماءً حقيقية كـ"NetShort"). علامة "dun-" لا يصدرها
-//   الموقعُ في `platform` إطلاقاً، فالتزامن معها آمن.
-private const val DUN_FRONT_LATEST = "dun-front-latest"
-private const val DUN_FRONT_TOP = "dun-front-top"
+//   الموقعُ في `platform` إطلاقاً، فالتزامن معها آمن. `internal` لأن ورقة
+//   الإعدادات تبني منها قائمة «إخفاء الأقسام» في نفس الحزمة.
+internal const val DUN_FRONT_LATEST = "dun-front-latest"
+internal const val DUN_FRONT_TOP = "dun-front-top"
+
+/** صفوف المنصات (مفتاح ← عنوان الصفّ). `internal` لإعادة استخدامها في ورقة
+ *  الإعدادات (قائمة «إخفاء الأقسام») — مصدر واحد للحقيقة لا نسختان تتفرّعان. */
+internal val DUN_PLATFORM_ROWS: List<Pair<String, String>> = listOf(
+    "NetShort" to "مسلسلات NetShort",
+    "DramaWave" to "مسلسلات DramaWave",
+    "DramaBox" to "مسلسلات DramaBox",
+    "PineDrama" to "مسلسلات PineDrama",
+    "ReelShort" to "مسلسلات ReelShort",
+    "FreeReels" to "مسلسلات FreeReels",
+    "ShortMax" to "مسلسلات ShortMax",
+    "FlexTV" to "مسلسلات FlexTV",
+    "FlickReels" to "مسلسلات FlickReels",
+    "StarDust" to "مسلسلات StarDust",
+    "MoboReels" to "مسلسلات MoboReels",
+    "ShortWave" to "مسلسلات ShortWave",
+    "Storyreel" to "مسلسلات Storyreel",
+    "FlareFlow" to "مسلسلات FlareFlow",
+    "KalosTV" to "مسلسلات KalosTV",
+    "SerialPlus" to "مسلسلات SerialPlus",
+    "GoodShort" to "مسلسلات GoodShort",
+    "DramaBite" to "مسلسلات DramaBite",
+    "CubeTV" to "مسلسلات CubeTV",
+    "HappyShort" to "مسلسلات HappyShort",
+    "StarShort" to "مسلسلات StarShort",
+    "ShotShort" to "مسلسلات ShotShort",
+    "RapidTV" to "مسلسلات RapidTV",
+    "Playlet" to "مسلسلات Playlet",
+    "RadReels" to "مسلسلات RadReels",
+    "Joyreels" to "مسلسلات Joyreels",
+    "RaptDrama" to "مسلسلات RaptDrama",
+    "iDrama" to "مسلسلات iDrama",
+    "BiliTV" to "مسلسلات BiliTV",
+    "BonusTV" to "مسلسلات BonusTV",
+    "Reelife" to "مسلسلات Reelife",
+    "ShortBox" to "مسلسلات ShortBox",
+    "GoldDrama" to "مسلسلات GoldDrama",
+    "VibeShort" to "مسلسلات VibeShort",
+    "SodaReels" to "مسلسلات SodaReels",
+    "MicroDrama" to "مسلسلات MicroDrama",
+    "Vigloo" to "مسلسلات Vigloo",
+    "DramaPops" to "مسلسلات DramaPops",
+    "DramaRush" to "مسلسلات DramaRush",
+    "Shorten" to "مسلسلات Shorten",
+    "MeloShort" to "مسلسلات MeloShort",
+    "TopDrama" to "مسلسلات TopDrama",
+    "Melolo" to "مسلسلات Melolo",
+)
 
 // أسماء لغاتٍ يرسلها الموقع بحروفٍ محلّيةّ لا تعرفها مكتبة التطبيق ولا رمز ISO
 // يُشتقّ منها (قِيس على cloudstream.jar: `getLangTag()` يرجع لها null في المسارين
@@ -120,66 +169,23 @@ class DramadunyamProvider(private val prefs: SharedPreferences? = null) : MainAP
             // مطابقةٌ حرفية لما يبنيه `mainPageOf`: (name=الثاني، data=الأول،
             // horizontalImages=الافتراضي false) — أي تمرير `true` هنا كان يغيّر
             // شكل بطاقات صفوف المنصات كلّها.
+            val hidden = hiddenRows()
             val accent = if (showFront()) {
                 listOf(
                     MainPageData("الأحدث", DUN_FRONT_LATEST),
                     MainPageData("الأكثر مشاهدة", DUN_FRONT_TOP)
-                )
+                ).filter { it.data !in hidden }
             } else emptyList()
             // صفوف المنصات اختيارية (إعداد «إظهار قوائم المنصات»).
             if (!showPlatforms()) return accent
-            val rows = mainPagePlatforms.map { (k, v) -> MainPageData(v, k) }
-            // حدّ عدد الصفوف: كل صف طلب API، فتقليله يقصّ زمن فتح الواجهة.
+            val rows = DUN_PLATFORM_ROWS.map { (k, v) -> MainPageData(v, k) }
+                .filter { it.data !in hidden }
+            // حدّ عدد الصفوف: كل صف طلب API، فتقليله يقصّ زمن فتح الواجهة
+            // (يُطبَّق بعد إسقاط المخفية كي يبقى المطلوب ظاهراً كاملاً).
             val raw = prefs?.getString(DramadunyamSettingsBottomSheet.KEY_HOME_ROWS, "all") ?: "all"
             val n = raw.toIntOrNull()
             return if (n != null && n in 1 until rows.size) rows.take(n) else rows
         }
-    private val mainPagePlatforms: List<Pair<String, String>> = listOf(
-        "NetShort" to "مسلسلات NetShort",
-        "DramaWave" to "مسلسلات DramaWave",
-        "DramaBox" to "مسلسلات DramaBox",
-        "PineDrama" to "مسلسلات PineDrama",
-        "ReelShort" to "مسلسلات ReelShort",
-        "FreeReels" to "مسلسلات FreeReels",
-        "ShortMax" to "مسلسلات ShortMax",
-        "FlexTV" to "مسلسلات FlexTV",
-        "FlickReels" to "مسلسلات FlickReels",
-        "StarDust" to "مسلسلات StarDust",
-        "MoboReels" to "مسلسلات MoboReels",
-        "ShortWave" to "مسلسلات ShortWave",
-        "Storyreel" to "مسلسلات Storyreel",
-        "FlareFlow" to "مسلسلات FlareFlow",
-        "KalosTV" to "مسلسلات KalosTV",
-        "SerialPlus" to "مسلسلات SerialPlus",
-        "GoodShort" to "مسلسلات GoodShort",
-        "DramaBite" to "مسلسلات DramaBite",
-        "CubeTV" to "مسلسلات CubeTV",
-        "HappyShort" to "مسلسلات HappyShort",
-        "StarShort" to "مسلسلات StarShort",
-        "ShotShort" to "مسلسلات ShotShort",
-        "RapidTV" to "مسلسلات RapidTV",
-        "Playlet" to "مسلسلات Playlet",
-        "RadReels" to "مسلسلات RadReels",
-        "Joyreels" to "مسلسلات Joyreels",
-        "RaptDrama" to "مسلسلات RaptDrama",
-        "iDrama" to "مسلسلات iDrama",
-        "BiliTV" to "مسلسلات BiliTV",
-        "BonusTV" to "مسلسلات BonusTV",
-        "Reelife" to "مسلسلات Reelife",
-        "ShortBox" to "مسلسلات ShortBox",
-        "GoldDrama" to "مسلسلات GoldDrama",
-        "VibeShort" to "مسلسلات VibeShort",
-        "SodaReels" to "مسلسلات SodaReels",
-        "MicroDrama" to "مسلسلات MicroDrama",
-        "Vigloo" to "مسلسلات Vigloo",
-        "DramaPops" to "مسلسلات DramaPops",
-        "DramaRush" to "مسلسلات DramaRush",
-        "Shorten" to "مسلسلات Shorten",
-        "MeloShort" to "مسلسلات MeloShort",
-        "TopDrama" to "مسلسلات TopDrama",
-        "Melolo" to "مسلسلات Melolo",
-    )
-
     private fun showSubs(): Boolean =
         prefs?.getBoolean(DramadunyamSettingsBottomSheet.KEY_SHOW_SUBTITLES, true) != false
 
@@ -197,6 +203,13 @@ class DramadunyamProvider(private val prefs: SharedPreferences? = null) : MainAP
 
     private fun showPlatforms(): Boolean =
         prefs?.getBoolean(DramadunyamSettingsBottomSheet.KEY_SHOW_PLATFORMS, true) != false
+
+    // ★ الإخفاء الجزئي: مجموعة مفاتيح الأقسام المخفية من ورقة الإعدادات
+    //   (`dun_hidden_rows`) — كل قسم يُحدَّد بالظهور أو الإخفاء على حدة.
+    //   القيم = مفاتيح `MainPageData.data` نفسها (أسامٍ لا تظهر في الموقع،
+    //   فلا تتعارض مع معرّف منصة حقيقي). مجموعة خالية = الكل ظاهر (الافتراضي).
+    private fun hiddenRows(): Set<String> =
+        prefs?.getStringSet(DramadunyamSettingsBottomSheet.KEY_HIDDEN_ROWS, null) ?: emptySet()
 
     // ── بوابة التزامن على API ────────────────────────────────────────────────
     //
@@ -273,8 +286,27 @@ class DramadunyamProvider(private val prefs: SharedPreferences? = null) : MainAP
     }
 
     /**
-     * طلبٌ بجرعةٍ من الحيل: التذكرة صراحةً، وإعادة تسخينٍ واحدة إذا رُفض الطلب
-     * (412/تحدّي)، كرّها في محاولة واحدة أخرى قبل اليأس.
+     * التذكرة المتجدّدة قد تصل في `Set-Cookie` أي استجابة — نعتمدها فوراً
+     * كي لا نرسل تذكرةً عفا عليها القيد (قياس 2026-10-08: قيم `dd_bilet`
+     * ثابتة عبر الدورات، والتبديل يحدث أحياناً بلا إعلان).
+     */
+    private fun adoptTicket(r: com.lagradost.nicehttp.NiceResponse) {
+        val t = r.cookies["dd_bilet"]?.takeIf { it.isNotBlank() } ?: return
+        if (t != cachedTicket) {
+            Log.d(TAG, "adopted rotated dd_bilet")
+            cachedTicket = t
+        }
+    }
+
+    /**
+     * طلبٌ بجرعةٍ من الحيل: التذكرة صراحةً، وعند الرفض (412/تحدّي) يُعاد
+     * التسخين **حتى ثلاث دورات** بفاصل ثانية ونصف.
+     *
+     * لماذا ثلاث لا واحدة (قياس 2026-10-08): التذكرة تموت بشكل حادٍّ متقطع —
+     * في محاولةٍ واحدة ماتت التذكرة بعد طلبٍ واحد، وأحياناً بعد 12 طلباً،
+     * والتذكرة المُعاد تسخينها قد تُرفض هي الأخرى من أوّلها (وُصفت «bilet»
+     * من البداية). الدورة الثالثة رفعت التعافي من «طلب واحد ثم موت» إلى
+     * النجاح في كل المقاسات — والرفض المستمر يعود null مع سجلّ صريح.
      */
     private suspend fun getWithTicket(
         url: String,
@@ -285,16 +317,21 @@ class DramadunyamProvider(private val prefs: SharedPreferences? = null) : MainAP
             Log.e(TAG, "getWithTicket no ticket $url")
             return null
         }
-        val h1 = authHeaders(extra) ?: return null
-        var r = app.get(url, referer = referer ?: mainUrl, headers = h1)
-        if (needsRewarm(r)) {
-            Log.d(TAG, "re-warm after ${r.code} $url")
+        var last: com.lagradost.nicehttp.NiceResponse? = null
+        for (cycle in 1..3) {
+            val h = authHeaders(extra) ?: return null
+            val r = app.get(url, referer = referer ?: mainUrl, headers = h)
+            adoptTicket(r)
+            last = r
+            if (!needsRewarm(r)) return r
+            Log.d(TAG, "re-warm cycle=$cycle after ${r.code} $url")
             cachedTicket = null
-            warmTicket() ?: return null
-            val h2 = authHeaders(extra) ?: return null
-            r = app.get(url, referer = referer ?: mainUrl, headers = h2)
+            warmTicket() ?: return r
+            // فاصل قصير: الرفض يتغيّر مع الزمن لا مع التذكرة وحدها (قِيس).
+            if (cycle < 3) kotlinx.coroutines.delay(1500)
         }
-        return r
+        Log.e(TAG, "getWithTicket persistent 412 after 3 cycles $url")
+        return last
     }
 
     /** رابط مطلق — الموقع يرسل مسارات نسبية والمشغّل لا يضيف mainUrl. */

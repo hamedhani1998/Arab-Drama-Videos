@@ -19,6 +19,39 @@ private val mapper = ObjectMapper().registerKotlinModule()
 
 private const val TAG = "DirectDrama"
 
+/** صفوف المنصات (مفتاح ← عنوان الصفّ). `internal` لإعادة استخدامها في ورقة
+ *  الإعدادات (قائمة «إخفاء الأقسام») — مصدر واحد للحقيقة لا نسختان تتفرّعان.
+ *  قُيست عناوينها من `/ar/platform` نفسها: «مسلسلات {الاسم} القصيرة». */
+internal val DDR_PLATFORM_ROWS: List<Pair<String, String>> = listOf(
+    "pinedrama" to "مسلسلات PineDrama القصيرة",
+    "reelshort" to "مسلسلات ReelShort القصيرة",
+    "flextv" to "مسلسلات FlexTV القصيرة",
+    "shortmax" to "مسلسلات ShortMax القصيرة",
+    "moboreels" to "مسلسلات MoboReels القصيرة",
+    "netshort" to "مسلسلات NetShort القصيرة",
+    "dramabite" to "مسلسلات DramaBite القصيرة",
+    "goodshort" to "مسلسلات GoodShort القصيرة",
+    "flickreels" to "مسلسلات FlickReels القصيرة",
+    "freereels" to "مسلسلات FreeReels القصيرة",
+    "rapidtv" to "مسلسلات RapidTV القصيرة",
+    "dotdrama" to "مسلسلات DotDrama القصيرة",
+    "radreels" to "مسلسلات RadReels القصيرة",
+    "meloshort" to "مسلسلات MeloShort القصيرة",
+    "shortswave" to "مسلسلات ShortsWave القصيرة",
+    "fundrama" to "مسلسلات FunDrama القصيرة",
+    "dramabox" to "مسلسلات DramaBox القصيرة",
+    "playlet" to "مسلسلات Playlet القصيرة",
+    "flareflow" to "مسلسلات FlareFlow القصيرة",
+    "bonustv" to "مسلسلات BonusTV القصيرة",
+    "shotshort" to "مسلسلات ShotShort القصيرة",
+    "microdrama" to "مسلسلات MicroDrama القصيرة",
+    "vigloo" to "مسلسلات Vigloo القصيرة",
+    "dramawave" to "مسلسلات DramaWave القصيرة",
+    "starshort" to "مسلسلات StarShort القصيرة",
+    "stardusttv" to "مسلسلات StarDust TV القصيرة",
+    "snackshort" to "مسلسلات SnackShort القصيرة",
+)
+
 /** `/api/series/suggest` — عشرة نتائج بلا ترقيم صفحات. */
 private data class SuggestItem(
     val id: Long? = null,
@@ -90,38 +123,10 @@ class DirectDramaProvider(private val prefs: SharedPreferences? = null) : MainAP
     override var lang = "ar"
     override val supportedTypes = setOf(TvType.TvSeries)
 
-    // ★ كل منصات الموقع (27) صفّاً في الصفحة الرئيسية — قُيست عناوينها من
-    //   `/ar/platform` نفسها: «مسلسلات {الاسم} القصيرة» هو عنوان صفحة المنصة.
-    //   تُبنى مرّة واحدة ثم يقصّها `mainPage` حسب إعداد عدد الصفوف.
-    private val allPlatformRows = mainPageOf(
-        "pinedrama" to "مسلسلات PineDrama القصيرة",
-        "reelshort" to "مسلسلات ReelShort القصيرة",
-        "flextv" to "مسلسلات FlexTV القصيرة",
-        "shortmax" to "مسلسلات ShortMax القصيرة",
-        "moboreels" to "مسلسلات MoboReels القصيرة",
-        "netshort" to "مسلسلات NetShort القصيرة",
-        "dramabite" to "مسلسلات DramaBite القصيرة",
-        "goodshort" to "مسلسلات GoodShort القصيرة",
-        "flickreels" to "مسلسلات FlickReels القصيرة",
-        "freereels" to "مسلسلات FreeReels القصيرة",
-        "rapidtv" to "مسلسلات RapidTV القصيرة",
-        "dotdrama" to "مسلسلات DotDrama القصيرة",
-        "radreels" to "مسلسلات RadReels القصيرة",
-        "meloshort" to "مسلسلات MeloShort القصيرة",
-        "shortswave" to "مسلسلات ShortsWave القصيرة",
-        "fundrama" to "مسلسلات FunDrama القصيرة",
-        "dramabox" to "مسلسلات DramaBox القصيرة",
-        "playlet" to "مسلسلات Playlet القصيرة",
-        "flareflow" to "مسلسلات FlareFlow القصيرة",
-        "bonustv" to "مسلسلات BonusTV القصيرة",
-        "shotshort" to "مسلسلات ShotShort القصيرة",
-        "microdrama" to "مسلسلات MicroDrama القصيرة",
-        "vigloo" to "مسلسلات Vigloo القصيرة",
-        "dramawave" to "مسلسلات DramaWave القصيرة",
-        "starshort" to "مسلسلات StarShort القصيرة",
-        "stardusttv" to "مسلسلات StarDust TV القصيرة",
-        "snackshort" to "مسلسلات SnackShort القصيرة",
-    )
+    // ★ كل منصات الموقع (27) صفّاً في الصفحة الرئيسية — من `DDR_PLATFORM_ROWS`
+    //   (مصدر واحد للحقيقة يشترك مع ورقة الإعدادات). تُبنى مرّة واحدة ثم
+    //   يقصّها `mainPage` حسب الإعدادات.
+    private val allPlatformRows = mainPageOf(*DDR_PLATFORM_ROWS.toTypedArray())
 
     // ★ خصائص ديناميكية: تُقرأ مع كل رسم للواجهة، فالمفاتيح من ورقة الإعدادات
     //   تُطبَّق بلا إعادة تشغيل. `hasMainPage=false` يُخفي المصدر من الصفحة
@@ -129,13 +134,20 @@ class DirectDramaProvider(private val prefs: SharedPreferences? = null) : MainAP
     override val hasMainPage: Boolean
         get() = prefs?.getBoolean(DirectDramaSettingsBottomSheet.KEY_SHOW_HOME, true) != false
 
+    // ★ الإخفاء الجزئي: مجموعة مفاتيح الأقسام المخفية من ورقة الإعدادات
+    //   (`ddr_hidden_rows`) — كل قسم يُحدَّد بالظهور أو الإخفاء على حدة.
+    //   القيم = مفاتيح `MainPageData.data` نفسها. مجموعة خالية = الكل ظاهر.
+    private fun hiddenRows(): Set<String> =
+        prefs?.getStringSet(DirectDramaSettingsBottomSheet.KEY_HIDDEN_ROWS, null) ?: emptySet()
+
     override val mainPage: List<MainPageData>
         get() {
+            // الإخفاء يسبق حدّ العدد كي يبقى المطلوب ظاهراً كاملاً.
+            val rows = allPlatformRows.filter { it.data !in hiddenRows() }
             val raw = prefs?.getString(DirectDramaSettingsBottomSheet.KEY_HOME_ROWS, "all") ?: "all"
-            if (raw == "all") return allPlatformRows
-            val n = raw.toIntOrNull() ?: return allPlatformRows
-            return if (n in 1 until allPlatformRows.size) allPlatformRows.take(n)
-            else allPlatformRows
+            if (raw == "all") return rows
+            val n = raw.toIntOrNull() ?: return rows
+            return if (n in 1 until rows.size) rows.take(n) else rows
         }
 
     private fun showSubs(): Boolean =

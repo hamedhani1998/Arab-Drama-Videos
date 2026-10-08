@@ -11,6 +11,7 @@ import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
 import androidx.fragment.app.FragmentManager
 import androidx.preference.ListPreference
+import androidx.preference.MultiSelectListPreference
 import androidx.preference.Preference
 import androidx.preference.PreferenceCategory
 import androidx.preference.PreferenceFragmentCompat
@@ -69,6 +70,7 @@ class DirectDramaSettingsBottomSheet(private val prefs: SharedPreferences) : Bot
         const val KEY_SHOW_SUBTITLES = "ddr_show_subtitles"   // Boolean — الافتراضي true
         const val KEY_SHOW_HOME = "ddr_show_home"             // Boolean — الواجهة الرئيسية كلها
         const val KEY_HOME_ROWS = "ddr_home_rows"             // "all" | "10" | "18" — عدد صفوف المنصات
+        const val KEY_HIDDEN_ROWS = "ddr_hidden_rows"         // Set<String> — مفاتيح الأقسام المخفية
 
         fun show(fm: FragmentManager, prefs: SharedPreferences) {
             DirectDramaSettingsBottomSheet(prefs).show(fm, "ddr_settings")
@@ -118,6 +120,23 @@ class DirectDramaSettingsBottomSheet(private val prefs: SharedPreferences) : Bot
             }
             homeCategory.addPreference(homeRowsPref)
 
+            // ★ التحكم المقطَّع: كل قسم على حدة. القيم = مفاتيح `MainPageData.data`
+            //   نفسها (مفاتيح المنصات الـ27). دلالة الاختيار مقلوبة عمداً:
+            //   المؤشَّر = مُخفى، وبلا اختيار يظهر كل شيء — وإلا لاضطرّ
+            //   المستخدم لتأشير 26 من 27 قسماً لإخفاء واحد.
+            //   القائمة تُبنى من `DDR_PLATFORM_ROWS` (مصدر واحد للحقيقة مع `mainPage`).
+            val hiddenRowsPref = MultiSelectListPreference(ctx).apply {
+                key = KEY_HIDDEN_ROWS
+                title = "إخفاء أقسام محدَّدة"
+                summaryProvider = Preference.SummaryProvider<MultiSelectListPreference> {
+                    val n = it.values?.size ?: 0
+                    if (n == 0) "بلا اختيار: كل الأقسام ظاهرة" else "$n قسماً مُخفياً عن الواجهة"
+                }
+                entryValues = DDR_PLATFORM_ROWS.map { it.first }.toTypedArray()
+                entries = DDR_PLATFORM_ROWS.map { it.second }.toTypedArray()
+            }
+            homeCategory.addPreference(hiddenRowsPref)
+
             val playbackCategory = PreferenceCategory(ctx)
             playbackCategory.title = "خيارات التشغيل"
             preferenceScreen.addPreference(playbackCategory)
@@ -155,6 +174,7 @@ class DirectDramaSettingsBottomSheet(private val prefs: SharedPreferences) : Bot
                         remove(KEY_SHOW_SUBTITLES)
                         remove(KEY_SHOW_HOME)
                         remove(KEY_HOME_ROWS)
+                        remove(KEY_HIDDEN_ROWS)
                     }.apply()
                     Toast.makeText(ctx, "تمت إعادة الضبط", Toast.LENGTH_SHORT).show()
                     true
