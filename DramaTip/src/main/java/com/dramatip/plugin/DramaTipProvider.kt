@@ -72,14 +72,23 @@ class DramaTipProvider(private val prefs: SharedPreferences? = null) : MainAPI()
         "storyreel" to "StoryReel",
     )
 
-    // صف فرعي لكل منصة — مفتاح الصف = slug، يُمرَّر في request.data.
-    // الصف الأول «واجهة رئيسية» = قائمة /ar (ItemList JSON-LD) بأحدث المسلسلات.
-    override val mainPage = mainPageOf(
-        *listOf("home" to "واجهة رئيسية")
-            .plus(platformRows)
-            .map { (slug, label) -> slug to label }
-            .toTypedArray()
-    )
+    // الصفوف الرئيسية بترتيب العرض: «الأحدث» و«الأكثر مشاهدة» قبل أسماء المنصّات.
+    // مفاتيح الصفوف (تُمرَّر في request.data عند البث):
+    //   latest  → /ar/category/newly-added
+    //   popular → /ar/category/populer
+    //   <slug>  → /ar/source/<slug>
+    private fun homeRows(): List<Pair<String, String>> {
+        val rows = mutableListOf<Pair<String, String>>()
+        if (prefs?.getBoolean(DramaTipSettingsBottomSheet.KEY_SHOW_LATEST, true) != false)
+            rows.add("latest" to "الأحدث")
+        if (prefs?.getBoolean(DramaTipSettingsBottomSheet.KEY_SHOW_POPULAR, true) != false)
+            rows.add("popular" to "الأكثر مشاهدة")
+        if (prefs?.getBoolean(DramaTipSettingsBottomSheet.KEY_SHOW_PLATFORMS, true) != false)
+            rows.addAll(platformRows)
+        return rows
+    }
+
+    override val mainPage = mainPageOf(*homeRows().map { (k, l) -> k to l }.toTypedArray())
 
     private fun reqHeaders() = mapOf(
         "User-Agent" to TIP_UA,
@@ -110,9 +119,8 @@ class DramaTipProvider(private val prefs: SharedPreferences? = null) : MainAPI()
         } catch (_: Exception) { listOf(doc) }
     }
 
-    // كل mainEntity يحمل itemListElement (بطاقات كتالوج). أما الرئيسية /ar
-    // فتعرض عقدة ItemList تحمل itemListElement مباشرةً (دون mainEntity) —
-    // نقيب عنهما معًا ليغذي صفّ «واجهة رئيسية».
+    // كل mainEntity يحمل itemListElement (بطاقات كتالوج)؛ وقد تحمل العقدة
+    // نفسُها itemListElement مباشرةً (كما في تصنيفات الموقع) — نأخذهما معًا.
     private fun collections(html: String): List<org.json.JSONObject> {
         val out = mutableListOf<org.json.JSONObject>()
         for (node in graphNodes(jsonLdDoc(html))) {
@@ -145,8 +153,12 @@ class DramaTipProvider(private val prefs: SharedPreferences? = null) : MainAPI()
         return try {
             if (page > 1) return null // لا ترقيم (قِيس: كل الصيغ تعيد الـ 24 نفسها)
             val slug = request.data.takeIf { it.isNotBlank() } ?: return null
-            // الصف «واجهة رئيسية»: قائمة البطاقات من الصفحة الرئيسية نفسها (/ar).
-            val url = if (slug == "home") "$TIP_MAIN/" else "$TIP_MAIN/source/${escapeSlug(slug)}"
+            // «الأحدث» و«الأكثر مشاهدة» من تصنيفات الموقع؛ غيرها = مصدر/منصّة.
+            val url = when (slug) {
+                "latest" -> "$TIP_MAIN/category/newly-added"
+                "popular" -> "$TIP_MAIN/category/populer"
+                else -> "$TIP_MAIN/source/${escapeSlug(slug)}"
+            }
             val h = fetchText(url) ?: return null
             val items = parseCollection(h, java.util.HashSet())
             newHomePageResponse(request.name, items)
@@ -356,7 +368,7 @@ class DramaTipProvider(private val prefs: SharedPreferences? = null) : MainAPI()
                 for (m in Regex(""""enc":"([A-Za-z0-9+/=]+)"""").findAll(f.substring(chainStart, chainEnd))) {
                     val plain = decryptOrSkip(m.groupValues[1]) ?: continue
                     if (!seenPlain.add(plain)) continue
-                    emitVideo(source, plain, collected, null)
+                    emitVideo(source, plain, collected, null, seenPlain)
                 }
             }
 
@@ -384,7 +396,7 @@ class DramaTipProvider(private val prefs: SharedPreferences? = null) : MainAPI()
                 if (m != null) {
                     val plain = decryptOrSkip(m.groupValues[1])
                     if (plain != null && seenPlain.add(plain)) {
-                        emitVideo("$source · بديل", plain, collected, typeM?.groupValues?.get(1))
+                        emitVideo("$source · بديل", plain, collected, typeM?.groupValues?.get(1), seenPlain)
                     }
                 }
             }
@@ -411,21 +423,69 @@ class DramaTipProvider(private val prefs: SharedPreferences? = null) : MainAPI()
     private fun decryptOrSkip(enc: String): String? = try { decryptEnc(enc) } catch (e: Exception) { logE("decrypt: ${e.message}"); null }
 
     // يُنشئ رابط إخراج من نصٍّ مصدري.
-    private suspend fun emitVideo(source0: String, plain: String, collected: MutableList<ExtractorLink>, typeRaw: String?) {
+    // — نصّ HLS (master): نُوسّعه إلى «جوداتها الحقيقية» من تصريحات
+    //   EXT-X-STREAM-INF (مع تبسيط الواجهة الصغيرة: اسم الجودة = min(العرض،
+    //   الارتفاع) لأن الفيديو القصير عمودي؛ 1080x1920 → 1080p). إن لم نعثر
+    //   على سطور صيغ، نرسل master نفسه كما هو.
+    // — MP4 / نصّ مباشر: يُرسل كرابط فيديو مباشر، ويُوسَم بصيغته.
+    private suspend fun emitVideo(source0: String, plain: String, collected: MutableList<ExtractorLink>, typeRaw: String?, seen: MutableSet<String>) {
         val lower = plain.lowercase()
-        val extType = when {
-            lower.contains(".mpd") || lower.contains("application/dash+xml") -> ExtractorLinkType.DASH
-            lower.contains(".m3u8") || lower.contains("application/vnd.apple.mpegurl") -> ExtractorLinkType.M3U8
-            else -> ExtractorLinkType.VIDEO
+        if (lower.contains(".m3u8") || lower.contains("application/vnd.apple.mpegurl")) {
+            val base = plain.substringBeforeLast('/')
+            val lines = plain.split('\n')
+            var pendingInf: String? = null
+            var emitted = 0
+            for (ln in lines) {
+                val l = ln.trim()
+                if (l.startsWith("#EXT-X-STREAM-INF:")) {
+                    pendingInf = l.removePrefix("#EXT-X-STREAM-INF:")
+                } else if (pendingInf != null && l.isNotBlank() && !l.startsWith("#")) {
+                    val variant = if (l.startsWith("http")) l else "$base/$l"
+                    if (seen.add(variant)) {
+                        emitHls(source0, variant, pendingInf, collected)
+                        emitted++
+                    }
+                    pendingInf = null
+                }
+            }
+            // master بلا سطور صيغ → نرسله كعرض واحد.
+            if (emitted == 0 && seen.add(plain)) {
+                emitHls(source0, plain, null, collected)
+            }
+            return
         }
+        // MP4/نصّ مباشر/MPD:
         val mime = Regex("""mime_type=([^&]+)""").find(plain)?.groupValues?.get(1)
-        val declared = when {
-            extType == ExtractorLinkType.M3U8 || extType == ExtractorLinkType.DASH -> null
-            extType == ExtractorLinkType.VIDEO && mime != null && mime.contains("mp4") -> "MP4"
-            else -> declaredFromType(typeRaw)
+        val (extType, declared) = when {
+            lower.contains(".mpd") || lower.contains("application/dash+xml") ->
+                ExtractorLinkType.DASH to null
+            mime != null && mime.contains("mp4") ->
+                ExtractorLinkType.VIDEO to "MP4"
+            else -> ExtractorLinkType.VIDEO to declaredFromType(typeRaw)
         }
         val tagged = FormatTag.tagged(source0, plain, extType, declared)
         collected.add(newExtractorLink(name, tagged, plain, extType) {
+            this.headers = reqHeaders()
+        })
+    }
+
+    // يبثّ رابط HLS بصيغة/دقّة من تصريح الـ master (أو بلا تصريح).
+    private suspend fun emitHls(source0: String, url: String, inf: String?, collected: MutableList<ExtractorLink>) {
+        // اسم الدقة الفعّالة = min(العرض، الارتفاع) — الفيديو القصير عمودي.
+        val nameSuffix = buildString {
+            inf?.let {
+                val res = Regex("""RESOLUTION=(\d{3,4})x(\d{3,4})""").find(it)?.groupValues
+                if (res != null && res.size >= 3) {
+                    val w = res[1].toIntOrNull() ?: 0
+                    val h = res[2].toIntOrNull() ?: 0
+                    append((minOf(w, h).takeIf { it > 0 } ?: h)).append('p')
+                }
+                if (Regex("""CODECS="[^"]*mp4a""").containsMatchIn(it)) append(" · صوت")
+            }
+        }.let { s -> if (s.isBlank()) "" else " · $s" }
+
+        val tagged = FormatTag.tagged(source0 + nameSuffix, url, ExtractorLinkType.M3U8, null)
+        collected.add(newExtractorLink(name, tagged, url, ExtractorLinkType.M3U8) {
             this.headers = reqHeaders()
         })
     }

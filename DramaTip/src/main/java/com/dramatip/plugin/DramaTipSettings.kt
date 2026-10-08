@@ -57,6 +57,11 @@ class DramaTipSettingsBottomSheet(private val prefs: SharedPreferences) : Bottom
         const val KEY_QUALITY_ORDER = "dt_quality_order"   // "default" | "asc" | "desc"
         const val KEY_SHOW_SUBTITLES = "dt_show_subtitles" // Boolean — الافتراضي true
 
+        // إظهار/إخفاء أقسام القائمة الرئيسية.
+        const val KEY_SHOW_LATEST = "dt_show_latest"       // «الأحدث» — true
+        const val KEY_SHOW_POPULAR = "dt_show_popular"     // «الأكثر مشاهدة» — true
+        const val KEY_SHOW_PLATFORMS = "dt_show_platforms" // أسماء المنصّات — true
+
         fun show(fm: FragmentManager, prefs: SharedPreferences) {
             DramaTipSettingsBottomSheet(prefs).show(fm, "dt_settings")
         }
@@ -71,6 +76,37 @@ class DramaTipSettingsBottomSheet(private val prefs: SharedPreferences) : Bottom
             //    إنشائه — هذا كان سبب انهيار التطبيق عند فتح الإعدادات).
             preferenceScreen = preferenceManager.createPreferenceScreen(requireContext())
 
+            // — أقسام القائمة الرئيسية —
+            val homeCat = PreferenceCategory(requireContext()).apply {
+                title = "أقسام القائمة الرئيسية"
+            }
+            preferenceScreen.addPreference(homeCat)
+
+            val showLatest = SwitchPreferenceCompat(requireContext()).apply {
+                key = KEY_SHOW_LATEST
+                title = "الأحدث"
+                summary = "يعرض صفّ «الأحدث» قبل أسماء المنصّات"
+                setDefaultValue(true)
+            }
+            homeCat.addPreference(showLatest)
+
+            val showPopular = SwitchPreferenceCompat(requireContext()).apply {
+                key = KEY_SHOW_POPULAR
+                title = "الأكثر مشاهدة"
+                summary = "يعرض صفّ «الأكثر مشاهدة» قبل أسماء المنصّات"
+                setDefaultValue(true)
+            }
+            homeCat.addPreference(showPopular)
+
+            val showPlatforms = SwitchPreferenceCompat(requireContext()).apply {
+                key = KEY_SHOW_PLATFORMS
+                title = "أسماء المنصّات"
+                summary = "يعرض صفًّا لكل منصّة في قائمة المنصّات"
+                setDefaultValue(true)
+            }
+            homeCat.addPreference(showPlatforms)
+
+            // — خيارات التشغيل —
             val cat = PreferenceCategory(requireContext()).apply {
                 title = "خيارات التشغيل"
             }
@@ -107,6 +143,9 @@ class DramaTipSettingsBottomSheet(private val prefs: SharedPreferences) : Bottom
                     prefs.edit().apply {
                         remove(KEY_QUALITY_ORDER)
                         remove(KEY_SHOW_SUBTITLES)
+                        remove(KEY_SHOW_LATEST)
+                        remove(KEY_SHOW_POPULAR)
+                        remove(KEY_SHOW_PLATFORMS)
                     }.apply()
                     android.widget.Toast.makeText(requireContext(), "تمت إعادة الضبط", android.widget.Toast.LENGTH_SHORT).show()
                     true
