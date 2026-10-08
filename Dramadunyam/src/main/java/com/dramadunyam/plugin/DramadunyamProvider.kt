@@ -11,6 +11,7 @@ import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.sync.withPermit
@@ -582,19 +583,40 @@ class DramadunyamProvider(private val prefs: SharedPreferences? = null) : MainAP
             }
 
             // 503 مؤقتة قد يردّها الخادم — الموقع نفسه يعيد المحاولة ×4/~3ث.
+            // سقف 30 ثانية على الحلقة كلّها: كل محاولةٍ قد تُعيد تسخين التذكرة
+            // ثلاث دورات ×1.5 ثانية فوق زمن الطلب نفسه، فشبكةٌ بطيئة أو خادمٌ
+            // ميت يحوّلان loadLinks إلى دورانٍ بلا نهاية في مفتاح السيرفرات
+            // (قِيس 2026-10-08: طلب /api/config واحد استغرق 34 ثانية، ومسلسلان
+            // أفاد المستخدم بأن مفتاحهما «يجلس يدور»). بعد السقف يعود false
+            // فيظهر «لا روابط» — حقيقةٌ سريعة خيرٌ من دورانٍ لا ينتهي.
             var play: PlayResponse? = null
-            for (attempt in 1..3) {
-                val r = getWithTicket("$mainUrl/play/$seriesId/$ep", referer = mainUrl) ?: return false
-                if (r.isSuccessful) {
-                    play = mapper.readValue(r.text, PlayResponse::class.java)
-                    break
+            var playRaw: String? = null
+            val ok = withTimeoutOrNull(30_000L) {
+                for (attempt in 1..3) {
+                    val r = getWithTicket("$mainUrl/play/$seriesId/$ep", referer = mainUrl)
+                        ?: return@withTimeoutOrNull false
+                    if (r.isSuccessful) {
+                        playRaw = r.text
+                        play = try {
+                            mapper.readValue(r.text, PlayResponse::class.java)
+                        } catch (e: Exception) {
+                            Log.e(TAG, "play parse FAILED series=$seriesId ep=$ep body=${r.text.take(300)}")
+                            null
+                        }
+                        return@withTimeoutOrNull true
+                    }
+                    if (r.code != 503) {
+                        Log.e(TAG, "play HTTP ${r.code} series=$seriesId ep=$ep")
+                        return@withTimeoutOrNull false
+                    }
+                    Log.d(TAG, "play 503 retry $attempt series=$seriesId ep=$ep")
+                    delay(1500)
                 }
-                if (r.code != 503) {
-                    Log.e(TAG, "play HTTP ${r.code} series=$seriesId ep=$ep")
-                    return false
-                }
-                Log.d(TAG, "play 503 retry $attempt series=$seriesId ep=$ep")
-                kotlinx.coroutines.delay(1500)
+                false
+            }
+            if (ok == null) {
+                Log.e(TAG, "play TIMEOUT 30s series=$seriesId ep=$ep")
+                return false
             }
             val p = play ?: return false
 
@@ -626,7 +648,11 @@ class DramadunyamProvider(private val prefs: SharedPreferences? = null) : MainAP
             val typeStr = p.type.orEmpty().lowercase()
             val raw = p.url?.trim().orEmpty()
             if (raw.isEmpty()) {
-                Log.e(TAG, "play empty url series=$seriesId ep=$ep")
+                // الجسم الخام يفرّض الحالتين المتماثلتين في الرمز: تذكرة ميتة
+                // `{"error":"bilet"}` (412 بلا تذكرة — قيس 2026-10-08) تُقرأ
+                // JSON بلا حقل url مثل البثّ الفارغ فعلاً؛ بلا هذا السطر لا
+                // يُميَّز الاثنان في logcat.
+                Log.e(TAG, "play empty url series=$seriesId ep=$ep body=${playRaw?.take(300)}")
                 return false
             }
             val vUrl = abs(raw)

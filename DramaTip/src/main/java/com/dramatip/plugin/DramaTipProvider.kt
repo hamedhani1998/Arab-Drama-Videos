@@ -312,10 +312,16 @@ class DramaTipProvider(private val prefs: SharedPreferences? = null) : MainAPI()
             val html = fetchText(url) ?: return false
             val f = extractFlight(html) ?: return false
 
-            // اسم المنصة من غلاف sourceFirst (يكون الاسم في أول مصدر)
-            val source = Regex(""""sourceFirst":{"source":"([^"]+)"""").find(f)?.groupValues?.get(1)
-                ?: Regex(""""source":"([^"]+)"""").find(f)?.groupValues?.get(1)
-                ?: name
+            // اسم المنصة من غلاف sourceFirst — فكُّ نصّي (indexOf) لا موجِّه، إذ يحوي
+            // غلافُ الكائن «{» حرفًا يفشل بنيةَ الموجِّه (Illegal repetition)
+            // فترمي PatternSyntaxException قبل أي تصنيف → «لايوجد روابط تشغيل».
+            val sfMark = f.indexOf("\"sourceFirst\"")
+            val srcAt = if (sfMark >= 0) f.indexOf("\"source\":", sfMark) else -1
+            val source = if (srcAt >= 0) {
+                val from = srcAt + "\"source\":\"".length
+                val until = f.indexOf('"', from).takeIf { it > from } ?: f.length
+                f.substring(from, until).takeIf { it.isNotBlank() } ?: name
+            } else name
 
             // العامل على كلمة/فِرق الحلقة: كل enc محصورٌ في كائنه — نُصنّفه
             // بموضع كائنه (لا نافذة سياق قد تتسرّب إلى الجار):
