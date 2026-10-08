@@ -183,7 +183,10 @@ class DramadunyamProvider(private val prefs: SharedPreferences? = null) : MainAP
             // حدّ عدد الصفوف: كل صف طلب API، فتقليله يقصّ زمن فتح الواجهة
             // (يُطبَّق بعد إسقاط المخفية كي يبقى المطلوب ظاهراً كاملاً، وعلى
             // صفوف المنصات وحدها — وإلا لضاع صفّا الواجهة الأمامية عند أي حدّ).
-            val raw = prefs?.getString(DramadunyamSettingsBottomSheet.KEY_HOME_ROWS, "all") ?: "all"
+            // الافتراضي 20 لا «كل الصفوف» (43): التطبيق ينتظر كل الصفوف قبل
+            // أول رسم، والبوابة تُطلق 4 طلبات كل نصف ثانية — 43 صفّاً = ~11
+            // ثانية مقيسة، و20 = ~5. من يستحبّ كل شيء يختاره من الإعدادات.
+            val raw = prefs?.getString(DramadunyamSettingsBottomSheet.KEY_HOME_ROWS, "20") ?: "20"
             val n = raw.toIntOrNull()
             val capped = if (n != null && n in 1 until rows.size) rows.take(n) else rows
             return accent + capped

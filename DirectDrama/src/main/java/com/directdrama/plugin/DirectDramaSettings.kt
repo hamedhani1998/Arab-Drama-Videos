@@ -129,15 +129,15 @@ class DirectDramaSettingsBottomSheet(private val prefs: SharedPreferences) : Bot
             val homeRowsPref = ListPreference(ctx).apply {
                 key = KEY_HOME_ROWS
                 title = "عدد صفوف المنصات"
-                summary = "افتراضي: كل الصفوف (27) — تقليلها يسرّع فتح الواجهة"
+                summary = "افتراضي: 18 صفّاً — الواجهة تنتظر كل الصفوف قبل الرسم"
                 summaryProvider = ListPreference.SimpleSummaryProvider.getInstance()
-                entryValues = arrayOf("all", "18", "10")
+                entryValues = arrayOf("18", "10", "all")
                 entries = arrayOf(
-                    "كل الصفوف (27)",
-                    "18 صفّاً",
-                    "10 صفوف"
+                    "18 صفّاً (الافتراضي)",
+                    "10 صفوف (الأسرع)",
+                    "كل الصفوف (27)"
                 )
-                setDefaultValue("all")
+                setDefaultValue("18")
             }
             homeCategory.addPreference(homeRowsPref)
 

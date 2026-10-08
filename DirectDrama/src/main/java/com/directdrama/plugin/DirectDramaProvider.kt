@@ -174,8 +174,12 @@ class DirectDramaProvider(private val prefs: SharedPreferences? = null) : MainAP
             val front = if (showFront()) frontRows.filter { it.data !in hidden } else emptyList()
             if (!showPlatforms()) return front
             // الإخفاء يسبق حدّ العدد كي يبقى المطلوب ظاهراً كاملاً.
+            // الافتراضي 18 لا «كل الصفوف»: التطبيق ينتظر **كل** الصفوف قبل رسم
+            // أول بطاقة، وكل صف هنا صفحة HTML كاملة (~440 كيلوبايت) — 29 صفّاً
+            // تعني ~13 ميغابايت و10 ثوانٍ قبل أول رسم. من يستحبّ كل شيء يختاره
+            // من الإعدادات.
             val rows = allPlatformRows.filter { it.data !in hidden }
-            val raw = prefs?.getString(DirectDramaSettingsBottomSheet.KEY_HOME_ROWS, "all") ?: "all"
+            val raw = prefs?.getString(DirectDramaSettingsBottomSheet.KEY_HOME_ROWS, "18") ?: "18"
             val n = raw.toIntOrNull() ?: return front + rows
             return front + (if (n in 1 until rows.size) rows.take(n) else rows)
         }
