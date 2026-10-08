@@ -10,6 +10,34 @@ private const val TIP_UA =
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36"
 private const val TIP_MAIN = "https://dramatip.net/ar"
 
+// منصّات الموقع من /ar/sources (slug → الاسم كما يعرضه الموقع). ٢٣ منصة.
+// ثابت على مستوى الملف كي تشاركه الإعدادات (مفتاح إظهار/إخفاء لكل منصّة).
+internal val DRAMA_TIP_PLATFORMS: List<Pair<String, String>> = listOf(
+    "bibishort" to "BibiShort",
+    "bilitv" to "BiliTV",
+    "dotdrama" to "DotDrama",
+    "dramabite" to "DramaBite",
+    "dramabox" to "DramaBox",
+    "flickreels" to "FlickReels",
+    "goodshort" to "GoodShort",
+    "happyshort" to "HappyShort",
+    "idrama" to "iDrama",
+    "joyreels" to "JoyReels",
+    "kalostv" to "KalosTV",
+    "moboreels" to "MoboReels",
+    "moreshort" to "MoreShort",
+    "mydramawave" to "MyDramaWave",
+    "netshort" to "NetShort",
+    "petadrama" to "PetaDrama",
+    "pinedrama" to "PineDrama",
+    "playlet" to "Playlet",
+    "reelshort" to "Reelshort",
+    "shorttv" to "ShortTV",
+    "shortwave" to "ShortWave",
+    "stardust" to "Stardust",
+    "storyreel" to "StoryReel",
+)
+
 /**
  * DramaTip — مجمّع دراما قصيرة يجمع أكثر من عشرين منصة (NetShort، MyDramaWave،
  * DramaBox، GoodShort، ReelShort…). الموقع Next.js، وصفحاته تُبثّ «RSC» —
@@ -46,45 +74,27 @@ class DramaTipProvider(private val prefs: SharedPreferences? = null) : MainAPI()
     // منصّات الموقع من /ar/sources (slug → الاسم كما يعرضه الموقع). ٢٣ منصة.
     // ملاحظة: الصف يعرض بطاقات تلك المنصّة فقط — لكن بعضها (KalosTV مثلًا) قد
     // يكون محتوياته مقفلة/قليلة في الموقع نفسه؛ لا أثر لذلك هنا.
-    private val platformRows = listOf(
-        "bibishort" to "BibiShort",
-        "bilitv" to "BiliTV",
-        "dotdrama" to "DotDrama",
-        "dramabite" to "DramaBite",
-        "dramabox" to "DramaBox",
-        "flickreels" to "FlickReels",
-        "goodshort" to "GoodShort",
-        "happyshort" to "HappyShort",
-        "idrama" to "iDrama",
-        "joyreels" to "JoyReels",
-        "kalostv" to "KalosTV",
-        "moboreels" to "MoboReels",
-        "moreshort" to "MoreShort",
-        "mydramawave" to "MyDramaWave",
-        "netshort" to "NetShort",
-        "petadrama" to "PetaDrama",
-        "pinedrama" to "PineDrama",
-        "playlet" to "Playlet",
-        "reelshort" to "Reelshort",
-        "shorttv" to "ShortTV",
-        "shortwave" to "ShortWave",
-        "stardust" to "Stardust",
-        "storyreel" to "StoryReel",
-    )
+    private val platformRows = DRAMA_TIP_PLATFORMS
 
     // الصفوف الرئيسية بترتيب العرض: «الأحدث» و«الأكثر مشاهدة» قبل أسماء المنصّات.
     // مفاتيح الصفوف (تُمرَّر في request.data عند البث):
     //   latest  → /ar/category/newly-added
     //   popular → /ar/category/populer
     //   <slug>  → /ar/source/<slug>
+    //
+    // كل منصّة تُعرض/تُخفى بمفتاحها المستقل dt_platform_<slug> (الافتراضي ظاهر).
     private fun homeRows(): List<Pair<String, String>> {
         val rows = mutableListOf<Pair<String, String>>()
         if (prefs?.getBoolean(DramaTipSettingsBottomSheet.KEY_SHOW_LATEST, true) != false)
             rows.add("latest" to "الأحدث")
         if (prefs?.getBoolean(DramaTipSettingsBottomSheet.KEY_SHOW_POPULAR, true) != false)
             rows.add("popular" to "الأكثر مشاهدة")
-        if (prefs?.getBoolean(DramaTipSettingsBottomSheet.KEY_SHOW_PLATFORMS, true) != false)
-            rows.addAll(platformRows)
+        if (prefs?.getBoolean(DramaTipSettingsBottomSheet.KEY_SHOW_PLATFORMS, true) != false) {
+            for ((slug, label) in platformRows) {
+                if (prefs?.getBoolean(DramaTipSettingsBottomSheet.platformKey(slug), true) != false)
+                    rows.add(slug to label)
+            }
+        }
         return rows
     }
 
@@ -422,6 +432,24 @@ class DramaTipProvider(private val prefs: SharedPreferences? = null) : MainAPI()
     // يعطي plain النصّ المكشوف أو null عند تعذّر فكّه.
     private fun decryptOrSkip(enc: String): String? = try { decryptEnc(enc) } catch (e: Exception) { logE("decrypt: ${e.message}"); null }
 
+    // فحص حيوية الرابط قبل بثّه: HEAD بنفس رؤوس اللاعب. التنظيف يجعل السيرفر
+    // الأول (ميِّتًا عند بعض المنصّات مثل DramaBox) لا يُبثّ فلا يختاره اللاعب
+    // في صدد 2001/2004. يُعطَّل من الإعدادات (سرعة) عند الحاجة.
+    private suspend fun alive(url: String): Boolean {
+        if (prefs?.getBoolean(DramaTipSettingsBottomSheet.KEY_PROBE_LINKS, true) == false) return true
+        return try {
+            val r = app.head(url, headers = reqHeaders(), referer = TIP_MAIN)
+            val code = r.code
+            if (code == 0 || code == 403) {
+                // HEAD قد يُرفض على بعض الـ CDN بينما GET يعمل — نعيد التحقق بـ GET
+                // برأس Range بايت 0 (نفس شكل طلب اللاعب) ونتحمل 200/206 فقط.
+                val g = app.get(url, headers = reqHeaders() + ("Range" to "bytes=0-0"), referer = TIP_MAIN)
+                val gc = g.code
+                (gc == 200 || gc == 206)
+            } else (code in 200..299)
+        } catch (e: Exception) { false }
+    }
+
     // يُنشئ رابط إخراج من نصٍّ مصدري.
     // — نصّ HLS (master): نُوسّعه إلى «جوداتها الحقيقية» من تصريحات
     //   EXT-X-STREAM-INF (مع تبسيط الواجهة الصغيرة: اسم الجودة = min(العرض،
@@ -431,11 +459,26 @@ class DramaTipProvider(private val prefs: SharedPreferences? = null) : MainAPI()
     private suspend fun emitVideo(source0: String, plain: String, collected: MutableList<ExtractorLink>, typeRaw: String?, seen: MutableSet<String>) {
         val lower = plain.lowercase()
         if (lower.contains(".m3u8") || lower.contains("application/vnd.apple.mpegurl")) {
+            // جلب جسم الـ master ثم فرز صيغه — الرابط لا يحوي أسطرًا بعد
+            // (كان split('\n') يُعيد master كرابط واحد دائمًا فلا تظهر الجودات).
+            if (!alive(plain)) {
+                logD("DramaTip: dropped dead M3U8 master $plain")
+                return
+            }
+            var master = try {
+                app.get(plain, headers = reqHeaders(), referer = TIP_MAIN).text
+            } catch (e: Exception) { logE("master GET: ${e.message}"); null }
+            if (master.isNullOrBlank()) {
+                // تعذّر جلب body → نرسل master كما هو (لنحوّل فعلًا نافعًا).
+                emitHls(source0, plain, null, collected)
+                return
+            }
             val base = plain.substringBeforeLast('/')
-            val lines = plain.split('\n')
             var pendingInf: String? = null
             var emitted = 0
-            for (ln in lines) {
+            // نفكّ NUL من body تلقائيًا
+            master = master.replace("\u0000", "")
+            for (ln in master.split('\n')) {
                 val l = ln.trim()
                 if (l.startsWith("#EXT-X-STREAM-INF:")) {
                     pendingInf = l.removePrefix("#EXT-X-STREAM-INF:")
@@ -463,6 +506,10 @@ class DramaTipProvider(private val prefs: SharedPreferences? = null) : MainAPI()
                 ExtractorLinkType.VIDEO to "MP4"
             else -> ExtractorLinkType.VIDEO to declaredFromType(typeRaw)
         }
+        if (!alive(plain)) {
+            logD("DramaTip: dropped dead ${declared ?: extType.name} $plain")
+            return
+        }
         val tagged = FormatTag.tagged(source0, plain, extType, declared)
         collected.add(newExtractorLink(name, tagged, plain, extType) {
             this.headers = reqHeaders()
@@ -471,6 +518,10 @@ class DramaTipProvider(private val prefs: SharedPreferences? = null) : MainAPI()
 
     // يبثّ رابط HLS بصيغة/دقّة من تصريح الـ master (أو بلا تصريح).
     private suspend fun emitHls(source0: String, url: String, inf: String?, collected: MutableList<ExtractorLink>) {
+        if (!alive(url)) {
+            logD("DramaTip: dropped dead M3U8 $url")
+            return
+        }
         // اسم الدقة الفعّالة = min(العرض، الارتفاع) — الفيديو القصير عمودي.
         val nameSuffix = buildString {
             inf?.let {

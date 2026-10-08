@@ -56,11 +56,15 @@ class DramaTipSettingsBottomSheet(private val prefs: SharedPreferences) : Bottom
         // مفاتيح الخيارات التي يقرأها DramaTipProvider عند البث.
         const val KEY_QUALITY_ORDER = "dt_quality_order"   // "default" | "asc" | "desc"
         const val KEY_SHOW_SUBTITLES = "dt_show_subtitles" // Boolean — الافتراضي true
+        const val KEY_PROBE_LINKS = "dt_probe_links"       // فحص حيوية الروابط — true
 
         // إظهار/إخفاء أقسام القائمة الرئيسية.
         const val KEY_SHOW_LATEST = "dt_show_latest"       // «الأحدث» — true
         const val KEY_SHOW_POPULAR = "dt_show_popular"     // «الأكثر مشاهدة» — true
         const val KEY_SHOW_PLATFORMS = "dt_show_platforms" // أسماء المنصّات — true
+
+        // مفتاح إظهار/إخفاء منصّة بعينها: dt_platform_<slug>.
+        fun platformKey(slug: String) = "dt_platform_$slug"
 
         fun show(fm: FragmentManager, prefs: SharedPreferences) {
             DramaTipSettingsBottomSheet(prefs).show(fm, "dt_settings")
@@ -135,6 +139,31 @@ class DramaTipSettingsBottomSheet(private val prefs: SharedPreferences) : Bottom
             }
             cat.addPreference(showSubs)
 
+            val probe = SwitchPreferenceCompat(requireContext()).apply {
+                key = KEY_PROBE_LINKS
+                title = "فحص حيوية الروابط"
+                summary = "يستبعد السيرفرات الميتة قبل التشغيل (أبطأ قليلًا لكن أدق)"
+                setDefaultValue(true)
+            }
+            cat.addPreference(probe)
+
+            // — إظهار/إخفاء كل منصّة على حدة —
+            val platCat = PreferenceCategory(requireContext()).apply {
+                title = "المنصّات"
+                summary = "كل منصّة تُعرض كصفّ في القائمة الرئيسية — أزل وسمها لإخفائها"
+            }
+            preferenceScreen.addPreference(platCat)
+
+            for ((slug, label) in DRAMA_TIP_PLATFORMS) {
+                val p = SwitchPreferenceCompat(requireContext()).apply {
+                    key = platformKey(slug)
+                    title = label
+                    summary = "يعرض صفّ «$label» في القائمة الرئيسية"
+                    setDefaultValue(true)
+                }
+                platCat.addPreference(p)
+            }
+
             val reset = Preference(requireContext()).apply {
                 key = "dt_reset"
                 title = "إعادة الضبط الافتراضي"
@@ -146,6 +175,7 @@ class DramaTipSettingsBottomSheet(private val prefs: SharedPreferences) : Bottom
                         remove(KEY_SHOW_LATEST)
                         remove(KEY_SHOW_POPULAR)
                         remove(KEY_SHOW_PLATFORMS)
+                        DRAMA_TIP_PLATFORMS.forEach { (slug, _) -> remove(platformKey(slug)) }
                     }.apply()
                     android.widget.Toast.makeText(requireContext(), "تمت إعادة الضبط", android.widget.Toast.LENGTH_SHORT).show()
                     true
