@@ -490,7 +490,7 @@ class NetShortProvider(private val prefs: SharedPreferences? = null) : MainAPI()
                 res.subtitleList?.forEach { sub ->
                     val subUrl = sub.url ?: return@forEach
                     if (subUrl.isBlank()) return@forEach
-                    try { subtitleCallback(newSubtitleFile(sub.language ?: "ar", subUrl)) } catch (_: Exception) {}
+                    try { subtitleCallback(newSubtitleFile(subLangLabel(sub.language ?: "ar"), subUrl)) } catch (_: Exception) {}
                 }
             }
             true

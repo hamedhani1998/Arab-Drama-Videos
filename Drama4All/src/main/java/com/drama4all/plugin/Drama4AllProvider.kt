@@ -307,7 +307,7 @@ class Drama4AllProvider(private val prefs: SharedPreferences? = null) : MainAPI(
             //    قيست عائلتا الموقع على هذه الحلقة:
             //    • `sf_` تُعطى رابطاً مطلقاً على cdn1.nsstorage.space برمز `ar` — تعمل كما هي.
             //    • `nt_` (narto) تُعطى مساراً نسبياً `/local_subtitles/…` بتسميات محلّيةّ
-            //      (`بالعربية` / `日本語` / `한국어` …). المسار النسبي يفشل حتماً:
+            //      (تسمياتٌ بلغاتها المحلية: عربية/يابانية/كورية …). المسار النسبي يفشل حتماً:
             //      `PlayerSubtitleHelper.getSubtitleData` يبني `SubtitleData` من `url`
             //      كما هو بلا أيّ إضافة لـ mainUrl (مقيس على cloudstream.jar)، فيقرّر
             //      المشغّل أنه «unknown url type». فنسبقه بـ mainUrl نحن.
@@ -334,7 +334,7 @@ class Drama4AllProvider(private val prefs: SharedPreferences? = null) : MainAPI(
                 }
                 if (!seenLang.add(lang)) return@forEach
                 try {
-                    subtitleCallback(newSubtitleFile(lang, subUrl) {
+                    subtitleCallback(newSubtitleFile(subLangLabel(lang), subUrl) {
                         this.headers = mapOf("Referer" to mainUrl)
                     })
                 } catch (e: Exception) {}

@@ -119,7 +119,7 @@ internal suspend fun loadNartoLinks(
             if (!seenSubs.add(subUrl)) continue
             // Do NOT wrap this in try/catch. Swallowing it is how a subtitle row shipped that
             // the player could never load, with nothing in logcat to explain why.
-            subtitleCallback(newSubtitleFile(lang, subUrl))
+            subtitleCallback(newSubtitleFile(subLangLabel(lang), subUrl))
         }
 
         // The API's own container flag describes the DIRECT play asset only. A multi_resolutions

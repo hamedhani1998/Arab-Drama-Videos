@@ -440,7 +440,7 @@ class ReelShortProvider(private val prefs: SharedPreferences? = null) : MainAPI(
                             "Arabic", "MSA" -> "ar"
                             else -> lang.lowercase().take(2)
                         }
-                        try { subtitleCallback(newSubtitleFile(cleanLang, subUrl)) } catch (_: Exception) {}
+                        try { subtitleCallback(newSubtitleFile(subLangLabel(cleanLang), subUrl)) } catch (_: Exception) {}
                     }
                     emitSorted(prefs, collected, callback)
                     return true

@@ -322,7 +322,7 @@ class MinuteDramaProvider(private val prefs: SharedPreferences? = null) : MainAP
                             .replace("/vtt/ar/", "/vtt/$code/")
                             .replace("_ar.vtt", "_$code.vtt")
                         if (url != null && url != subtitleUrlAr || code == "ar") {
-                            subtitleCallback(newSubtitleFile(label, url))
+                            subtitleCallback(newSubtitleFile(subLangLabel(label), url))
                         }
                     } catch (_: Exception) {}
                 }

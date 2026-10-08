@@ -472,7 +472,7 @@ class ReelreeProvider(private val prefs: SharedPreferences? = null) : MainAPI() 
             if (masterText != null && masterText.startsWith("#EXT") && subs.isEmpty()) {
                 for (t in extractTracks(masterText, playUrl)) {
                     if (t.kind == "SUBTITLES") {
-                        try { subtitleCallback(newSubtitleFile(t.lang, subtitleUrl(t.uri))) } catch (_: Exception) {}
+                        try { subtitleCallback(newSubtitleFile(subLangLabel(t.lang), subtitleUrl(t.uri))) } catch (_: Exception) {}
                     }
                 }
             }
@@ -654,11 +654,11 @@ private fun subtitleUrl(raw: String): String {
                 android.util.Log.i("Reelree", "subtitle has no lang/label, skipping")
                 continue
             }
-            // رمزٌ قياسي ⇒ يعرضه CloudStream باسمه الصحيح («العربية»).
-            // واسمٌ مجهول يُمرَّر حرفياً فهو أوضح من «sub0».
+            // الرمز يبقى الرمز هنا؛ subLangLabel يكسوه زوجَه عند الإصدار.
+            // والاسم المجهول يُمرَّر حرفياً فهو أوضح من «sub0».
             val lang = if (isLangCode(resolved)) normalizeLangCode(resolved) else resolved
             if (!seen.add(lang)) continue
-            out.add(newSubtitleFile(lang, subtitleUrl(url)))
+            out.add(newSubtitleFile(subLangLabel(lang), subtitleUrl(url)))
         }
         return out
     }

@@ -412,10 +412,11 @@ class DeepDramaProvider(private val prefs: SharedPreferences?) : MainAPI() {
         if (subs == null || !subs.isArray) return
         subs.forEach { s ->
             val u = firstOf(s, "url", "file", "src", "link")?.takeIf { it.isNotBlank() } ?: return@forEach
-            // ★ رمز ISO لا التسمية العربية: التطبيق يشتقّ الاسم العربي بنفسه،
-            //   وتمرير التسمية يعطي وسم IETF فارغاً فلا تُحمَّل الترجمة.
+            // ★ زوج «عربي لاتيني» عبر subLangLabel: العرض يكتب `lang` حرفياً
+            //   فـ«ar» تظهر هكذا، والاسم العربي وحده يعطي وسم IETF فارغاً؛
+            //   الزوج يُصحّح العرض ويُبقي الوسم حيّاً للتحديد التلقائي.
             val code = (firstOf(s, "language", "lang", "code", "locale") ?: "ar").trim()
-            if (code.isNotBlank()) subtitleCallback(newSubtitleFile(code, u))
+            if (code.isNotBlank()) subtitleCallback(newSubtitleFile(subLangLabel(code), u))
         }
     }
 

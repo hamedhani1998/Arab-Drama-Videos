@@ -101,8 +101,8 @@ class ShortDramaProvider(
          *   - `دراماقصيرة-ج8ق` فيها شَرطة، وYouTube يعاملها فاصلةً فيُقصر
          *     المعرّف على ما قبلها. تعمل إن كان ذيلُها لاحقاً؛ وإن لم تكن
          *     القناة موجودة بهذا الاسم فلا تُستبعد قنوات بسبب هذه النقطة.
-         *   - `@قناةالمسلسلاتالرومانسية` و`@山谷45` و`@مسرحهابيدراما` أسماء
-         *     عربية/صينية تحتاج percent-encoding في الرابط النهائي.
+         *   - `@قناةالمسلسلاتالرومانسية` وقناة `Shangu` و`@مسرحهابيدراما`
+         *     أسماء عربية وصينية تحتاج percent-encoding في الرابط النهائي.
          */
         private val BASE_CHANNELS = listOf(
             "دراما عربية" to "https://www.youtube.com/@Arabicdrma/playlists",
@@ -1135,7 +1135,7 @@ class ShortDramaProvider(
             val original = tracks.firstOrNull { !it.url.isNullOrBlank() }
             if (original != null) {
                 subtitleCallback(
-                    newSubtitleFile(original.locale?.language ?: "ar", original.url!!) {
+                    newSubtitleFile(subLangLabel(original.locale?.language ?: "ar"), original.url!!) {
                         this.headers = mapOf("Referer" to "https://www.youtube.com/")
                     }
                 )
@@ -1143,15 +1143,28 @@ class ShortDramaProvider(
 
             // 2) ثم العربية التلقائية. يوتيوب لا ينشرها، فتُولَّد عند الطلب.
             val base = original?.url?.takeIf { it.isNotBlank() } ?: return
-            val text = fetchSubtitleText(
-                "$base&fmt=vtt&tlang=ar",
-                "https://www.youtube.com/watch?v=$vid"
-            )
+            val referer = "https://www.youtube.com/watch?v=$vid"
+
+            // ★ الصيغ بالترتيب بلا `fmt` في الأولى: `sparams` الموقَّع لا يشمل
+            //   `fmt` فتُهمَل أو تُرفض، و`fmt+vlang` معاً يردّان جسداً صفرياً
+            //   دائماً (مقيس على ARY 2026-10-08) — وهو ما يجعل «الترجمة لا
+            //   تظهر» هنا. الأول الذي يردّ بجسد غير فارغ يُستخدم.
+            val text = fetchSubtitleText("$base&tlang=ar", referer)
+                .takeIf { it.isNotBlank() }
+                ?: fetchSubtitleText(base, referer)
+                    .takeIf { it.isNotBlank() }
+                ?: fetchSubtitleText("$base&fmt=vtt", referer)
             if (text.isBlank()) return
 
-            val local = ShortDramaSubServer.register(text) ?: return
+            // الصيغة الافتراضية `xml` — بلا toWebVtt كانت تُمرَّر إلى السيرفر
+            // كأنها VTT فيخرج الملف تحت ترويسة WEBVTT بلا مواعيد: يظهر في
+            // القائمة ولا يعمل. (نفس علة ARY المصلَّحة.)
+            val vtt = toWebVtt(text)
+            if (vtt.isBlank()) return
+
+            val local = ShortDramaSubServer.register(vtt) ?: return
             subtitleCallback(
-                newSubtitleFile("ar", local) {
+                newSubtitleFile(subLangLabel("ar"), local) {
                     this.headers = mapOf("Referer" to "https://www.youtube.com/")
                 }
             )
@@ -1179,6 +1192,96 @@ class ShortDramaProvider(
             Log.w(TAG, "timedtext failed: ${e.message}")
             ""
         }
+
+    /**
+     * يحوّل نص يوتيوب إلى WebVTT — وهو ما يقبله المشغّل.
+     *
+     * ★ الفخّ: `timedtext` يردّ **200 بجسد صفري** عند الحجب على الشبكة،
+     *   فيكفي فحص `responseCode` تسجيلاً لترجمةٍ فارغة تظهر ولا تعرض شيئاً.
+     *   لذلك نرفض الجسد الفارغ هنا — في الموضع الذي تنشأ فيه المشكلة.
+     */
+    private fun toWebVtt(raw: String): String {
+        val t = raw.trim().removePrefix("\uFEFF").trim()
+        if (t.isEmpty()) return ""
+        if (t.startsWith("WEBVTT")) return if (t.contains("-->")) t else ""
+        return try {
+            when {
+                t.startsWith("{") -> json3ToVtt(t)
+                t.startsWith("<") -> xmlToVtt(t)
+                t.contains("-->") -> t
+                else -> ""
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "vtt convert failed: ${e.message}")
+            ""
+        }
+    }
+
+    /** `json3`: `events[].segs[].utf8` مع `tStartMs`/`dDurationMs`. */
+    private fun json3ToVtt(raw: String): String {
+        val root = org.json.JSONObject(raw)
+        val events = root.optJSONArray("events") ?: return ""
+        val sb = StringBuilder("WEBVTT\n\n")
+        for (i in 0 until events.length()) {
+            val ev = events.optJSONObject(i) ?: continue
+            val segs = ev.optJSONArray("segs") ?: continue
+            val line = StringBuilder()
+            for (j in 0 until segs.length()) {
+                line.append(segs.optJSONObject(j)?.optString("utf8", "").orEmpty())
+            }
+            val text = line.toString().trim()
+            if (text.isEmpty()) continue
+            val start = ev.optDouble("tStartMs", 0.0).toLong()
+            val dur = ev.optDouble("dDurationMs", 0.0).toLong().coerceAtLeast(1L)
+            sb.append(ts(start)).append(" --> ").append(ts(start + dur)).append('\n')
+            sb.append(text).append("\n\n")
+        }
+        return if (sb.length <= 8) "" else sb.toString()
+    }
+
+    /** `xml`: `<text start="0.5" dur="1.2">…</text>`. */
+    private fun xmlToVtt(raw: String): String {
+        val sb = StringBuilder("WEBVTT\n\n")
+        // نعتمد على <text …> ونقرأ الخصائص بالاسم لا بترتيبها: يوتيوب
+        // لا يضمن أن `start` تسبق `dur`.
+        val tagRe = Regex("""<text\b([^>]*)>([\s\S]*?)</text>""")
+        var found = false
+        for (m in tagRe.findAll(raw)) {
+            val attrs = m.groupValues[1]
+            val body = unescapeXml(m.groupValues[2]).replace('\n', ' ').trim()
+            if (body.isEmpty()) continue
+            val start = attrDouble(attrs, "start") ?: 0.0
+            val dur = attrDouble(attrs, "dur") ?: 2.0
+            sb.append(ts(start.toLong())).append(" --> ").append(ts((start + dur).toLong()))
+                .append('\n')
+            sb.append(body).append("\n\n")
+            found = true
+        }
+        return if (found) sb.toString() else ""
+    }
+
+    /** يقرأ خاصية رقمية من نص الخصائص، بهامش مسافةٍ اختياري حول `=`. */
+    private fun attrDouble(attrs: String, name: String): Double? =
+        Regex("""\b$name\s*=\s*"([\d.]+)"""").find(attrs)
+            ?.groupValues?.get(1)?.toDoubleOrNull()
+
+    /**
+     * WebVTT timecode: `HH:MM:SS.mmm`.
+     *
+     * ★ `Locale.US` مقصود: بلاه تخرج الأرقام عربية-هندية على هاتفٍ عربي
+     *   (`٠٥:٠٣:١٢`) فيرفض المشغّل التوقيت ولا يعرض الترجمة أصلاً.
+     */
+    private fun ts(ms: Long): String {
+        val h = ms / 3_600_000
+        val m = (ms % 3_600_000) / 60_000
+        val s = (ms % 60_000) / 1000
+        val msec = ms % 1000
+        return String.format(java.util.Locale.US, "%02d:%02d:%02d.%03d", h, m, s, msec)
+    }
+
+    private fun unescapeXml(s: String): String = s
+        .replace("&amp;", "&").replace("&lt;", "<").replace("&gt;", ">")
+        .replace("&quot;", "\"").replace("&#39;", "'").replace("&apos;", "'")
 
     /**
      * مسار تشغيل مطابق لسيرفرات إضافة «يوتيوب»: `YoutubeStreamExtractor.fetchPage()`

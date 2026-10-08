@@ -691,18 +691,16 @@ class OnShortProvider(private val prefs: SharedPreferences? = null) : MainAPI() 
                 if (su.isBlank()) continue
                 if (!seen.add(su)) continue
                 val langRaw = s.get("lang")?.asText() ?: s.get("label")?.asText() ?: "ar"
-                // لا نمرّر التسمية العربية الواردة في label: قِسنا على الـAPI أنّ
-                // SubtitleHelper.fromCodeToLangTagIETF("اليابانية") = null، فالتطبيق
-                // وفي المقابل التطبيق يترجم الرمز
-                // بنفسه: fromTagToLanguageName("ja","ar") = «اليابانية»
-                // — أي التسمية العربية تُشتقّ منه لا تُمرَّر. فنُبقي الرمز القصير.
+                // الرمز القصير يبقى مفتاح التصفية أعلاه؛ وما يصل المشغّل يلبس
+                // subLangLabel زوجَه «اليابانية Japanese» — العرض عربيّ والوسم
+                // حيّ عبر الزوج اللاتيني (الاسم العربي وحده يعطي وسماً فارغاً).
                 val lang = normalizeLang(langRaw)
                 if (wanted.isNotEmpty() && lang !in wanted) {
                     filtered++
                     continue
                 }
                 try {
-                    subtitleCallback(newSubtitleFile(lang, su))
+                    subtitleCallback(newSubtitleFile(subLangLabel(lang), su))
                     sent++
                 } catch (e: Exception) {
                     // ابتلاؤه كان صامتاً تماماً: استثناء في واحدة يُخفي الفهم

@@ -1239,7 +1239,7 @@ class AryProvider(
             val original = tracks.firstOrNull { !it.url.isNullOrBlank() }
             if (original != null) {
                 subtitleCallback(
-                    newSubtitleFile(original.locale?.language ?: "ar", original.url!!) {
+                    newSubtitleFile(subLangLabel(original.locale?.language ?: "ar"), original.url!!) {
                         this.headers = mapOf("Referer" to "https://www.youtube.com/")
                     }
                 )
@@ -1275,7 +1275,7 @@ class AryProvider(
 
             val local = ArySubServer.register(vtt) ?: return
             subtitleCallback(
-                newSubtitleFile("ar", local) {
+                newSubtitleFile(subLangLabel("ar"), local) {
                     this.headers = mapOf("Referer" to "https://www.youtube.com/")
                 }
             )

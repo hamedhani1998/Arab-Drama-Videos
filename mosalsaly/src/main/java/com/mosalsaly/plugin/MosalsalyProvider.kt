@@ -1156,7 +1156,7 @@ class MosalsalyProvider(
                             Log.w(TAG, "netshort local server unavailable for sub, keeping fixed")
                         }
                     }
-                    subtitleCallback(newSubtitleFile(lang, subUrlFixed) {
+                    subtitleCallback(newSubtitleFile(subLangLabel(lang), subUrlFixed) {
                         this.headers = mapOf("User-Agent" to MOS_UA, "Referer" to mainUrl)
                     })
                 } catch (e: Exception) { Log.w(TAG, "sub emit fail ${e.message}") }

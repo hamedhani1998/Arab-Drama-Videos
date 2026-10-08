@@ -547,7 +547,7 @@ class PakistaniliveProvider(private val prefs: SharedPreferences? = null) : Main
             prefs?.getBoolean(PakistaniliveSettingsBottomSheet.KEY_SHOW_SUBS, true) != false
         ) {
             PakiSrtServer.register(srtText)?.let { url ->
-                runCatching { subtitleCallback(newSubtitleFile("العربية", url)) }
+                runCatching { subtitleCallback(newSubtitleFile(subLangLabel("العربية"), url)) }
             }
         }
 

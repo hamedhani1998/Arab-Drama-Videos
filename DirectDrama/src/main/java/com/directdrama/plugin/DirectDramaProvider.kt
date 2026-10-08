@@ -406,7 +406,7 @@ class DirectDramaProvider(private val prefs: SharedPreferences? = null) : MainAP
                     val lang = normalizeSubLang(rawLang) ?: rawLang.ifEmpty { "ترجمة" }
                     if (!seenLang.add(lang)) return@forEach
                     try {
-                        subtitleCallback(newSubtitleFile(lang, subUrl) {
+                        subtitleCallback(newSubtitleFile(subLangLabel(lang), subUrl) {
                             this.headers = mapOf("Referer" to mainUrl)
                         })
                     } catch (_: Exception) {

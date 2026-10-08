@@ -333,7 +333,7 @@ class OnShortMosalsalyBridge(private val prefs: android.content.SharedPreference
                         rawLang.startsWith("en", true) -> "en"
                         else -> rawLang
                     }
-                    subtitleCallback(newSubtitleFile(lang, subUrlFixed) {
+                    subtitleCallback(newSubtitleFile(subLangLabel(lang), subUrlFixed) {
                         this.headers = mapOf("User-Agent" to MOS_UA, "Referer" to MOS_MAIN)
                     })
                 } catch (e: Exception) { logE("bridge sub fail ${e.message}") }
