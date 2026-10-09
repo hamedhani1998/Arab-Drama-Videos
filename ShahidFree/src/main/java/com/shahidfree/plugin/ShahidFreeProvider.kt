@@ -55,7 +55,7 @@ class ShahidFreeProvider(private val prefs: SharedPreferences? = null) : MainAPI
                     Log.d(TAG, "getMainPage empty section title=$title")
                     continue
                 }
-                rows.add(HomePageList(title, items.take(10), true))
+                rows.add(HomePageList(title, items.take(10)))
             }
             if (rows.isEmpty()) {
                 Log.e(TAG, "getMainPage no rows found")
@@ -194,32 +194,28 @@ class ShahidFreeProvider(private val prefs: SharedPreferences? = null) : MainAPI
             for (src in ordered) {
                 if (!seen.add(src)) continue
                 when {
-                    // vidhold: بُثّ HLS مباشرٌ بعد /e/ أو /d/. نَجلب master حيّ
-                    // من embed ثم نخرج الرابط على الفور (tokens تتبدل كل طلب —
-                    // لا نخزّن شيئاً، وكل فتحٍ يجلب master جديداً).
+                    // vidhold: بُثّ HLS مباشرٌ بعد /e/ أو /d/. نخرج رابط master
+                    // الفعلي كما هو (لا نصّ الملف) إن كان حيّاً. tokens تتبدل كل
+                    // طلب، والمشغّل يَجلب master جديداً عند كل فتح.
                     src.contains("vidhold.com/e/") || src.contains("vidhold.com/d/") -> {
                         val eid = src.substringAfterLast('/').substringBefore('?')
                         if (eid.isBlank()) continue
                         val master = "https://vidhold.com/api/stream/$eid"
-                        val ref = "https://vidhold.com/${
-                            src.substringAfter("vidhold.com/").substringBefore('/')
-                        }/$eid"
-                        val m3u8 = fetchMaster(master, ref)
-                        if (m3u8.isNullOrBlank()) continue
+                        if (!probeMaster(master)) continue
                         val linkName = if (showFormatTag()) {
-                            FormatTag.tagged("HLS", m3u8, ExtractorLinkType.M3U8)
+                            FormatTag.tagged("HLS", master, ExtractorLinkType.M3U8)
                         } else "HLS"
-                        Log.d(TAG, "emit vidhold id=$eid url=$m3u8")
+                        Log.d(TAG, "emit vidhold id=$eid url=$master")
                         callback(
                             newExtractorLink(
                                 source = name,
                                 name = linkName,
-                                url = m3u8,
+                                url = master,
                                 type = ExtractorLinkType.M3U8
                             ) {
                                 this.quality = getQualityFromName("HLS")
                                 this.referer = "https://vidhold.com/"
-                                this.headers = mapOf("Referer" to "https://vidhold.com/")
+                                this.headers = mutableMapOf("Referer" to "https://vidhold.com/")
                             }
                         )
                         emitted = true
@@ -243,16 +239,19 @@ class ShahidFreeProvider(private val prefs: SharedPreferences? = null) : MainAPI
         }
     }
 
-    /** يجلب master vidhold الحي. **يلزم** Referer من vidhold وإلا 403. */
-    private suspend fun fetchMaster(url: String, referer: String): String? {
+    /** يتحقق أن master vidhold حيّ (#EXTM3U عند الطلب) بلا جَلب النص. */
+    private suspend fun probeMaster(url: String): Boolean {
         return try {
-            val text = app.get(url, referer = referer).text
-            if (text.isBlank() || !text.startsWith("#EXTM3U")) null else text
+            val text = app.get(url, referer = "https://vidhold.com/").text
+            if (text.isBlank() || !text.startsWith("#EXTM3U")) {
+                Log.d(TAG, "probeMaster dead url=$url")
+                false
+            } else true
         } catch (e: kotlinx.coroutines.CancellationException) {
             throw e
         } catch (e: Exception) {
-            Log.e(TAG, "fetchMaster FAILED $url", e)
-            null
+            Log.e(TAG, "probeMaster FAILED $url", e)
+            false
         }
     }
 }
