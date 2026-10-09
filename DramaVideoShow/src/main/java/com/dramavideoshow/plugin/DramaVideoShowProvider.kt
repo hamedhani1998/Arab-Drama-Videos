@@ -38,15 +38,29 @@ class DramaVideoShowProvider(private val prefs: SharedPreferences? = null) : Mai
     // ★ إظهار وسم الصيغة في اسم السيرفر ([MP4]/[M3U8]/[DASH]) — يقرأ المفتاح
     //   عند كل بثّ، فتبديله في الإعدادات يظهر فوراً بلا إعادة فتح.
     private fun showFormatTag(): Boolean =
-        prefs?.getBoolean(DramaVideoShowSettings.KEY_SHOW_LIST_LABEL, true) != false
+        prefs?.getBoolean(DramaVideoShowSettings.KEY_FORMAT_TAG, true) != false
+
+    /** عدد أقسام الرئيسية المعروضة — "all" أو رقم. يقرأ عند كل رسم للواجهة. */
+    private fun homeRowCap(): Int? = prefs?.getString(DramaVideoShowSettings.KEY_HOME_ROWS, "all")
+        ?.toIntOrNull()
+        ?.takeIf { it > 0 }
+
+    private fun descOrder(): Boolean =
+        prefs?.getString(DramaVideoShowSettings.KEY_EPISODE_ORDER, "as_is") == "desc"
 
     override val supportedTypes = setOf(TvType.TvSeries)
 
-    /** عناوين أقسام الواجهة كما تظهر في الصفحة (h2) — تُلتقط ديناميكياً. */
+    /** عناوين أقسام الواجهة كما تظهر في الصفحة (h2) — تُلتقط ديناميكياً. عمل السياق
+ *  الترتيبَ الفعلي للأقسام، فالاختيار بقائمة يحافظ على ترتيب العرض. */
     private val homeKeys = listOf(
         "أحدث الإصدارات",
-        "مشاهدة حلقات المسلسلات",
-        "مسلسلات هذه السنة",
+        "الأكثر رواجًا",
+        "مدبلج",
+        "رجالي",
+        "بطلة قوية",
+        "رومانسية حلوة",
+        "رومانسية سامة",
+        "دراما عائلية",
     )
 
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse? {
@@ -54,12 +68,16 @@ class DramaVideoShowProvider(private val prefs: SharedPreferences? = null) : Mai
         return try {
             val doc = app.get("$mainUrl/ar", referer = mainUrl).document
             val rows = ArrayList<HomePageList>()
+            // البنية الفعلية للقسم (قِيس 2026-10-09): `section.rail` يحوي
+            // `.rail-h` (مع h2 و«عرض الكل») ثم `.rail-row` الذي يحوي البطاقات.
+            // البطاقات تحت .rail-row، لا تحت h2 نفسه — لنزحف إلى section.rail
+            // ثم نختار article.card من داخل rail-row.
             for (key in homeKeys) {
                 val h2 = doc.selectFirst("h2:contains($key)")
                 if (h2 == null) continue
-                val section = h2.parent() ?: continue
+                val section = h2.closest("section.rail") ?: h2.parent() ?: continue
                 // البطاقة article.card → الرابط + العنوان + الغلاف + عدد الحلقات
-                val items = section.select("article.card").mapNotNull { card ->
+                val items = section.select(".rail-row article.card").mapNotNull { card ->
                     val a = card.selectFirst("a") ?: return@mapNotNull null
                     val href = a.attr("href")
                     if (!href.startsWith("/ar/drama/")) return@mapNotNull null
@@ -77,7 +95,16 @@ class DramaVideoShowProvider(private val prefs: SharedPreferences? = null) : Mai
                 }
                 if (items.isNotEmpty()) rows.add(HomePageList(key, items, true))
             }
-            if (rows.isEmpty()) null else newHomePageResponse(rows, false)
+            if (rows.isEmpty()) {
+                Log.e(TAG, "getMainPage no rows found")
+                null
+            } else {
+                // حدّ عدد الأقسام المعروضة — كل قِسْم صفٌّ تنتظره الواجهة قبل
+                // أول رسم، فتقليله يسرّع فتح المصدر (قياس: صفحة الرئيسية 190KB).
+                val cap = homeRowCap()
+                val capped = if (cap != null && rows.size > cap) rows.take(cap) else rows
+                newHomePageResponse(capped, false)
+            }
         } catch (e: kotlinx.coroutines.CancellationException) {
             throw e
         } catch (e: Exception) {
@@ -161,8 +188,11 @@ class DramaVideoShowProvider(private val prefs: SharedPreferences? = null) : Mai
 
             val base = url.substringBefore("/episode")
             val seriesId = seriesIdFrom(absoluteUrl)
+            // ترتيب الحلقات: من إعدادات المصدر (افتراضي من الحلقة الأولى).
+            // نُرتب قبل بناء newEpisode فتظهر القائمة كما يريد المستخدم.
             val episodes = if (count != null && count > 0) {
-                (1..count).map { n ->
+                val range = (if (descOrder()) (count downTo 1) else (1..count))
+                range.map { n ->
                     // الحلقة تُحدَّد عن API البث مباشرةً. `seriesId` في `data` كي
                     // لا نعيد فتح صفحة الحلقة في loadLinks ولا نستخرجها من HTML.
                     newEpisode("$base/episode-$n|${seriesId ?: ""}") {
