@@ -35,14 +35,14 @@ class ShahidFreeProvider(private val prefs: SharedPreferences? = null) : MainAPI
     override val supportedTypes = setOf(TvType.TvSeries)
 
     /**
-     * أقسام الواجهة: «الأحدث على الموقع» ثم التصنيفان الموجودان في القائمة
-     * (مترجم/مدبلج). عنوان كل قسم يُقرأ من نص الصفحة الفعلية (h1) ويُعرَض
-     * كما هو (تسميات عربية للموقع نفسه).
+     * أقسام الواجهة: «الأحدث» من أرشيف المسلسلات ثم تصنيفا «مدبلج» و«مترجم».
+     * (قُيس 2026-10-09: /series/?genre_filter=… يتجاهل القيمة ويعيد نفس قائمة
+     * «الكل»، فالتصنيفان الحقيقيان هما مجلّدا /genre/dubbed/ و/genre/translated/).
      */
     private fun mainSections(): List<Pair<String, String>> = listOf(
-        "الأحدث" to "$mainUrl/category/feed",
-        "مدبلج" to "$mainUrl/series/?genre_filter=dubbed",
-        "مترجم" to "$mainUrl/series/?genre_filter=translated",
+        "الأحدث" to "$mainUrl/series/",
+        "مدبلج" to "$mainUrl/genre/dubbed/",
+        "مترجم" to "$mainUrl/genre/translated/",
     )
 
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse? {
@@ -100,9 +100,14 @@ class ShahidFreeProvider(private val prefs: SharedPreferences? = null) : MainAPI
     }
 
     private fun cardToSearch(card: Element): SearchResponse? {
+        // الروابط مطلقة على الموقع (https://drama.shahidfree.site/series/…).
         val href = card.attr("href")
-        if (!href.startsWith("/series/")) return null
-        val absUrl = mainUrl + href
+        val absUrl = when {
+            href.startsWith("http://") || href.startsWith("https://") -> href
+            href.startsWith("/") -> mainUrl + href
+            else -> return null
+        }
+        if (!absUrl.contains("/series/")) return null
         val cover = card.selectFirst(".poster img")?.attr("src")?.takeIf { it.isNotBlank() }
         // العنوان داخل h3، ويزيل الموقع اللاحقة الثابتة «| دراما شو».
         val title = card.selectFirst("h3")?.text()?.trim()
