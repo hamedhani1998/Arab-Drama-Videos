@@ -93,7 +93,7 @@ class DramaVideoShowProvider(private val prefs: SharedPreferences? = null) : Mai
                         if (eps != null) this.episodes = eps
                     }
                 }
-                if (items.isNotEmpty()) rows.add(HomePageList(key, items, true))
+                if (items.isNotEmpty()) rows.add(HomePageList(key, items))
             }
             if (rows.isEmpty()) {
                 Log.e(TAG, "getMainPage no rows found")
