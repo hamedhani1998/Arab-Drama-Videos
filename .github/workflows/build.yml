@@ -68,6 +68,43 @@ jobs:
           print("plugins:", [x.get("name") for x in plugins])
           EOF
 
+      # يضيف إضافة CSM (dcenhance/dcext) إلى قائمة إضافات هذا المستودع.
+      # dcext ينشر ملفات مبنية فقط (بلا سورس)، فنأخذ مُدخَله الحيّ من قائمته
+      # حتى يبقى التحديث (version/fileHash) صحيحًا، ونُدرج CSM وحده لا كل
+      # إضافات dcext (YouTube/IPTV/مواقع ألمانية لا تخص مستودعًا عربيًا).
+      # الملف نفسه يُستضاف عند dcenhance، فلا نُعيد توزيعه.
+      # فشل هذه الخطوة لا يوقف النشر (continue-on-error).
+      - name: Merge CSM from dcext
+        continue-on-error: true
+        env:
+          WS: ${{ github.workspace }}
+        run: |
+          python3 - <<'EOF'
+          import json, os, urllib.request
+          ws = os.environ["WS"]
+          dst = os.path.join(ws, "builds", "plugins.json")
+          src = "https://raw.githubusercontent.com/dcenhance/dcext/main/plugins.json"
+          try:
+              req = urllib.request.Request(src, headers={"User-Agent": "csm-merge"})
+              with urllib.request.urlopen(req, timeout=30) as r:
+                  upstream = json.load(r)
+          except Exception as e:
+              print("dcext unreachable, skipping CSM:", e)
+              raise SystemExit(0)
+          csm = next((p for p in upstream if p.get("internalName") == "CSMProvider"), None)
+          if not csm:
+              print("CSMProvider not found upstream, skipping")
+              raise SystemExit(0)
+          csm["description"] = "CSM — إضافة تخصيص واجهة كلاودستريم (المصدر: dcenhance/dcext)"
+          with open(dst, encoding="utf-8") as fh:
+              plugins = json.load(fh)
+          plugins = [p for p in plugins if p.get("internalName") != "CSMProvider"]
+          plugins.append(csm)
+          with open(dst, "w", encoding="utf-8") as fh:
+              json.dump(plugins, fh, ensure_ascii=False, indent=2)
+          print("plugins:", [x.get("name") for x in plugins])
+          EOF
+
       - name: Push builds
         run: |
           cd $GITHUB_WORKSPACE/builds
