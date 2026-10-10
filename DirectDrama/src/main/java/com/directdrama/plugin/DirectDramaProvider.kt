@@ -12,7 +12,9 @@ import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.sync.withPermit
 import org.jsoup.nodes.Document
 import java.net.URLEncoder
 import java.util.TreeMap
@@ -168,7 +170,7 @@ class DirectDramaProvider(private val prefs: SharedPreferences? = null) : MainAP
     override var lang = "ar"
     override val supportedTypes = setOf(TvType.TvSeries)
 
-    // ★ كل منصات الموقع (27) صفّاً في الصفحة الرئيسية — من `DDR_PLATFORM_ROWS`
+    // ★ كل منصات الموقع (30) صفّاً في الصفحة الرئيسية — من `DDR_PLATFORM_ROWS`
     //   (مصدر واحد للحقيقة يشترك مع ورقة الإعدادات). تُبنى مرّة واحدة ثم
     //   يقصّها `mainPage` حسب الإعدادات.
     private val allPlatformRows = mainPageOf(*DDR_PLATFORM_ROWS.toTypedArray())
@@ -187,6 +189,14 @@ class DirectDramaProvider(private val prefs: SharedPreferences? = null) : MainAP
         java.util.concurrent.ConcurrentHashMap<String, Pair<Long, List<SearchResponse>>>()
     private val rowCacheMs = 10 * 60 * 1000L
 
+    // ★ خانق الطلبات: التطبيق يطلب **كل** صفوف الواجهة في اللحظة نفسها، وللموقع
+    //   صندوق عقوبة يردّ `503` (صفحة «back in a moment»، ٢٫٢ كيلوبايت مقيسة)
+    //   على الدفعات. قِيس 2026-10-10: ٣٠ صفحة متتالية بفاصل ٣٫٥ ثانية ⇒ ٢×503
+    //   و٨ انقطاعات اتصال؛ وبعدها صار **الموقع كله** يردّ 503 (حتى صفحة مسلسل
+    //   سليمة) فاختفى التفاصيل والروابط عند المستخدم. فنجعل الطلبات تمرّ ٤ في
+    //   آنٍ واحد مع فاصل صغير — أبطأ قليلاً ولا يُشعل العقوبة فيُفرغ الواجهة.
+    private val fetchGate = Semaphore(4)
+
     // ★ خصائص ديناميكية: تُقرأ مع كل رسم للواجهة، فالمفاتيح من ورقة الإعدادات
     //   تُطبَّق بلا إعادة تشغيل. `hasMainPage=false` يُخفي المصدر من الصفحة
     //   الرئيسية كليّاً.
@@ -196,7 +206,7 @@ class DirectDramaProvider(private val prefs: SharedPreferences? = null) : MainAP
     // ★ الإخفاء الجزئي: مجموعة مفاتيح الأقسام المخفية من ورقة الإعدادات
     //   (`ddr_hidden_rows`) — كل قسم يُحدَّد بالظهور أو الإخفاء على حدة.
     //   القيم = مفاتيح `MainPageData.data` نفسها: صفّا الواجهة الأمامية
-    //   (`DDR_FRONT_ROWS`) ثم مفاتيح المنصات الـ27. مجموعة خالية = الكل ظاهر.
+    //   (`DDR_FRONT_ROWS`) ثم مفاتيح المنصات الـ30. مجموعة خالية = الكل ظاهر.
     private fun hiddenRows(): Set<String> =
         prefs?.getStringSet(DirectDramaSettingsBottomSheet.KEY_HIDDEN_ROWS, null) ?: emptySet()
 
@@ -209,8 +219,8 @@ class DirectDramaProvider(private val prefs: SharedPreferences? = null) : MainAP
             if (!showPlatforms()) return front
             // الإخفاء يسبق حدّ العدد كي يبقى المطلوب ظاهراً كاملاً.
             // الافتراضي 18 لا «كل الصفوف»: التطبيق ينتظر **كل** الصفوف قبل رسم
-            // أول بطاقة، وكل صف هنا صفحة HTML كاملة (~440 كيلوبايت) — 29 صفّاً
-            // تعني ~13 ميغابايت و10 ثوانٍ قبل أول رسم. من يستحبّ كل شيء يختاره
+            // أول بطاقة، وكل صف هنا صفحة HTML كاملة (~440 كيلوبايت) — 32 صفّاً
+            // تعني ~14 ميغابايت و10 ثوانٍ قبل أول رسم. من يستحبّ كل شيء يختاره
             // من الإعدادات.
             val rows = allPlatformRows.filter { it.data !in hidden }
             val raw = prefs?.getString(DirectDramaSettingsBottomSheet.KEY_HOME_ROWS, "18") ?: "18"
@@ -349,7 +359,12 @@ class DirectDramaProvider(private val prefs: SharedPreferences? = null) : MainAP
                 page <= 1 -> "$mainUrl/ar/platform/${request.data}"
                 else -> "$mainUrl/ar/platform/${request.data}/$page"
             }
-            val doc = fetchDoc(url, attempts = 2)
+            // ★ ٤ طلبات في آنٍ واحد + فاصل 150ms بين بداياتها: التطبيق يطلب كل
+            //   الصفوف دفعةً واحدة، والموقع يعاقب الدفعة بـ503 فيختفي الصفّ.
+            val doc = fetchGate.withPermit {
+                delay(150L)
+                fetchDoc(url, attempts = 2)
+            }
             if (doc == null) {
                 // ★ فشل الجلب (503 من صندوق عقوبة الموقع) — لا نُعيد صفاً فارغاً
                 //   لأنّ التطبيق ينتظر كل الصفوف، فصفٌّ واحد بلا نتيجة يمحو
@@ -586,11 +601,16 @@ class DirectDramaProvider(private val prefs: SharedPreferences? = null) : MainAP
             //    «لا يوجد روابط» لحلقة تعمل، فنعيد على الأخطاء المؤقتة.
             val primary = fetchStream(id, epUrl, failedTag = null) ?: return false
 
-            // 3) فحص الحيولة: حين يموت المضيف (قياس 2026-10-08:
-            //    `flareflow.dotkosong.web.id` = NXDOMAIN حقيقي و`videotv.vividshort.com`
-            //    حيّ) نطلب مصدراً بديلاً بالآلية نفسها التي يستخدمها موقع DirectDrama
-            //    في صفحات JSّه: `?locale=ar&refresh=1&failed=<sourceTag>`. البديل الحيّ
-            //    يُبثَّ **أوّلاً** كي يسبقه المشغّل (هو يختار الرابط الأول دائماً).
+            // 3) اختيار المصدر: الأساسي، وإن لم يكن حيّاً نطارد البدائل المتسلسلة
+            //    بـ`?locale=ar&refresh=1&failed=<sourceTag>` (نفس آلية مشغّل الموقع).
+            //    كل بديل يعطي مضيفاً آخر، فالحيّ قد يكون في أي رتبة.
+            //    ★ قِيس 2026-10-10 على «زوجي الغامض…» حلقة 1: الأساسي
+            //    `videotv.vividshort.com` صار **NXDOMAIN** (٠ نجاح من ٦ محاولات
+            //    متكرّرة، والعنوان المضبوط github.com ٦/٦ في نفس اللحظة) والبديل
+            //    `reeltv.janzhoutec.com` حيّ (206). فإصدار رابط الميت وحده يعني
+            //    `2001` في المشغّل لا محالة (شكوى المستخدم).
+            //    القاعدة الآن: **الحيّ يُقدَّم دائماً**، والميت لا يُعرَض إلا إذا لم
+            //    يبقَ غيره — «حلٌّ أخير» أهون من «لا يوجد روابط».
             val seenSubUrl = HashSet<String>()
             val seenSubLang = HashSet<String>()
             val primaryUrl = primary.url?.trim().orEmpty().takeIf { it.isNotBlank() }?.let { abs(it) }
@@ -598,28 +618,38 @@ class DirectDramaProvider(private val prefs: SharedPreferences? = null) : MainAP
                 Log.e(TAG, "stream empty url ep=$ep")
                 return false
             }
-            if (probeHealth(primaryUrl) == Health.DEAD) {
-                val alt = primary.sourceTag?.takeIf { it.isNotBlank() }?.let { fetchStream(id, epUrl, it) }
-                val altUrl = alt?.url?.trim().orEmpty().takeIf { it.isNotBlank() }?.let { abs(it) }
-                if (alt != null && altUrl != null && altUrl != primaryUrl &&
-                    probeHealth(altUrl) == Health.ALIVE
-                ) {
-                    // اسم السيرفر يدخل اسم الرابط من `serverLabel`؛ فإن اتّفق
-                    // سيرفر البديل والأساسي بقي الصفّان متطابقين، فنميّز البديل
-                    // بوسمٍ صريح. (مقيس: البديل غالباً من مضيفٍ آخر — فحينها لا
-                    // حاجة للوسم ويكفي اسم السيرفر.)
-                    val sameServer = serverLabel(altUrl) == serverLabel(primaryUrl)
-                    Log.i(TAG, "loadLinks alternate alive ep=$ep ${altUrl.take(70)}")
-                    emitStream(alt, ep, seenSubUrl, seenSubLang, subtitleCallback, callback,
-                        labelSuffix = if (sameServer) " · بديل" else "")
-                    emitStream(primary, ep, seenSubUrl, seenSubLang, subtitleCallback, callback)
-                    return true
+            val primaryHealth = probeHealth(primaryUrl)
+            val cands = ArrayList<Triple<StreamResponse, String, Health>>()
+            cands += Triple(primary, primaryUrl, primaryHealth)
+            // البدائل تُطلب فقط إن لم يكن الأساسي حيّاً — كي لا نُثقل الموقع في
+            // الحالة الشائعة (الأساسي يعمل) بطلبين زائدين.
+            if (primaryHealth != Health.ALIVE) {
+                val seenTags = HashSet<String>()
+                var tag = primary.sourceTag
+                while (cands.size < 3 && !tag.isNullOrBlank() && seenTags.add(tag)) {
+                    val a = fetchStream(id, epUrl, tag) ?: break
+                    val au = a.url?.trim().orEmpty().takeIf { it.isNotBlank() }?.let { abs(it) }
+                    tag = a.sourceTag
+                    if (au == null || cands.any { it.second == au }) continue
+                    cands += Triple(a, au, probeHealth(au))
                 }
-                // لا بديل حيّ: يبقى الأساسي. «تعذّر الفحص» ليس حُكم إسقاط — وإلا
-                // حُوِّلت حلقةٌ تعمل إلى «لا يوجد روابط».
-                Log.i(TAG, "loadLinks primary DEAD ep=$ep alt=${altUrl ?: "none"} — emit primary anyway")
             }
-            emitStream(primary, ep, seenSubUrl, seenSubLang, subtitleCallback, callback)
+            val rank = mapOf(Health.ALIVE to 0, Health.UNKNOWN to 1, Health.DEAD to 2)
+            val playable = cands.filter { it.third != Health.DEAD }
+            val ordered = (if (playable.isNotEmpty()) playable else cands)
+                .sortedBy { rank[it.third] ?: 9 }
+            Log.i(
+                TAG,
+                "loadLinks ep=$ep candidates=${cands.size} playable=${playable.size} " +
+                    "hosts=${cands.joinToString(",") { serverLabel(it.second) ?: "?" }}"
+            )
+            for (c in ordered) {
+                val sameServer = serverLabel(c.second) == serverLabel(primaryUrl)
+                emitStream(
+                    c.first, ep, seenSubUrl, seenSubLang, subtitleCallback, callback,
+                    labelSuffix = if (c.first !== primary && sameServer) " · بديل" else ""
+                )
+            }
             true
         } catch (e: kotlinx.coroutines.CancellationException) {
             throw e
@@ -695,6 +725,10 @@ class DirectDramaProvider(private val prefs: SharedPreferences? = null) : MainAP
                 //   2026-10-10: `شغف متأجج` حلقة 1).
                 if (r.code !in 200..299) {
                     Log.w(TAG, "fetchHtml try=$i HTTP ${r.code} ${url.take(70)}")
+                    // ★ صندوق عقوبة الموقع يبقى دقائق لا أجزاء ثانية (قِيس:
+                    //   بعد وابلٍ صار الموقع كله 503). فالمهلة تطول على 503/429
+                    //   وحدها، وبقية الأخطاء تُعاد فوراً.
+                    if (r.code == 503 || r.code == 429) delay(2500L * (i + 1))
                     return@repeat
                 }
                 return r.text
@@ -725,6 +759,9 @@ class DirectDramaProvider(private val prefs: SharedPreferences? = null) : MainAP
                 //   تُعاد بدلاً من نتيجةٍ كاذبة.
                 if (r.code !in 200..299) {
                     Log.w(TAG, "fetchDoc try=$i HTTP ${r.code} ${url.take(70)}")
+                    // 503/429 = صندوق عقوبة يبقى دقائق — مهلة أطول، وبلا مضاعفة
+                    // الوابل على بقية الأخطاء.
+                    if (r.code == 503 || r.code == 429) delay(2500L * (i + 1))
                     return@repeat
                 }
                 return r.document

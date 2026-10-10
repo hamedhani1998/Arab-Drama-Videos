@@ -93,7 +93,7 @@ class DirectDramaSettingsBottomSheet(private val prefs: SharedPreferences) : Bot
             // ── الواجهة الرئيسية ────────────────────────────────────────────
             // كل صفٍّ هنا صفحة HTML كاملة (~438 كيلوبايت، 3–10 ثوانٍ للخادم)
             // والتطبيق ينتظر **كل** الصفوف قبل رسم الصفحة الأولى، فعدد الصفوف
-            // هو مفتاح سرعة الواجهة مباشرة: صفّا الواجهة الأمامية (2) + المنصات (27).
+            // هو مفتاح سرعة الواجهة مباشرة: صفّا الواجهة الأمامية (2) + المنصات (30).
             val homeCategory = PreferenceCategory(ctx)
             homeCategory.title = "الواجهة الرئيسية"
             preferenceScreen.addPreference(homeCategory)
@@ -135,14 +135,16 @@ class DirectDramaSettingsBottomSheet(private val prefs: SharedPreferences) : Bot
                 entries = arrayOf(
                     "18 صفّاً (الافتراضي)",
                     "10 صفوف (الأسرع)",
-                    "كل الصفوف (27)"
+                    // ★ العدد مشتقٌّ من المصفوفة نفسها لا مكتوبٌ بيد — كان مكتوباً
+                    //   «(27)» فبقي كذبةً بعد إضافة الثلاث منصات (2026-10-10).
+                    "كل الصفوف (${DDR_PLATFORM_ROWS.size})"
                 )
                 setDefaultValue("18")
             }
             homeCategory.addPreference(homeRowsPref)
 
             // ★ التحكم المقطَّع: كل قسم على حدة. القيم = مفاتيح `MainPageData.data`
-            //   نفسها: صفّا الواجهة الأمامية (`DDR_FRONT_ROWS`) ثم منصات الـ27.
+            //   نفسها: صفّا الواجهة الأمامية (`DDR_FRONT_ROWS`) ثم منصات الـ30.
             //   دلالة الاختيار مقلوبة عمداً: المؤشَّر = مُخفى، وبلا اختيار يظهر
             //   كل شيء — وإلا لاضطرّ المستخدم لتأشير 28 قسماً لإخفاء واحد.
             //   القائمة تُبنى من `DDR_FRONT_ROWS + DDR_PLATFORM_ROWS`
