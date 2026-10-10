@@ -11,6 +11,8 @@ import com.fasterxml.jackson.module.kotlin.registerKotlinModule
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import org.jsoup.nodes.Document
 import java.net.URLEncoder
 import java.util.TreeMap
@@ -196,6 +198,80 @@ class DirectDramaProvider(private val prefs: SharedPreferences? = null) : MainAP
     private fun descOrder(): Boolean =
         prefs?.getString(DirectDramaSettingsBottomSheet.KEY_EPISODE_ORDER, "as_is") == "desc"
 
+    // ── سياق المشاهدة (`/api/stream/*`) ──────────────────────────────────────
+    //
+    // قِيس 2026-10-10: الموقع صار يرفض `/api/stream/{id}` بـ`403
+    // {"error":{"message":"viewing_context_required"}} ما لم يكن «سياق مشاهدة»
+    // مُنشأً مسبقاً بطلب صفحةٍ من الموقع. مشغّل الموقع نفسه يبنيه بطلب
+    // `fetch(window.location.pathname,{method:"HEAD",credentials:"same-origin"})`
+    // ثم يعيد المحاولة (مقيس في chunk الـwatch: الفرع `0===n&&403===f&&
+    // "viewing_context_required"===h`).
+    //
+    // `app` في CloudStream **بلا cookie jar** (مقيسٌ في Dramadunyam) فلا تُحفَظ
+    // الكوكيز تلقائياً بين الطلبات — ولهذا كان كل `/api/stream` يردّ 403 على
+    // الهاتف حتى بعد نجاح جلب صفحة الحلقة وقراءة معرّفها. العلاج ثلاث طبقات:
+    //   (١) نحفظ كوكيز كل استجابة نراها (`adoptCookies`)،
+    //   (٢) نرسلها في ترويسة `Cookie` على طلب البثّ (`cookieHeaders`)،
+    //   (٣) وإن عاد 403 فنسخّن السياق من صفحة الحلقة ثم نعيد المحاولة.
+    //
+    // قفلٌ لأن الطلبين (البثّ والترجمة/الجودة) قد يتداخلان؛ لا نريد ثلاثة
+    // تسخينات متوازية تُنزل ثلاثة طلبات صفحات ٢٢٠ كيلوبايت معاً.
+    private val viewCookieLock = Mutex()
+    // خريطة متزامنة: `adoptCookies` تُنادى من مسارات متوازية (صفوف الرئيسية،
+    // البثّ، التسخين) بلا القفل — `LinkedHashMap` كانت تُفسَد تحت التوازي.
+    private val viewCookies = java.util.concurrent.ConcurrentHashMap<String, String>()
+
+    /**
+     * يحفظ كوكيز استجابة (الاسم=القيمة) — **دمجٌ لا استبدال**: كوكي السياق
+     * `dd_view` يأتي من صفحة الحلقة، وأي استجابة لاحقة قد تُسقط كوكي `__cf_bm`
+     * أو غيره فقط؛ لو استبدلنا لضاع `dd_view` وعاد 403.
+     */
+    private fun adoptCookies(r: com.lagradost.nicehttp.NiceResponse) {
+        val c = r.cookies
+        if (c.isEmpty()) return
+        var changed = false
+        for ((k, v) in c) {
+            if (v.isBlank()) continue
+            if (viewCookies[k] != v) {
+                viewCookies[k] = v
+                changed = true
+            }
+        }
+        if (changed) Log.d(TAG, "adopted cookies n=${viewCookies.size} has_dd_view=${viewCookies.containsKey("dd_view")}")
+    }
+
+    /** ترويسة `Cookie` من السياق المُجمَّع — فارغة إن لم يُبنَ بعد. */
+    private fun cookieHeaders(): Map<String, String> =
+        viewCookies.entries.joinToString("; ") { "${it.key}=${it.value}" }
+            .takeIf { it.isNotBlank() }?.let { mapOf("Cookie" to it) } ?: emptyMap()
+
+    /**
+     * يُنشئ/يُنعش سياق المشاهدة بطلب صفحة الحلقة — نفس ما يفعله مشغّل الموقع.
+     * `HEAD` أوّلاً (رخيص، ولا يُحمّل ٢٢٠ كيلوبايت لكل حلقة)؛ فإن لم تُسقط
+     * الرؤوس كوكيز (بعض الخوادم لا تفعل على HEAD) نجلب الصفحة `GET`.
+     */
+    private suspend fun primeViewingContext(pageUrl: String) {
+        viewCookieLock.withLock {
+            try {
+                adoptCookies(app.head(pageUrl, referer = mainUrl))
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                Log.w(TAG, "prime HEAD FAILED ${e.javaClass.simpleName}")
+            }
+            if (!viewCookies.containsKey("dd_view")) {
+                try {
+                    adoptCookies(app.get(pageUrl, referer = mainUrl))
+                } catch (e: kotlinx.coroutines.CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    Log.w(TAG, "prime GET FAILED ${e.javaClass.simpleName}")
+                }
+            }
+            Log.d(TAG, "primed viewing context n=${viewCookies.size} has_dd_view=${viewCookies.containsKey("dd_view")}")
+        }
+    }
+
     /** رابط مطلق — الموقع يرسل مسارات نسبية (`/img/…`، `/subs/…`) والمشغّل لا يضيف mainUrl. */
     private fun abs(u: String): String = when {
         u.startsWith("http://") || u.startsWith("https://") -> u
@@ -238,7 +314,7 @@ class DirectDramaProvider(private val prefs: SharedPreferences? = null) : MainAP
                 page <= 1 -> "$mainUrl/ar/platform/${request.data}"
                 else -> "$mainUrl/ar/platform/${request.data}/$page"
             }
-            val doc = app.get(url, referer = mainUrl).document
+            val doc = fetchDoc(url, attempts = 2) ?: return null
             val seen = HashSet<String>()
             val items = doc.select("""a[href^="/ar/series/"]""").mapNotNull { a ->
                 val href = a.attr("href").trim()
@@ -320,7 +396,7 @@ class DirectDramaProvider(private val prefs: SharedPreferences? = null) : MainAP
 
     override suspend fun load(url: String): LoadResponse? {
         return try {
-            val doc = app.get(url, referer = mainUrl).document
+            val doc = fetchDoc(url) ?: return null
             val ld = jsonLdSeries(doc)
 
             // ★ الأسماء الأنظف من JSON-LD (`name` بلا «مسلسل … كامل – N حلقة»)،
@@ -530,14 +606,17 @@ class DirectDramaProvider(private val prefs: SharedPreferences? = null) : MainAP
     }
 
     /**
-     * جلب نصّ الصفحة — محاولتان، لأن صفحاً واحداً يفشل تعني «لا يوجد روابط»
-     * لحلقةٍ سليمة (نفاد اتصال قصير لا يُذكر في أي سجلّ).
+     * جلب نصّ الصفحة — محاولات، لأن صفحاً واحداً يفشل تعني «لا يوجد روابط»
+     * لحلقةٍ سليمة (نفاد اتصال قصير لا يُذكر في أي سجلّ). ونحفظ كوكيز
+     * الاستجابة: هي سياق المشاهدة الذي يطلبه `/api/stream/` لاحقاً.
      */
     private suspend fun fetchHtml(url: String): String? {
-        repeat(2) { i ->
-            if (i > 0) delay(600L)
+        repeat(3) { i ->
+            if (i > 0) delay(600L * i)
             try {
-                return app.get(url, referer = mainUrl).text
+                val r = app.get(url, referer = mainUrl)
+                adoptCookies(r)
+                return r.text
             } catch (e: kotlinx.coroutines.CancellationException) {
                 throw e
             } catch (e: Exception) {
@@ -548,22 +627,56 @@ class DirectDramaProvider(private val prefs: SharedPreferences? = null) : MainAP
     }
 
     /**
+     * جلب صفحة كـ`Document` مع محاولات — قِيس على الهاتف 2026-10-10: صفحة
+     * المسلسل تُبتَلع بـ`SocketTimeoutException` من Cloudflare فتعود «لا
+     * تفاصيل» لمسلسلٍ سليم. `attempts` أصغر لصفوف الرئيسية: الصفوف تُطلَق
+     * متزامنةً (١٨ طلباً)، وتكرارها ثلاثاً يُضاعف الوابلَ فيزيد الحجب
+     * (درس وابل DUN) — فمحاولتان بفاصلٍ متزايد تكفيان هناك.
+     */
+    private suspend fun fetchDoc(url: String, attempts: Int = 3): Document? {
+        repeat(attempts) { i ->
+            if (i > 0) delay(500L * i)
+            try {
+                val r = app.get(url, referer = mainUrl)
+                adoptCookies(r)
+                return r.document
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                Log.w(TAG, "fetchDoc try=$i FAILED ${e.javaClass.simpleName} ${url.take(70)}")
+            }
+        }
+        return null
+    }
+
+    /**
      * `/api/stream/{id}?locale=ar` — ومنه فرعُ البديل `&refresh=1&failed=<sourceTag>`
      * (الآلية نفسها في JS الموقع: `fetch("/api/stream/".concat(id,"?",l))` حيث
-     * `l = "locale=…&refresh=1&failed=…"`. نعيد على الأخطاء المؤقتة فقط:
-     * `503 source_busy` مقيسٌ هنا، و`410 source_unavailable` يعني عدم توفّر البديل.
+     * `l = "locale=…&refresh=1&failed=…"`.
+     *
+     * يحمل ترويسة `Cookie` (سياق المشاهدة) — بلاها يردّ الخادم دائماً
+     * `403 viewing_context_required` (قِيس على الهاتف 2026-10-10). وإن عاد 403
+     * بهذا الرمز نسخّن السياق من `pageUrl` ثم نعيد المحاولة (نفس منطق مشغّل
+     * الموقع: HEAD ثم إعادة). ونطبع **جسم** الخطأ لأن 403 قد يكون JSON سياق
+     * وقد يكون تحدي Cloudflare — وبلا الجسم لا يُفرَّق بينهما (درس DUN).
+     * نعيد على الأخطاء المؤقتة فقط: `503 source_busy` مقيسٌ هنا، و`410
+     * source_unavailable` يعني عدم توفّر البديل.
      */
-    private suspend fun fetchStream(id: Long, referer: String, failedTag: String?): StreamResponse? {
+    private suspend fun fetchStream(id: Long, pageUrl: String, failedTag: String?): StreamResponse? {
         val query = buildString {
             append("?locale=ar")
             if (!failedTag.isNullOrBlank()) {
                 append("&refresh=1&failed=").append(URLEncoder.encode(failedTag, "UTF-8"))
             }
         }
-        repeat(3) { i ->
+        repeat(4) { i ->
             if (i > 0) delay(700L * i)
             val r = try {
-                app.get("$mainUrl/api/stream/$id$query", referer = referer)
+                app.get(
+                    "$mainUrl/api/stream/$id$query",
+                    headers = cookieHeaders(),
+                    referer = pageUrl
+                )
             } catch (e: kotlinx.coroutines.CancellationException) {
                 throw e
             } catch (e: Exception) {
@@ -578,7 +691,18 @@ class DirectDramaProvider(private val prefs: SharedPreferences? = null) : MainAP
                     null
                 }
             }
-            Log.w(TAG, "stream HTTP ${r.code} try=$i id=$id failedTag=$failedTag")
+            val body = runCatching { r.text }.getOrNull().orEmpty()
+            Log.w(
+                TAG,
+                "stream HTTP ${r.code} try=$i id=$id failedTag=$failedTag body=${body.take(140)}"
+            )
+            // ★ سياق المشاهدة: أنشئه من صفحة الحلقة ثم أعد المحاولة حاملاً الكوكيز.
+            if (r.code == 403 && body.contains("viewing_context_required")) {
+                viewCookies.remove("dd_view")   // سياقٌ جديد لا قديم
+                primeViewingContext(pageUrl)
+                return@repeat
+            }
+            adoptCookies(r)
             if (r.code !in listOf(403, 408, 429, 500, 502, 503, 504)) return null
         }
         return null
