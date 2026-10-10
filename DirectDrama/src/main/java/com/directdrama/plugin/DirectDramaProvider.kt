@@ -240,10 +240,13 @@ class DirectDramaProvider(private val prefs: SharedPreferences? = null) : MainAP
         if (changed) Log.d(TAG, "adopted cookies n=${viewCookies.size} has_dd_view=${viewCookies.containsKey("dd_view")}")
     }
 
+    /** سياق المشاهدة كسلسلة كوكيز (`k=v; k=v`) — فارغة إن لم يُبنَ بعد. */
+    private fun cookieString(): String =
+        viewCookies.entries.joinToString("; ") { "${it.key}=${it.value}" }
+
     /** ترويسة `Cookie` من السياق المُجمَّع — فارغة إن لم يُبنَ بعد. */
     private fun cookieHeaders(): Map<String, String> =
-        viewCookies.entries.joinToString("; ") { "${it.key}=${it.value}" }
-            .takeIf { it.isNotBlank() }?.let { mapOf("Cookie" to it) } ?: emptyMap()
+        cookieString().takeIf { it.isNotBlank() }?.let { mapOf("Cookie" to it) } ?: emptyMap()
 
     /**
      * يُنشئ/يُنعش سياق المشاهدة بطلب صفحة الحلقة — نفس ما يفعله مشغّل الموقع.
@@ -576,6 +579,9 @@ class DirectDramaProvider(private val prefs: SharedPreferences? = null) : MainAP
         conn.readTimeout = 3500
         conn.instanceFollowRedirects = true
         conn.setRequestProperty("Referer", mainUrl)
+        // مسارات الوكيل `directdrama.com/px/…` محميّةٌ ببوابة سياق المشاهدة أيضاً:
+        // بلا الكوكي تردّ 403 (مقيس) فيُحكم على رابطٍ حيٍّ بالموت ظلماً.
+        cookieString().takeIf { it.isNotBlank() }?.let { conn.setRequestProperty("Cookie", it) }
         val code = try {
             conn.responseCode
         } finally {
@@ -735,7 +741,10 @@ class DirectDramaProvider(private val prefs: SharedPreferences? = null) : MainAP
                 if (!seenSubLang.add(lang)) return@forEach
                 try {
                     subtitleCallback(newSubtitleFile(subLangLabel(lang), subUrl) {
-                        this.headers = mapOf("Referer" to mainUrl)
+                        // ملفّ الترجمة محميّ بنفس بوابة /api/stream: بلا كوكي سياق
+                        // المشاهدة يردّ 403 viewing_context_required — مقيس: 200 مع
+                        // `dd_view`، و403 بدونه (رأس Referer وحده لا يكفي).
+                        this.headers = mapOf("Referer" to mainUrl) + cookieHeaders()
                     })
                 } catch (_: Exception) {
                 }
@@ -761,7 +770,9 @@ class DirectDramaProvider(private val prefs: SharedPreferences? = null) : MainAP
             newExtractorLink(source = name, name = FormatTag.tagged("الحلقة $ep$labelSuffix", vUrl, linkType, declared), url = vUrl, type = linkType) {
                 referer = mainUrl
                 qOf(vUrl)?.let { quality = getQualityFromName(it) }
-                headers = mapOf("Referer" to mainUrl)
+                // مسارات الوكيل `directdrama.com/px/…` تردّ 403 بلا كوكي سياق
+                // المشاهدة (مقيس: 200 معه) — فالمشغّل يحتاج الكوكي مع الوسائط نفسها.
+                headers = mapOf("Referer" to mainUrl) + cookieHeaders()
             }
         )
 
@@ -781,7 +792,7 @@ class DirectDramaProvider(private val prefs: SharedPreferences? = null) : MainAP
                 newExtractorLink(source = name, name = FormatTag.tagged(label, u, rType, rDeclared), url = u, type = rType) {
                     referer = mainUrl
                     rd.height?.takeIf { it > 0 }?.let { quality = getQualityFromName("${it}p") }
-                    headers = mapOf("Referer" to mainUrl)
+                    headers = mapOf("Referer" to mainUrl) + cookieHeaders()
                 }
             )
         }

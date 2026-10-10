@@ -1,4 +1,4 @@
-version = 2
+version = 3
 
 cloudstream {
     description = "DirectDrama - مسلسلات قصيرة مترجمة من 27 منصة"
