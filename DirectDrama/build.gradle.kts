@@ -1,7 +1,7 @@
-version = 3
+version = 4
 
 cloudstream {
-    description = "DirectDrama - مسلسلات قصيرة مترجمة من 27 منصة"
+    description = "DirectDrama - مسلسلات قصيرة مترجمة من 30 منصة"
     authors = listOf("hamedhani1998")
     language = "ar"
 

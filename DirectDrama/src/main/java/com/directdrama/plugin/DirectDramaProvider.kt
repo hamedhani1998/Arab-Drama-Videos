@@ -45,6 +45,11 @@ internal val DDR_PLATFORM_ROWS: List<Pair<String, String>> = listOf(
     "dramabox" to "مسلسلات DramaBox القصيرة",
     "playlet" to "مسلسلات Playlet القصيرة",
     "flareflow" to "مسلسلات FlareFlow القصيرة",
+    // ★ أُضيفت 2026-10-10 من `/ar/platform` نفسه (قِيس: الموقع يسرد **30**
+    //   منصة وهذه الثلاث كانت ناقصة — العدد والاسم مأخوذان من الصفحة حرفياً:
+    //   VibeShort 19 مسلسلاً، Melolo وLuminaReels مسلسل واحد لكلٍّ). ووُضعت
+    //   في موضعها بحسب ترتيب الموقع (عدد المسلسلات تنازلياً) لا في الذيل.
+    "vibeshort" to "مسلسلات VibeShort القصيرة",
     "bonustv" to "مسلسلات BonusTV القصيرة",
     "shotshort" to "مسلسلات ShotShort القصيرة",
     "microdrama" to "مسلسلات MicroDrama القصيرة",
@@ -52,6 +57,8 @@ internal val DDR_PLATFORM_ROWS: List<Pair<String, String>> = listOf(
     "dramawave" to "مسلسلات DramaWave القصيرة",
     "starshort" to "مسلسلات StarShort القصيرة",
     "stardusttv" to "مسلسلات StarDust TV القصيرة",
+    "melolo" to "مسلسلات Melolo القصيرة",
+    "luminareels" to "مسلسلات LuminaReels القصيرة",
     "snackshort" to "مسلسلات SnackShort القصيرة",
 )
 
@@ -114,6 +121,21 @@ private data class StreamResponse(
 private val FLIGHT_RE =
     Regex("""self\.__next_f\.push\(\[1,("(?:[^"\\]|\\.)*")\]\)""", RegexOption.DOT_MATCHES_ALL)
 
+/**
+ * أنماط معرّف الحلقة داخل دفعة الطيران — تُجرَّب بالترتيب.
+ *
+ * الأول هو الدقيق المقيس (`{"id":123,"number":4}`)، والبديلان يقبلان ترتيب
+ * المفاتيح معكوساً أو حقولاً بينهما، والرابع يقبل `"number"` كنصّ. قِيس على
+ * الهاتف 2026-10-10 أن صفحةً سليمة قد لا تطابق الأول فتُقرأ «لا يوجد روابط».
+ * في الأنماط الأربعة **المجموعة 1 هي المعرّف** دائماً.
+ */
+private fun epIdRes(ep: Int): List<Regex> = listOf(
+    Regex("""\{"id":(\d+),"number":$ep[,}]"""),
+    Regex("""\{"id":(\d+)[^{}]{0,200}?"number":$ep[^{}]{0,40}?\}"""),
+    Regex("""\{"number":$ep[^{}]{0,200}?"id":(\d+)[^{}]{0,40}?\}"""),
+    Regex("""\{"id":(\d+),"number":"$ep"[,}]"""),
+)
+
 // أسماء لغاتٍ يرسلها الموقع بحروفٍ محلّيةّ لا تعرفها مكتبة التطبيق ولا رمز ISO
 // يُشتقّ منها (قِيس على cloudstream.jar: `getLangTag()` يرجع لها null في المسارين
 // فيبقى المسار بلا اسم). ما عداها يتولّاه `SubtitleHelper` نفسه.
@@ -154,6 +176,16 @@ class DirectDramaProvider(private val prefs: SharedPreferences? = null) : MainAP
     // ★ صفّا الواجهة الأمامية — من `DDR_FRONT_ROWS` (نفس المصدر الذي تشترك
     //   معه ورقة الإعدادات في قائمة «إخفاء الأقسام»). يوضعان **قبل** المنصات.
     private val frontRows = mainPageOf(*DDR_FRONT_ROWS.toTypedArray())
+
+    // ★ ذاكرة صفوف الواجهة (في الذاكرة لا على القرص): صفحة المنصة ~450 كيلوبايت
+    //   والموقع بطيء (قِيس `SocketTimeoutException` على صفحات المسلسل)، وصفٌّ
+    //   واحد فاشل يُرى «واجهةً ناقصة» لأن التطبيق ينتظر كل الصفوف. الصفّ الناجح
+    //   يُحفَظ ١٠ دقائق فيظهر كاملاً في الزيارة التالية.
+    //   ⚠️ لا يُحفَظ إلا صفٌّ **غير فارغ** — نتيجةٌ فارغة مخبَّأة تُخفي الواجهة
+    //   كلها بلا خطأ (درسٌ مقيس في [[plugin-empty-fetch-hides-everything]]).
+    private val rowCache =
+        java.util.concurrent.ConcurrentHashMap<String, Pair<Long, List<SearchResponse>>>()
+    private val rowCacheMs = 10 * 60 * 1000L
 
     // ★ خصائص ديناميكية: تُقرأ مع كل رسم للواجهة، فالمفاتيح من ورقة الإعدادات
     //   تُطبَّق بلا إعادة تشغيل. `hasMainPage=false` يُخفي المصدر من الصفحة
@@ -317,7 +349,19 @@ class DirectDramaProvider(private val prefs: SharedPreferences? = null) : MainAP
                 page <= 1 -> "$mainUrl/ar/platform/${request.data}"
                 else -> "$mainUrl/ar/platform/${request.data}/$page"
             }
-            val doc = fetchDoc(url, attempts = 2) ?: return null
+            val doc = fetchDoc(url, attempts = 2)
+            if (doc == null) {
+                // ★ فشل الجلب (503 من صندوق عقوبة الموقع) — لا نُعيد صفاً فارغاً
+                //   لأنّ التطبيق ينتظر كل الصفوف، فصفٌّ واحد بلا نتيجة يمحو
+                //   «الواجهة الرئيسية» كلها. نُعيد آخر نتيجة ناجحة إن وُجدت.
+                val cached = rowCache[url]?.takeIf { System.currentTimeMillis() - it.first < rowCacheMs }
+                if (cached != null) {
+                    Log.w(TAG, "row FETCH FAILED — using cache data=${request.data} items=${cached.second.size}")
+                    return newHomePageResponse(request.name, cached.second)
+                }
+                Log.w(TAG, "row FETCH FAILED data=${request.data} url=$url (no cache)")
+                return null
+            }
             val seen = HashSet<String>()
             val items = doc.select("""a[href^="/ar/series/"]""").mapNotNull { a ->
                 val href = a.attr("href").trim()
@@ -339,7 +383,20 @@ class DirectDramaProvider(private val prefs: SharedPreferences? = null) : MainAP
                     episodes = count
                 }
             }
-            if (items.isEmpty()) null else newHomePageResponse(request.name, items)
+            // ★ سجلٌّ لكل صفّ: التطبيق ينتظر **كل** الصفوف قبل رسم أول بطاقة،
+            //   فصفٌّ واحد فاشل يُرى «واجهةً ناقصة» بلا سبب ظاهر. هذا السطر
+            //   يقول أيّ صفٍّ عاد فارغاً وبأي رمز HTTP — يُقرأ من adb logcat.
+            if (items.isEmpty()) {
+                Log.w(TAG, "row EMPTY data=${request.data} page=$page url=$url")
+                null
+            } else {
+                Log.d(TAG, "row data=${request.data} page=$page items=${items.size}")
+                // ★ نخزّن النتيجة الناجحة فقط (لا نخزّن فراغاً أبداً — درس
+                //   «الفراغ المخزّن يمحو كل شيء»): الحاجة إليها هي أن ينجو
+                //   الصفّ من انقطاع عابر في الجلب التالي.
+                rowCache[url] = System.currentTimeMillis() to items
+                newHomePageResponse(request.name, items)
+            }
         } catch (e: kotlinx.coroutines.CancellationException) {
             throw e // الإلغاء ليس فشل شبكة (قِيس: NartoDrama 2026-10-06)
         } catch (e: Exception) {
@@ -510,11 +567,19 @@ class DirectDramaProvider(private val prefs: SharedPreferences? = null) : MainAP
                 return false
             }
             val blob = flightBlob(html)
-            val id = Regex("""\{"id":(\d+),"number":$ep[,}]""").find(blob)?.groupValues?.get(1)?.toLongOrNull()
-                ?: run {
-                    Log.e(TAG, "loadLinks no episode id ep=$ep url=$epUrl")
-                    return false
-                }
+            // ★ معرّف الحلقة — النمط الدقيق أولاً ثم بدائل. قِيس على الهاتف
+            //   2026-10-10 (`شغف متأجج` حلقة 1): الصفحة تُجلب بنجاح والدفعة
+            //   موجودة، لكن النمط الدقيق لا يطابق — فترتيب المفاتيح أو وجود
+            //   حقولٍ بينهما يختلف من صفحةٍ لأخرى. البديلان يسمحان بأي ترتيب
+            //   وبأي حقولٍ بين `id` و`number` ضمن الكائن نفسه (`[^{}]{0,N}`).
+            val id = epIdRes(ep).firstNotNullOfOrNull { re ->
+                re.find(blob)?.groupValues?.get(1)?.toLongOrNull()
+            } ?: run {
+                // نشهد ما حول `"number":$ep` كي يُشخَّص الشكل الجديد بلا تخمين.
+                val at = blob.indexOf("\"number\":$ep")
+                Log.e(TAG, "loadLinks no episode id ep=$ep url=$epUrl window=${blob.substring(maxOf(0, at - 90), minOf(blob.length, maxOf(0, at) + 90)).replace('\n', ' ')}")
+                return false
+            }
 
             // 2) `/api/stream/` يرفض بلا Referer (403 مقيس) — نُرسله كصفحة الحلقة.
             //    وقد يردّ `503 source_busy` أو 429 مؤقتاً: فشلٌ واحد هنا يعرض
@@ -539,13 +604,14 @@ class DirectDramaProvider(private val prefs: SharedPreferences? = null) : MainAP
                 if (alt != null && altUrl != null && altUrl != primaryUrl &&
                     probeHealth(altUrl) == Health.ALIVE
                 ) {
-                    // اسمُ الرابط هو ما يعرضه المشغّل، فالبديل يميَّز بمُضيفه كي لا
-                    // يظهر صفٌّ متطابق مع الأساسي بلا فرق.
-                    val altHost = runCatching { java.net.URL(altUrl).host }
-                        .getOrNull()?.removePrefix("www.").orEmpty()
+                    // اسم السيرفر يدخل اسم الرابط من `serverLabel`؛ فإن اتّفق
+                    // سيرفر البديل والأساسي بقي الصفّان متطابقين، فنميّز البديل
+                    // بوسمٍ صريح. (مقيس: البديل غالباً من مضيفٍ آخر — فحينها لا
+                    // حاجة للوسم ويكفي اسم السيرفر.)
+                    val sameServer = serverLabel(altUrl) == serverLabel(primaryUrl)
                     Log.i(TAG, "loadLinks alternate alive ep=$ep ${altUrl.take(70)}")
                     emitStream(alt, ep, seenSubUrl, seenSubLang, subtitleCallback, callback,
-                        labelSuffix = if (altHost.isBlank()) " · بديل" else " · $altHost")
+                        labelSuffix = if (sameServer) " · بديل" else "")
                     emitStream(primary, ep, seenSubUrl, seenSubLang, subtitleCallback, callback)
                     return true
                 }
@@ -622,6 +688,15 @@ class DirectDramaProvider(private val prefs: SharedPreferences? = null) : MainAP
             try {
                 val r = app.get(url, referer = mainUrl)
                 adoptCookies(r)
+                // ★ `app.get` يعيد صفحات الأخطاء كنصٍّ عادي (404 مقيس — درس
+                //   Episode.url)، و503 تحدي الحماية كذلك. وبلا هذا الفحص
+                //   تُقرأ صفحة الخطأ «صفحة حلقة» وتفشل قراءة معرّف الحلقة
+                //   فيُقال «لا يوجد روابط» لحلقةٍ سليمة (قِيس على الهاتف
+                //   2026-10-10: `شغف متأجج` حلقة 1).
+                if (r.code !in 200..299) {
+                    Log.w(TAG, "fetchHtml try=$i HTTP ${r.code} ${url.take(70)}")
+                    return@repeat
+                }
                 return r.text
             } catch (e: kotlinx.coroutines.CancellationException) {
                 throw e
@@ -645,6 +720,13 @@ class DirectDramaProvider(private val prefs: SharedPreferences? = null) : MainAP
             try {
                 val r = app.get(url, referer = mainUrl)
                 adoptCookies(r)
+                // ★ صفحة خطأ (503/404) تُحلَّل كوثيقة فارغة فتُقرأ «صفٌّ بلا
+                //   بطاقات» = واجهةٌ ناقصة بلا أي سجلّ خطأ. الفحص يجعلها محاولة
+                //   تُعاد بدلاً من نتيجةٍ كاذبة.
+                if (r.code !in 200..299) {
+                    Log.w(TAG, "fetchDoc try=$i HTTP ${r.code} ${url.take(70)}")
+                    return@repeat
+                }
                 return r.document
             } catch (e: kotlinx.coroutines.CancellationException) {
                 throw e
@@ -675,8 +757,14 @@ class DirectDramaProvider(private val prefs: SharedPreferences? = null) : MainAP
                 append("&refresh=1&failed=").append(URLEncoder.encode(failedTag, "UTF-8"))
             }
         }
-        repeat(4) { i ->
-            if (i > 0) delay(700L * i)
+        // ★ قِيس على الهاتف 2026-10-10: `503 source_busy` («The source is slow to
+        //   respond, try again shortly») يحتاج صبراً بالثواني لا بأجزائها —
+        //   ٤ محاولات بفاصل 0.7s×i نفدت في حالةٍ ونجحت في أخرى عند المحاولة
+        //   **الأخيرة**. فالمحاولات ٥ والفاصل 1.2s×i (≈12 ثانية كحدٍّ أقصى،
+        //   داخل سقف الـ30s المفروض على loadLinks): هذا أطول انتظار يبرّره
+        //   نصّ الخادم نفسه، ولا يحوّل حلقةً تعمل إلى «لا يوجد روابط».
+        repeat(5) { i ->
+            if (i > 0) delay(1200L * i)
             val r = try {
                 app.get(
                     "$mainUrl/api/stream/$id$query",
@@ -766,8 +854,13 @@ class DirectDramaProvider(private val prefs: SharedPreferences? = null) : MainAP
         val linkType = if (typeStr == "hls" || vUrl.contains(".m3u8")) ExtractorLinkType.M3U8
         else ExtractorLinkType.VIDEO
 
+        // اسم السيرفر في اسم الرابط: المشغّل يعرض `name` وحده، وبلا هذا تتكرّر
+        // صفوفٌ متطابقة «الحلقة N» بلا ما يفرّق بين سيرفرٍ وآخر.
+        val srv = serverLabel(vUrl)
+        val epName = "الحلقة $ep" + (srv?.let { " · $it" } ?: "") + labelSuffix
+
         callback(
-            newExtractorLink(source = name, name = FormatTag.tagged("الحلقة $ep$labelSuffix", vUrl, linkType, declared), url = vUrl, type = linkType) {
+            newExtractorLink(source = name, name = FormatTag.tagged(epName, vUrl, linkType, declared), url = vUrl, type = linkType) {
                 referer = mainUrl
                 qOf(vUrl)?.let { quality = getQualityFromName(it) }
                 // مسارات الوكيل `directdrama.com/px/…` تردّ 403 بلا كوكي سياق
@@ -788,8 +881,9 @@ class DirectDramaProvider(private val prefs: SharedPreferences? = null) : MainAP
                 ?: "جودة إضافية"
             val rType = if (u.contains(".m3u8")) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
             val rDeclared = if (u.contains(".m3u8")) "M3U8" else declared
+            val rName = if (srv != null) "$label · $srv" else label
             callback(
-                newExtractorLink(source = name, name = FormatTag.tagged(label, u, rType, rDeclared), url = u, type = rType) {
+                newExtractorLink(source = name, name = FormatTag.tagged(rName, u, rType, rDeclared), url = u, type = rType) {
                     referer = mainUrl
                     rd.height?.takeIf { it > 0 }?.let { quality = getQualityFromName("${it}p") }
                     headers = mapOf("Referer" to mainUrl) + cookieHeaders()
@@ -804,6 +898,33 @@ class DirectDramaProvider(private val prefs: SharedPreferences? = null) : MainAP
      * `-ld.`=540 و`-sd.`=720 مقاسان، و`.720p.` و`q=720p` شكلان مُدرجان؛
      * و`-hd` غير مقاس فلا يُخمَّن.
      */
+    /**
+     * اسم **سيرفر التشغيل** — من مضيف الوسائط، باسمٍ قصير مفهوم.
+     *
+     * المشغّل يعرض `ExtractorLink.name` وحده (مقيس)؛ وكانت كل الروابط تُسمّى
+     * «الحلقة N» فيتكرّر الصفّ نفسه مرّاتٍ بلا ما يفرّق بينها. الموقع لا يعطي
+     * اسماً للسيرفر في `StreamResponse` (`sourceTag` بصمةٌ مبهمة مثل `17n7hew`
+     * لا اسم)، فالمضيف هو المُعرّف الوحيد المتاح.
+     *
+     * القاعدة مبنية على المضيف لا على جدول أسماء: النطاق المسجَّل = آخر مقطعين
+     * (`…/miniepisode.media`)، فاسم الخدمة هو المقطع السابق له مباشرةً. تعمل مع
+     * كل المُضيفات المقيسة هنا: `cdn-video.miniepisode.media` ← Miniepisode،
+     * `hshwapp2.drt768.com` ← Drt768، `reeltv.janzhoutec.com` ← Janzhoutec،
+     * `cdnvideo.cdreader.com` ← Cdreader، `awscdn.netshort.com` ← Netshort.
+     */
+    private fun serverLabel(url: String): String? {
+        val host = runCatching { java.net.URL(url).host }
+            .getOrNull()?.lowercase()?.removePrefix("www.")?.takeIf { it.isNotBlank() }
+            ?: return null
+        // وكيل الموقع نفسه (`directdrama.com/px/…`) — يُسمّى باسم الموقع لا باسم موقعه.
+        if (host == "directdrama.com" || host.endsWith(".directdrama.com")) return "وكيل الموقع"
+        val parts = host.split('.')
+        if (parts.size < 2) return host
+        val svc = parts[parts.size - 2]
+        if (svc.length < 3 || svc.all { it.isDigit() }) return host
+        return svc.replaceFirstChar { it.uppercase() }
+    }
+
     private fun qOf(url: String): String? {
         Regex("""_(\d{3,4})/""").find(url)?.let { return it.groupValues[1] + "p" }
         Regex("""/(\d{3,4})p/""").find(url)?.let { return it.groupValues[1] + "p" }
