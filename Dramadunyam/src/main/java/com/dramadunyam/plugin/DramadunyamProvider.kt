@@ -369,6 +369,15 @@ class DramadunyamProvider(private val prefs: SharedPreferences? = null) : MainAP
         }
     }
 
+    // ★ شكل بطاقات كل الصفوف طوليٌّ (`horizontalImages = الافتراضي false`) — بما
+    //   فيها صفّا القسم الأمامي. القياس (قالب الموقع نفسه): غلاف المسلسل يُرسم في
+    //   صفحة التفاصيل بـ`width="150" height="215"` أي نسبة 0.70 = ملصقٌ طولي،
+    //   والتطبيق يرسم البطاقة 114×180 نقطة بـ`scaleType="centerCrop"` (نسبة
+    //   0.63) فتطابق الملصق. تمرير `true` يقلب البطاقة إلى 180×114 عريضة فيقتطع
+    //   `centerCrop` من الملصق الطولي شريطاً أوسط من عرض الصورة فقط، فيبدو
+    //   الغلاف «شاشةً عريضة» لا ملصقاً. كان صفّا القسم الأمامي وحدهما يمرّران
+    //   `true` (بقية المصادر في هذا المستودع كلها تُغفله) — بقايا تمريرٍ جماعيٍّ
+    //   لـ`true` أُصلح في `MainPageData` وبقي سهواً في `HomePageList`.
     /** «الأحدث» — قسم الواجهة الأمامية. الموقع يسمّيه «أضيف حديثًا». */
     private suspend fun fetchLatestRow(): List<HomePageList>? {
         val r = getWithTicket(
@@ -383,7 +392,7 @@ class DramadunyamProvider(private val prefs: SharedPreferences? = null) : MainAP
             mapper.readValue(r.text, DunFeedResponse::class.java).items.orEmpty()
                 .mapNotNull { it.toSearch() }
                 .takeIf { it.isNotEmpty() }
-                ?.let { listOf(HomePageList("الأحدث", it, true)) }
+                ?.let { listOf(HomePageList("الأحدث", it)) }
         } catch (e: kotlinx.coroutines.CancellationException) {
             throw e
         } catch (e: Exception) {
@@ -406,7 +415,7 @@ class DramadunyamProvider(private val prefs: SharedPreferences? = null) : MainAP
             mapper.readValue(r.text, DunFeedResponse::class.java).items.orEmpty()
                 .mapNotNull { it.toSearch() }
                 .takeIf { it.isNotEmpty() }
-                ?.let { listOf(HomePageList("الأكثر مشاهدة", it, true)) }
+                ?.let { listOf(HomePageList("الأكثر مشاهدة", it)) }
         } catch (e: kotlinx.coroutines.CancellationException) {
             throw e
         } catch (e: Exception) {

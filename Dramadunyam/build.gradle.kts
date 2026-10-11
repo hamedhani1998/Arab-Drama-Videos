@@ -1,4 +1,4 @@
-version = 1
+version = 2
 
 cloudstream {
     description = "Dramadunyam - مسلسلات قصيرة مترجمة من 43 منصة"
