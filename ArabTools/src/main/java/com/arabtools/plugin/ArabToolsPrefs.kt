@@ -38,6 +38,9 @@ object ArabToolsPrefs {
     const val NAV_HIDE_DOWNLOADS = "art_nav_hide_downloads"     // Boolean — إخفاء تبويب التحميلات
     const val NAV_HIDE_SETTINGS = "art_nav_hide_settings"       // Boolean — إخفاء تبويب الإعدادات
 
+    // (٥) الأدوات.
+    const val SHOW_TOAST = "art_show_toast" // Boolean — رسالة تأكيد قصيرة عند التطبيق
+
     // مفاتيح داخلية (لا تظهر في الشاشة) — حماية من تكرار توقّف التطبيق.
     const val BOOT_COUNT = "art_boot_count"     // Int — بصمات التشغيل المتقاربة
     const val BOOT_TS = "art_boot_ts"           // Long — وقت آخر بصمة تشغيل
@@ -66,7 +69,8 @@ object ArabToolsPrefs {
         PLAYER_LANDSCAPE,
         NIGHT_MODE, HIDE_STATUS, STATUS_COLOR, NAV_COLOR,
         NAV_HIDE_BAR, NAV_HIDE_HOME, NAV_HIDE_SEARCH, NAV_HIDE_LIBRARY,
-        NAV_HIDE_DOWNLOADS, NAV_HIDE_SETTINGS
+        NAV_HIDE_DOWNLOADS, NAV_HIDE_SETTINGS,
+        SHOW_TOAST
     )
 
     fun reset(prefs: SharedPreferences) {

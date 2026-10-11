@@ -8,6 +8,7 @@ import android.view.View
 import android.view.ViewGroup
 import android.widget.FrameLayout
 import android.widget.Toast
+import androidx.appcompat.app.AlertDialog
 import androidx.fragment.app.FragmentManager
 import androidx.preference.ListPreference
 import androidx.preference.Preference
@@ -110,6 +111,14 @@ class ArabToolsSettings(private val prefs: SharedPreferences) : BottomSheetDialo
                     setDefaultValue(false)
                 }
             )
+            category.addPreference(
+                SwitchPreferenceCompat(ctx).apply {
+                    key = ArabToolsPrefs.SHOW_TOAST
+                    title = "رسالة تأكيد عند فتح التطبيق"
+                    summary = "رسالة قصيرة مرة واحدة تُخبرك بالتعديلات المفعّلة فعلاً"
+                    setDefaultValue(true)
+                }
+            )
         }
 
         /** (٢) المشغّل. */
@@ -210,6 +219,22 @@ class ArabToolsSettings(private val prefs: SharedPreferences) : BottomSheetDialo
         private fun addTools(ctx: android.content.Context) {
             val category = PreferenceCategory(ctx).apply { title = "الأدوات" }
             preferenceScreen.addPreference(category)
+
+            category.addPreference(
+                Preference(ctx).apply {
+                    key = "art_diagnose"
+                    title = "تشخيص سريع"
+                    summary = "يعرض هل المحرّك يعمل ومعرّفات التطبيق المطلوبة — للاستعمال بلا كبل"
+                    setOnPreferenceClickListener {
+                        AlertDialog.Builder(ctx)
+                            .setTitle("تشخيص «أدوات عربية»")
+                            .setMessage(ArabToolsStatus.report(ctx, prefs))
+                            .setPositiveButton("حسناً", null)
+                            .show()
+                        true
+                    }
+                }
+            )
 
             category.addPreference(
                 Preference(ctx).apply {

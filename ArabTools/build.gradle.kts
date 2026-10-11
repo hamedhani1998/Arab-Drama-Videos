@@ -1,4 +1,4 @@
-version = 1
+version = 2
 
 cloudstream {
     description = "أدوات عربية - تخصيص واجهة CloudStream والمشغّل بإعدادات عربية كاملة"

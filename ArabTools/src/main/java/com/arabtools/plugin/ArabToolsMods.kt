@@ -12,6 +12,7 @@ import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
 import android.os.SystemClock
+import android.util.Log
 import android.view.View
 import android.view.ViewGroup
 import android.view.ViewTreeObserver
@@ -30,16 +31,25 @@ import com.google.android.material.bottomnavigation.BottomNavigationView
  * صريحة** لا انعكاس ولا صنف داخلي مخفي (بخلاف ما تفعله CSM عبر
  * `ActivityThread`، وهو محجوب أصلاً في `targetSdk` الحديث).
  *
+ * ### التوقيت — أهم درس في هذا المحرّك
+ * التطبيق يُحمِّل الإضافات من داخل `MainActivity.onCreate` عبر مسار مؤجَّل
+ * (تحقّقنا من ذلك في الـbytecode: `MainActivity$onCreate$12$4` ←
+ * `PluginManager.___DO_NOT_CALL_FROM_A_PLUGIN_loadAllLocalPlugins`). أي أن
+ * `load()` يصلنا **بعد** أن تكون الشاشة الأولى قد مرّت بـ`onResume` بالفعل،
+ * فلا يصلنا لها أي نداء دورة حياة، ولا يُطبَّق تعديل واحد. لذلك لا نعتمد على
+ * الدورة وحدها: السياق المارّ إلى `load` هو الشاشة نفسها، فنأخذها منه مباشرةً
+ * في [prime] ونربط المراقب ونطبّق فوراً.
+ *
  * عناصر التطبيق نجدها بالبحث في شجرة العرض: نوع حقيقي (`BottomNavigationView`)
  * أو اسم معرّف وقت التشغيل (`getIdentifier`) — لا اعتماد على ترتيب العرض ولا
  * على أرقام `R.id` وقت الترجمة، فيصمد التعديل عبر تحديثات التطبيق.
  *
  * ### قواعد السلامة (غير قابلة للتفاوض)
- * 1. كل تعديل داخل [safe] — لا يخرج استثناء أبداً إلى التطبيق.
+ * 1. كل تعديل داخل [safe] — لا يخرج استثناء أبداً إلى التطبيق (ويُسجَّل فقط).
  * 2. إن لم يُعثر على العنصر: لا شيء يحدث (تجاهل صامت، لا تعطيل).
  * 3. لا نلمس شيئاً لم يطلبه المستخدم، وإذا ألغى الطلب نُرجع ما غيّرناه مرة واحدة.
  * 4. [enabled] مفتاح رئيسي + وضع آمن، والاثنان يُطفآن كل شيء فوراً.
- * 5. [guardCrashLoop]: ثلاث شاشات افتتاح متقاربة ⇒ يُطفأ المفتاح الرئيسي تلقائياً.
+ * 5. [guardCrashLoop]: إقلاعات سريعة متكرّرة دون استقرار ⇒ يُطفأ المفتاح الرئيسي.
  */
 class ArabToolsMods(
     private val app: Application,
@@ -82,7 +92,10 @@ class ArabToolsMods(
 
     /** يشغّل [block] ولا يسمح لأي خطأ بالخروج — التعديل يسقط بصمت لا يُعطّل التطبيق. */
     private inline fun safe(block: () -> Unit) {
-        runCatching(block)
+        runCatching(block).onFailure {
+            ArabToolsStatus.lastError = it.javaClass.simpleName + ": " + it.message
+            Log.w(TAG, "تعديل سقط بصمت", it)
+        }
     }
 
     /** هل التعديلات مفعّلة الآن؟ (المفتاح الرئيسي مفتوح والوضع الآمن مغلق) */
@@ -119,14 +132,59 @@ class ArabToolsMods(
         else -> null
     }
 
+    /** وصف عربي للتعديلات المطلوبة الآن — يُستخدم في الرسالة وفي التشخيص. */
+    private fun activeSummary(): String {
+        if (!enabled()) return "لا شيء (التعديلات موقوفة)"
+        val parts = ArrayList<String>()
+        if (prefs.getBoolean(ArabToolsPrefs.PLAYER_LANDSCAPE, false)) parts.add("التدوير الأفقي")
+        when (prefs.getString(ArabToolsPrefs.NIGHT_MODE, "auto")) {
+            "dark" -> parts.add("الوضع الليلي")
+            "light" -> parts.add("الوضع النهاري")
+        }
+        if (prefs.getBoolean(ArabToolsPrefs.HIDE_STATUS, false)) parts.add("إخفاء شريط الحالة")
+        if (colorOf(prefs.getString(ArabToolsPrefs.STATUS_COLOR, "default")) != null) parts.add("لون شريط الحالة")
+        if (colorOf(prefs.getString(ArabToolsPrefs.NAV_COLOR, "default")) != null) parts.add("لون شريط النظام")
+        if (prefs.getBoolean(ArabToolsPrefs.NAV_HIDE_BAR, false)) parts.add("إخفاء شريط التنقل")
+        val hidden = ArabToolsPrefs.TABS.filter { prefs.getBoolean(it.key, false) }.map { it.label }
+        if (hidden.isNotEmpty()) parts.add("إخفاء " + hidden.joinToString("، "))
+        return if (parts.isEmpty()) "لا شيء (لم تُفتح أي مفاتيح)" else parts.joinToString("، ")
+    }
+
     // ------------------------------------------------------- دورة حياة الشاشات
 
+    /**
+     * الربط الفوري — يُستدعى من [ArabToolsPlugin.load] بعد التسجيل.
+     *
+     * [activity] هي الشاشة التي جاءت في السياق (تحقّقنا من أنها `MainActivity`).
+     * نؤجّل التطبيق قليلاً (350ms) كي لا نلمس الشاشة وهي في منتصف
+     * `onCreate`/`onResume`، ثم نربط المراقب ونطبّق.
+     */
+    fun prime(activity: Activity?) {
+        if (activity == null) {
+            Log.i(TAG, "prime: لا شاشة في السياق — ننتظر أول دورة حياة")
+            return
+        }
+        Log.i(TAG, "prime: ربط فوري على " + activity.javaClass.simpleName)
+        handler.postDelayed({
+            safe {
+                if (activity.isFinishing || activity.isDestroyed) return@safe
+                attachProbe(activity)
+                lastApplyAt = 0L
+                applyAll(activity)
+            }
+        }, 350L)
+    }
+
     override fun onActivityCreated(activity: Activity, savedInstanceState: Bundle?) {
-        safe { guardCrashLoop(activity) }
+        safe {
+            ArabToolsStatus.lastActivity = activity.javaClass.simpleName
+            guardCrashLoop(activity)
+        }
     }
 
     override fun onActivityResumed(activity: Activity) {
         safe {
+            ArabToolsStatus.lastActivity = activity.javaClass.simpleName
             attachProbe(activity)
             lastApplyAt = 0L
             applyAll(activity)
@@ -155,6 +213,7 @@ class ArabToolsMods(
         safe { app.unregisterActivityLifecycleCallbacks(this) }
         safe { detachProbe() }
         safe { handler.removeCallbacksAndMessages(null) }
+        ArabToolsStatus.registered = false
     }
 
     // ------------------------------------------------------------ محرّك التطبيق
@@ -186,11 +245,32 @@ class ArabToolsMods(
         val now = SystemClock.elapsedRealtime()
         if (now - lastApplyAt < 300L) return
         lastApplyAt = now
+
         val on = enabled()
         applyNightMode(on)
         applyNavTabs(activity, on)
         applySystemBars(activity, on)
         applyPlayerOrientation(activity, on)
+
+        ArabToolsStatus.applyCount++
+        ArabToolsStatus.lastSummary = activeSummary()
+        maybeToast(activity)
+    }
+
+    /**
+     * رسالة تأكيد قصيرة مرة واحدة لكل عملية تشغيل — أهم وسيلة تشخيص للمستخدم
+     * الذي يجرّب دون كبل: تُثبت أن المحرّك عمل، وتقول له ماذا فُعِّل فعلاً.
+     */
+    private fun maybeToast(activity: Activity) {
+        if (ArabToolsStatus.toasted) return
+        if (!prefs.getBoolean(ArabToolsPrefs.SHOW_TOAST, true)) return
+        ArabToolsStatus.toasted = true
+        val text = if (enabled()) {
+            "أدوات عربية: " + activeSummary()
+        } else {
+            "أدوات عربية: التعديلات موقوفة (راجع المفتاح الرئيسي أو الوضع الآمن)"
+        }
+        safe { Toast.makeText(activity, text, Toast.LENGTH_LONG).show() }
     }
 
     // -------------------------------------------------------------- (٢) المشغّل
@@ -211,9 +291,11 @@ class ArabToolsMods(
     }
 
     private fun applyPlayerOrientation(activity: Activity, on: Boolean) {
+        val playerSeen = isPlayerVisible(activity)
+        ArabToolsStatus.playerSeen = playerSeen
         val wantsLandscape = on &&
             prefs.getBoolean(ArabToolsPrefs.PLAYER_LANDSCAPE, false) &&
-            isPlayerVisible(activity)
+            playerSeen
 
         val current = activity.requestedOrientation
         if (!wantsLandscape) {
@@ -310,11 +392,13 @@ class ArabToolsMods(
         val wantsChange = hideBar || hidden.isNotEmpty()
 
         // لا نمرّ على شجرة العرض إطلاقاً إن لم يطلب المستخدم أي تغيير ولم نكن قد
-        // غيّرنا الشريط سابقاً — فلا نُثقل رسم الشاشة بلا سبب.
+        // غيّرنا الشريط سابقاً — فلا نُثقل رسم الشاشة بلا سبب. (نترك العدّاد على
+        // «لم يُقس بعد» كي يفرّق التشخيص بين «لم يعمل المحرّك» و«لم يجد الشريط».)
         if (!wantsChange && !navTouched) return
 
         val bars = findViews(activity.window?.decorView) { it is BottomNavigationView }
             .filterIsInstance<BottomNavigationView>()
+        ArabToolsStatus.navBarsFound = bars.size
         if (bars.isEmpty()) return
 
         val signature = hidden.sorted().joinToString(",")
@@ -344,6 +428,9 @@ class ArabToolsMods(
      * إعادة بناء تبويبات الشريط من نسخة «الأصل» المحفوظة عند أول رؤية، مع حذف
      * المخفيّ منها. الحذف عبر القائمة هو الأسلوب المتّبع في Material (لا تكفي
      * `isVisible`)، والإرجاع ممكن لأننا نحفظ العنوان والأيقونة والترتيب.
+     *
+     * مؤكَّد من bytecode التطبيق: مستمع تغيّر الوجهة في `MainActivity` يستدعي
+     * `menu.findItem(id)?.setChecked(...)` فقط ولا يُعيد نفخ القائمة، فالحذف يثبت.
      */
     private fun rebuildMenu(bar: BottomNavigationView, hidden: Set<Int>) {
         val menu = bar.menu
@@ -375,9 +462,10 @@ class ArabToolsMods(
     // --------------------------------------------- حماية من تكرار توقّف التطبيق
 
     /**
-     * لو كان التطبيق يُفتح ثم يسقط، فكل إقلاع جديد يُسجّل بصمة. ثلاث بصمات خلال
-     * دقيقة ⇒ المفتاح الرئيسي يُغلق وحده، فلا يمكن أن نحبس المستخدم في حلقة
-     * انهيار بسبب إضافة أدوات. تُصفَّر البصمات بعد 20 ثانية من استقرار شاشة.
+     * لو كان التطبيق يُفتح ثم يسقط، فكل إقلاع جديد يُسجّل بصمة. أربع بصمات
+     * متقاربة **دون أن تستقرّ أي منها** ⇒ المفتاح الرئيسي يُغلق وحده، فلا يمكن
+     * أن نحبس المستخدم في حلقة انهيار بسبب إضافة أدوات. تُصفَّر البصمات بعد
+     * 6 ثوانٍ من استقرار شاشة، فمن يستعمل التطبيق طبيعياً لا يُلامس الحارس.
      */
     private fun guardCrashLoop(activity: Activity) {
         if (countedThisProcess) return
@@ -385,15 +473,17 @@ class ArabToolsMods(
 
         val now = System.currentTimeMillis()
         val last = prefs.getLong(ArabToolsPrefs.BOOT_TS, 0L)
-        val count = if (now - last in 1..60_000L) prefs.getInt(ArabToolsPrefs.BOOT_COUNT, 0) + 1 else 1
+        val count = if (now - last in 1..45_000L) prefs.getInt(ArabToolsPrefs.BOOT_COUNT, 0) + 1 else 1
 
         val editor = prefs.edit()
             .putLong(ArabToolsPrefs.BOOT_TS, now)
             .putInt(ArabToolsPrefs.BOOT_COUNT, count)
-        if (count >= 3) {
+        if (count >= 4) {
             editor.putBoolean(ArabToolsPrefs.MASTER, false)
                 .putInt(ArabToolsPrefs.BOOT_COUNT, 0)
                 .putBoolean(ArabToolsPrefs.WAS_DISABLED, true)
+            ArabToolsStatus.guardDisabled = true
+            Log.w(TAG, "حماية الانهيار: أُغلق المفتاح الرئيسي بعد $count إقلاعات سريعة")
         }
         editor.apply()
 
@@ -402,7 +492,7 @@ class ArabToolsMods(
             safe {
                 Toast.makeText(
                     activity,
-                    "أدوات عربية: أُوقفت التعديلات تلقائياً بعد تكرار توقّف التطبيق. أعِد تفعيلها من الإعدادات.",
+                    "أدوات عربية: أُوقفت التعديلات تلقائياً بعد تكرار الإقلاع السريع. أعِد تفعيلها من الإعدادات.",
                     Toast.LENGTH_LONG
                 ).show()
             }
@@ -417,6 +507,10 @@ class ArabToolsMods(
                     prefs.edit().putInt(ArabToolsPrefs.BOOT_COUNT, 0).apply()
                 }
             }
-        }, 20_000L)
+        }, 6_000L)
+    }
+
+    companion object {
+        const val TAG = "ArabTools"
     }
 }
