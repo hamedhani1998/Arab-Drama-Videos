@@ -64,13 +64,19 @@ internal const val STALE_RETRY_GAP_MS = 3000L
 internal const val FETCH_DEADLINE_MS = 90_000L
 internal const val FETCH_HARD_TIMEOUT_MS = 95_000L
 
-// Hosts we never hand to the player. `cdn.narto-drama.com` is the API's own "direct" host for
-// shortmax works, but its TLS certificate is EXPIRED — measured 2026-10-02, valid-through date
-// November 12, 2026 yet a strict handshake fails with "certificate has expired", so a link on
-// this host can never play. The real qualities live in the signed shortmax-stream tokens, which
-// serve fine (cert accepted, valid through December 1, 2026). Recoverable — drop this line once
-// the host's cert is fixed.
-internal val DEAD_HOST_PATTERNS = listOf("montagehub", "cdn.narto-drama.com")
+// Hosts we never hand to the player. `montagehub` (sulao.montagehub.xyz) is genuinely dead —
+// NXDOMAIN even from 1.1.1.1 while the apex resolves through Cloudflare, so a link on it can
+// never play. MEASURED 2026-10-11.
+//
+// `cdn.narto-drama.com` is NOT dead — it was wrongly exiled here from a measurement that used
+// Windows-Python's OS trust store, which alone reports its cert as "expired". Re-measured
+// 2026-10-11 from the JDK cacerts (Mozilla-derived, like Android) and from openssl's Mozilla
+// store: BOTH handshake it fine — leaf CN=narto-drama.com, Let's Encrypt YE2, valid through
+// Nov 13 2026 — and a bare GET on a fresh token returns the 5 MB mp4. So the "dead" listing
+// made «كامل» skip a WORKING direct and substitute a low shortmax token (or nothing on works
+// whose multi_resolutions is []), leaving the player with a montagehub dead link — the "no
+// playback" bug. Removed 2026-10-11.
+internal val DEAD_HOST_PATTERNS = listOf("montagehub")
 
 // Dead verdicts, with a short TTL. joyreels hands out signed tokens that go stale fast, so
 // remembering the answer keeps a replay from re-spending the whole probe timeout on it.

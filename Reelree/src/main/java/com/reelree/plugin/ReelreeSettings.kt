@@ -68,6 +68,30 @@ class ReelreeSettingsBottomSheet(private val prefs: SharedPreferences) : BottomS
         const val KEY_QUALITY_ORDER = "rr_quality_order"          // "default" | "asc" | "desc"
         const val KEY_SHOW_SUBTITLES = "rr_show_subtitles"        // Boolean — الافتراضي true
         const val KEY_SHOW_AUDIO_TRACKS = "rr_show_audio_tracks"  // Boolean — الافتراضي true
+        const val KEY_SHOW_PLATFORMS = "rr_show_platforms"        // Boolean — الافتراضي true
+
+        // مفتاح إظهار/إخفاء منصّة بعينها: rr_platform_<slug>.
+        fun platformKey(slug: String) = "rr_platform_$slug"
+
+        // منصّات الموقع (same list as ReelreeProvider) — slug ← الاسم الذي
+        // يعرضه الموقع (14 منصّة، مقيس 2026-10-11 من /platforms/).
+        // ثابت على مستوى الكائن كي يشاركه المصدر في بناء أسماء المفاتيح.
+        val PLATFORMS: List<Pair<String, String>> = listOf(
+            "netshort" to "NetShort",
+            "dramabite" to "DramaBite",
+            "dramabox" to "DramaBox",
+            "dramapops" to "DramaPops",
+            "reelshort" to "ReelShort",
+            "goodshort" to "GoodShort",
+            "shortmax" to "ShortMax",
+            "flickreels" to "FlickReels",
+            "flextv" to "FlexTV",
+            "dramawave" to "DramaWave",
+            "stardusttv" to "StarDustTV",
+            "idrama" to "iDrama",
+            "microdrama" to "MicroDrama",
+            "bibishort" to "BibiShort",
+        )
 
         fun show(fm: FragmentManager, prefs: SharedPreferences) {
             ReelreeSettingsBottomSheet(prefs).show(fm, "rr_settings")
@@ -127,6 +151,34 @@ class ReelreeSettingsBottomSheet(private val prefs: SharedPreferences) : BottomS
             }
             playbackCategory.addPreference(showAudioPref)
 
+            // — إظهار/إخفاء أقسام المنصّات في القائمة الرئيسية —
+            val homeCat = PreferenceCategory(ctx)
+            homeCat.title = "أقسام القائمة الرئيسية (المنصّات)"
+            preferenceScreen.addPreference(homeCat)
+
+            val showPlatformsPref = SwitchPreferenceCompat(ctx).apply {
+                key = KEY_SHOW_PLATFORMS
+                title = "المنصّات كلها"
+                summary = "يعرض صفًّا لكل منصّة في القائمة الرئيسية. ألغِ وسمها لإخفائها كلها"
+                setDefaultValue(true)
+            }
+            homeCat.addPreference(showPlatformsPref)
+
+            val platCat = PreferenceCategory(ctx)
+            platCat.title = "المنصّات (إظهار/إخفاء كل واحدة)"
+            platCat.summary = "أزل وسم المنصّة لإخفاء صفّها من القائمة الرئيسية"
+            preferenceScreen.addPreference(platCat)
+
+            for ((slug, label) in PLATFORMS) {
+                val p = SwitchPreferenceCompat(ctx).apply {
+                    key = platformKey(slug)
+                    title = label
+                    summary = "يعرض صفّ «${label}» في القائمة الرئيسية"
+                    setDefaultValue(true)
+                }
+                platCat.addPreference(p)
+            }
+
             val resetPref = Preference(ctx).apply {
                 key = "rr_reset_prefs"
                 title = "إعادة الضبط الافتراضي"
@@ -136,6 +188,8 @@ class ReelreeSettingsBottomSheet(private val prefs: SharedPreferences) : BottomS
                         remove(KEY_QUALITY_ORDER)
                         remove(KEY_SHOW_SUBTITLES)
                         remove(KEY_SHOW_AUDIO_TRACKS)
+                        remove(KEY_SHOW_PLATFORMS)
+                        PLATFORMS.forEach { (slug, _) -> remove(platformKey(slug)) }
                     }.apply()
                     Toast.makeText(ctx, "تمت إعادة الضبط", Toast.LENGTH_SHORT).show()
                     true

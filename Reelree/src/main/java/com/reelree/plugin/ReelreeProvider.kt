@@ -50,6 +50,11 @@ class ReelreeProvider(private val prefs: SharedPreferences? = null) : MainAPI() 
     override val supportedTypes = setOf(TvType.TvSeries, TvType.Movie)
 
     // صف لكل منصة تجمعها Reelree — بدون حذف أي منصة. تأتي بعد الأقسام العامة.
+    // كل منصة تُعرض/تُخفى بمفتاحها المستقل rr_platform_<slug> (الافتراضي ظاهر) —
+    // نفس النمط الذي في DramaTip.
+    // (القائمة 14 = كل ما ينشره البوم /platforms/ فعلياً، مقيس 2026-10-11:
+    // NetShort, DramaBite, DramaBox, DramaPops, ReelShort, GoodShort, ShortMax,
+    // FlickReels, FlexTV, DramaWave, StarDustTV, iDrama, MicroDrama, BibiShort)
     private val platformRows = listOf(
         "platform/netshort/" to "منصة NetShort",
         "platform/dramabite/" to "منصة DramaBite",
@@ -62,7 +67,23 @@ class ReelreeProvider(private val prefs: SharedPreferences? = null) : MainAPI() 
         "platform/flextv/" to "منصة FlexTV",
         "platform/dramawave/" to "منصة DramaWave",
         "platform/stardusttv/" to "منصة StarDustTV",
+        "platform/idrama/" to "منصة iDrama",
+        "platform/microdrama/" to "منصة MicroDrama",
+        "platform/bibishort/" to "منصة BibiShort",
     )
+
+    // المفتاح المستخدم في التفضيلات لإظهار/إخفاء منصة (rr_platform_<slug>).
+    private fun platformKeyFor(path: String): String {
+        val slug = path.substringAfter("platform/").substringBefore("/")
+        return "rr_platform_$slug"
+    }
+
+    // المنصات التي يقرأها الموقع فعلياً (من /platforms/ عند الفحص) — تُعرض
+    // فقط إذا لم يطوِّها المستخدم في الإعدادات. الافتراضي: ظاهر كلها.
+    private fun visiblePlatformRows(): List<Pair<String, String>> =
+        platformRows.filter { (path, _) ->
+            prefs?.getBoolean(platformKeyFor(path), true) != false
+        }
 
     override val mainPage = mainPageOf(
         // الأقسام العامة
@@ -71,8 +92,8 @@ class ReelreeProvider(private val prefs: SharedPreferences? = null) : MainAPI() 
         "tag/metarjam-arabi/" to "مترجم عربي",
         "tag/mudabalaj-arabi/" to "مدبلج عربي",
         "tag/lang-en/" to "بالإنجليزية",
-        // جميع المنصات (حسب الموقع /platforms/)
-        *platformRows.map { (path, label) -> path to label }.toTypedArray(),
+        // جميع المنصات (حسب الموقع /platforms/) — كل منصة حسب إعدادها
+        *visiblePlatformRows().map { (path, label) -> path to label }.toTypedArray(),
     )
 
     private data class RrServer(
@@ -116,7 +137,7 @@ class ReelreeProvider(private val prefs: SharedPreferences? = null) : MainAPI() 
     // iterate the whole main screen without depending on the cloudstream MainPage API surface).
     private val allRows: List<String> = buildList {
         add("explore/"); add("explore/?sort=trending"); add("tag/metarjam-arabi/"); add("tag/mudabalaj-arabi/"); add("tag/lang-en/")
-        addAll(platformRows.map { it.first })
+        addAll(visiblePlatformRows().map { it.first })
     }
 
     private val rowCache = HashMap<String, List<SearchResponse>>()

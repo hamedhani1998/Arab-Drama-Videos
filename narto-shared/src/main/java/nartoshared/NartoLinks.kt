@@ -239,25 +239,35 @@ internal suspend fun loadNartoLinks(
             // as it fills ("plays a bit then spins"). Prefer the 480 token so the default "كامل"
             // starts smooth; the multi_resolutions emissions below still give 1080/720 to the
             // quality picker.
-            // MEASURED 2026-10-02 (re-confirmed): for shortmax the API's direct_play_url is on
-            // cdn.narto-drama.com, whose certificate has EXPIRED — it is in DEAD_HOST_PATTERNS,
-            // so emitting it as-is gives the player a guaranteed "Source error". Every quality of
-            // the work lives in the signed shortmax-stream tokens instead, and those serve fine.
-            // So when the API hands us a dead direct but the title has tokens, «كامل» becomes a
-            // token. Pick the LOWEST one: the measured segments are 402KB @5s (480) / 578KB (720)
-            // / 890KB (1080), and the 1080 drains the buffer faster than it refills on a slow
-            // link. The higher ones still reach the user through the quality picker below.
+            //
+            // MEASURED 2026-10-11: cdn.narto-drama.com is ALIVE (JDK/openssl Mozilla handshake
+            // OK — only Windows-Python's OS store cried "expired"; removed from DEAD_HOST_PATTERNS).
+            // The OLD code swapped ANY direct whose host contains "cdn.narto-drama.com" for the
+            // LOWEST shortmax-stream token. On works whose multi_resolutions is [] that inserted
+            // NOTHING in place of the one working link (lms-lmhzwr / fkh-lgr), and the player got
+            // the montagehub play_url instead → perceived "no playback". Now: if the direct host
+            // is not the dead montagehub family, emit the direct AS IS and let the probe decide.
+            // The lowest-token substitution is kept ONLY for a direct that probes dead on a live
+            // CDN host (the probe itself now re-verifies a fresh token, and shortmax's own
+            // segments still need the smooth-start preference).
             val shortmaxTokens = resp.multiResolutions.orEmpty()
                 .filter { it.streamUrl?.contains("shortmax-stream") == true && it.streamUrl.isNotBlank() }
-            val needsToken = u.contains("cdn.narto-drama.com") || u.contains("shortmax-stream")
-            val picked = if (needsToken && !u.contains("/e/m/")) {
-                shortmaxTokens.minWithOrNull(compareBy { it.resolution ?: 1080 })?.streamUrl
-            } else null
-            val pickedQ = picked?.let { pu -> shortmaxTokens.firstOrNull { it.streamUrl == pu } }
-                ?.let { qualityOfRes(it) }
+            // Emit the direct through the probe first — it refreshes/re-verifies a fresh token
+            // instead of judging from cache, so a live cdn direct is not falsely skipped.
             val before = emitted.size
-            emit(picked ?: u, "كامل", pickedQ ?: proxyQuality(u), apiHintFor(picked ?: u))
-            if (emitted.size > before) directOk++
+            emit(u, "كامل", proxyQuality(u), apiHintFor(u))
+            val directAlive = emitted.size > before
+            if (!directAlive && shortmaxTokens.isNotEmpty() && !u.contains("/e/m/")) {
+                // The direct is dead but tokens exist — «كامل» becomes a token.
+                val picked = shortmaxTokens.minWithOrNull(compareBy { it.resolution ?: 1080 })?.streamUrl
+                val pickedQ = picked?.let { pu -> shortmaxTokens.firstOrNull { it.streamUrl == pu } }
+                    ?.let { qualityOfRes(it) }
+                val before2 = emitted.size
+                emit(picked ?: u, "كامل", pickedQ ?: proxyQuality(u), apiHintFor(picked ?: u))
+                if (emitted.size > before2) directOk++
+            } else if (directAlive) {
+                directOk++
+            }
             directEmitted++
         }
         if (directOk == 0 && showFull) {
