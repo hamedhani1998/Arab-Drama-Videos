@@ -89,6 +89,8 @@ object ArabToolsStatus {
             appendLine("• معرّفات تبويبات التنقل: $found من ${ArabToolsPrefs.TABS.size}")
             if (missing.isNotEmpty()) appendLine("  (المفقود: $missing)")
             appendLine()
+            appendLine("• تصنيفات الشاشة: ${ArabToolsCatalog.CATEGORIES.size} — " + parityLine())
+            appendLine()
             appendLine("• التعديلات الفعّالة: $lastSummary")
             if (guardDisabled) {
                 appendLine("• ⚠ أوقفتها حماية الانهيار تلقائياً — أعِد فتح المفتاح الرئيسي.")
@@ -102,4 +104,16 @@ object ArabToolsStatus {
         else runCatching {
             resources.getIdentifier(name, "id", ArabToolsPrefs.APP_PACKAGE)
         }.getOrDefault(0)
+
+    /**
+     * سطر يثبت مطابقة تصنيفاتنا لتصنيفات CSM.
+     *
+     * التصنيفات الستة عشر استُخرجت من `classes.dex` في `CSMProvider.cs3`،
+     * و[ArabToolsCatalog.parity] يقارنها بالمعروض عندنا. إن ظهر هنا اختلاف
+     * فمعناه أن قائمة أو ترتيباً انحرف عمّا هو في CSM — لا أن الشاشة معطوبة.
+     */
+    private fun parityLine(): String {
+        val diffs = ArabToolsCatalog.parity()
+        return if (diffs.isEmpty()) "مطابقة لتصنيفات CSM ✔" else diffs.joinToString("؛ ", prefix = "⚠ ")
+    }
 }

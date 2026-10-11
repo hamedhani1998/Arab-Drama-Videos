@@ -31,6 +31,12 @@ import com.google.android.material.bottomsheet.BottomSheetDialogFragment
  * [ArabToolsCatalog.CATEGORIES]، فلا تعريف مكرّر هنا: كل إعداد يوصَف مرة واحدة
  * في ملفات الكتالوج، وهذه الشاشة ترسمه فقط.
  *
+ * ### التصنيفات
+ * الستة عشر تصنيفاً التي في هذه الشاشة هي الستة عشر التي في CSM نفسها، بنفس
+ * الترتيب: الإنجازات، الحركات، المظهر، المطوّر، الجهاز، ديسكورد، التحميلات،
+ * الرئيسية، التنقّل، التنبيهات، الرقابة الأبوية، المشغّل، الصفوف، المصادر،
+ * المزامنة والمشاركة، النظام. ويُتحقَّق من ذلك في «تشخيص سريع».
+ *
  * ### الصدق في العرض
  * كل عنصر عليه علامة «⏳ قريباً» لم يُنفَّذ بعد — يُعرض ولا يُوهم أنه يعمل.
  * وما بلا علامة يعمل فعلاً الآن.
@@ -72,24 +78,13 @@ class ArabToolsSettings(private val prefs: SharedPreferences) : BottomSheetDialo
             ArabToolsSettings(prefs).show(fm, "art_settings")
         }
 
-        /** ألوان جاهزة تُعرض في قوائم الألوان (نصوص عربية + قيم محفوظة). */
-        val COLOR_VALUES = arrayOf("default", "black", "dark", "blue", "purple", "red")
-        val COLOR_ENTRIES = arrayOf(
-            "افتراضي (دون تغيير)",
-            "أسود",
-            "رمادي غامق",
-            "أزرق",
-            "بنفسجي",
-            "أحمر"
-        )
-
         /** وسم العنصر غير المنفَّذ — لا نُوهم المستخدم بأنه يعمل. */
         const val SOON = "⏳ قريباً — "
     }
 
     class PrefsFragment(private val prefs: SharedPreferences) : PreferenceFragmentCompat() {
 
-        /** مفاتيح ظهرت في هذه الشاشة — يمنع تكرار المفتاح الواحد (يرمي استثناءً). */
+        /** مفاتيح ظهرت في هذه الشاشة — يمنع تكرار المفتاح الواحد داخل التصنيف. */
         private val usedKeys = HashSet<String>()
 
         override fun onCreatePreferences(savedInstanceState: Bundle?, rootKey: String?) {
@@ -100,12 +95,11 @@ class ArabToolsSettings(private val prefs: SharedPreferences) : BottomSheetDialo
 
             addIntro(ctx)
             addCatalog(ctx)
-            addTools(ctx)
         }
 
         // ------------------------------------------------------------ المدخل
 
-        /** بطاقة تشرح الشاشتين: ما يعمل الآن وما هو معروض للمستقبل. */
+        /** بطاقة تشرح ما يعمل الآن وما هو معروض للمستقبل، وتذكر مطابقة التصنيفات. */
         private fun addIntro(ctx: Context) {
             val liveCount = ArabToolsCatalog.CATEGORIES.sumOf { cat ->
                 cat.groups.sumOf { g -> g.defs.count { it.impl == Impl.LIVE } }
@@ -119,7 +113,7 @@ class ArabToolsSettings(private val prefs: SharedPreferences) : BottomSheetDialo
                     isSelectable = false
                     title = "قائمة الإعدادات العربية"
                     summary = "$totalCount إعداد في ${ArabToolsCatalog.CATEGORIES.size} تصنيف — " +
-                        "يعمل منها الآن $liveCount. " +
+                        "يعمل منها الآن $liveCount. هذه تصنيفات CSM نفسها وبنفس ترتيبها. " +
                         "الإعدادات التي عليها «$SOON» معروضة بالعربية لكنها لم تُنفَّذ بعد. " +
                         "ادخل تصنيفاً من الأسفل لترى إعداداته."
                 }
@@ -141,6 +135,8 @@ class ArabToolsSettings(private val prefs: SharedPreferences) : BottomSheetDialo
                 renderCategory(ctx, screen, cat, index)
                 preferenceScreen.addPreference(screen)
             }
+
+            addPluginTools(ctx)
         }
 
         /** يرسم تصنيفاً واحداً: كل مجموعة `PreferenceCategory` وكل تعريف عنصرُه المناسب. */
@@ -159,8 +155,8 @@ class ArabToolsSettings(private val prefs: SharedPreferences) : BottomSheetDialo
                 screen.addPreference(groupCategory)
                 group.defs.forEach { def -> addDef(ctx, groupCategory, def) }
 
-                // تبويبات شريط التنقل: مفاتيحها الحيّة لا تأتي من الكتالوج.
-                if (cat.title == "الرئيسية والتنقل" && group.title == "إخفاء تبويبات محددة") {
+                // تبويبات شريط التنقّل: مفاتيحها الحيّة لا تأتي من الكتالوج.
+                if (cat.csm == "navigation" && group.title == "إخفاء تبويبات محددة") {
                     addNavTabSwitches(ctx, groupCategory)
                 }
             }
@@ -228,9 +224,6 @@ class ArabToolsSettings(private val prefs: SharedPreferences) : BottomSheetDialo
 
         /** مفاتيح إخفاء التبويبات — تعمل فعلاً، وتبويب «الإعدادات» محميّ. */
         private fun addNavTabSwitches(ctx: Context, parent: PreferenceCategory) {
-            // «إخفاء الشريط كاملاً» يأتي من الكتالوج (LIVE) في مجموعة شريط التنقل،
-            // فلا نُكرّره هنا — تكرار المفتاح نفسه يفسد الشاشة.
-
             for (tab in ArabToolsPrefs.HIDEABLE_TABS) {
                 if (!usedKeys.add(tab.key)) continue
                 parent.addPreference(
@@ -254,13 +247,19 @@ class ArabToolsSettings(private val prefs: SharedPreferences) : BottomSheetDialo
             )
         }
 
-        // ------------------------------------------------------------ الأدوات
+        // ------------------------------------------------------------ أدوات الإضافة
 
-        /** إعادة الضبط والتشخيص — هذه تعمل كلها الآن. */
-        private fun addTools(ctx: Context) {
+        /**
+         * أدوات «أدوات عربية» نفسها: التشخيص وإعادة الضبط.
+         *
+         * تُضاف خارج التصنيفات الستة عشر كي تبقى مطابقتها لـCSM نظيفة — هذه أدوات
+         * إضافتنا لا أدوات CSM. «إعادة الضبط» تمسح الإعدادات **المحفوظة فعلاً** فقط:
+         * لو مُسحت مفاتيح «قريباً» أيضاً لصار كل ما لم يُنفَّذ بعد مفعّلاً فجأة.
+         */
+        private fun addPluginTools(ctx: Context) {
             val category = PreferenceCategory(ctx).apply {
                 key = "art_tools"
-                title = "الأدوات (تعمل الآن)"
+                title = "أدوات «أدوات عربية» (تعمل الآن)"
             }
             preferenceScreen.addPreference(category)
 
@@ -268,7 +267,7 @@ class ArabToolsSettings(private val prefs: SharedPreferences) : BottomSheetDialo
                 Preference(ctx).apply {
                     key = "art_diagnose"
                     title = "تشخيص سريع"
-                    summary = "يعرض هل المحرّك يعمل ومعرّفات التطبيق المطلوبة — للاستعمال بلا كبل"
+                    summary = "يعرض هل المحرّك يعمل، ومعرّفات التطبيق، ومطابقة تصنيفاتنا لتصنيفات CSM"
                     setOnPreferenceClickListener {
                         AlertDialog.Builder(ctx)
                             .setTitle("تشخيص «أدوات عربية»")
@@ -284,7 +283,7 @@ class ArabToolsSettings(private val prefs: SharedPreferences) : BottomSheetDialo
                 Preference(ctx).apply {
                     key = "art_reset"
                     title = "إعادة ضبط إعدادات الإضافة"
-                    summary = "يعيد كل الخيارات — العاملة والمعروضة — إلى الافتراضي"
+                    summary = "يمحو القيم المحفوظة فقط ويعيدها إلى الافتراضي"
                     setOnPreferenceClickListener {
                         ArabToolsPrefs.reset(prefs)
                         Toast.makeText(ctx, "تمت إعادة الضبط", Toast.LENGTH_SHORT).show()
@@ -297,8 +296,7 @@ class ArabToolsSettings(private val prefs: SharedPreferences) : BottomSheetDialo
                 Preference(ctx).apply {
                     key = "art_about"
                     title = "حول الإضافة"
-                    summary = "أدوات عربية — تخصيص الواجهة والمشغّل. التعديلات تعمل فوراً " +
-                        "عند التنقل بين الشاشات، وتُلغى كلها من المفتاح الرئيسي."
+                    summary = "أدوات عربية — تخصيص الواجهة والمشغّل بإعدادات عربية كاملة، على تصنيفات CSM الستة عشر"
                     isSelectable = false
                 }
             )

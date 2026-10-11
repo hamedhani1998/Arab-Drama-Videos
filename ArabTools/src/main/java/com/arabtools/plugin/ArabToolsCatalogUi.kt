@@ -6,124 +6,20 @@ import com.arabtools.plugin.ArabToolsCatalog.Group
 import com.arabtools.plugin.ArabToolsCatalog.Impl
 import com.arabtools.plugin.ArabToolsCatalog.Kind
 
-// ═══════════════════════════════════════════════════════ (٣) المظهر
+// كل ملف يحمل أربعة تصنيفات. هذا الملف: التنقّل، التنبيهات، الرقابة الأبوية، المشغّل.
+// (الحركات والمظهر في `ArabToolsCatalogCore.kt` — قسمة الملفات على CSM لا على أسمائها.)
 
-internal fun appearanceCategory() = Category(
-    "المظهر",
-    listOf(
-        Group(
-            "الوضع والألوان",
-            listOf(
-                Def(
-                    ArabToolsPrefs.NIGHT_MODE, "وضع العرض",
-                    "فرض الوضع الليلي أو النهاري على التطبيق كله",
-                    Kind.LIST, Impl.LIVE, "auto",
-                    entries = listOf("تلقائي (دون تغيير)", "ليلي دائماً", "نهاري دائماً"),
-                    values = listOf("auto", "dark", "light")
-                ),
-                Def("theme_auto_switch", "تبديل الوضع تلقائياً حسب الوقت", "يُبدّل بين الليلي والنهاري في وقت تحدّده"),
-                Def("theme_dark_start_hour", "ساعة بدء الوضع الليلي", "بصيغة ٢٤ ساعة", Kind.TEXT, default = "19"),
-                Def("theme_light_start_hour", "ساعة بدء الوضع النهاري", "بصيغة ٢٤ ساعة", Kind.TEXT, default = "7"),
-                ArabToolsCatalog.colorList("primary_color", "اللون الأساسي للتطبيق", "لون الأزرار والعناوين"),
-                ArabToolsCatalog.colorList("accent_color", "لون التمييز", "لون العناصر المختارة"),
-                ArabToolsCatalog.colorList("card_background_color", "لون خلفية البطاقات", "خلفية بطاقات الأفلام والمسلسلات"),
-                ArabToolsCatalog.colorList("background_color", "لون خلفية الشاشات", "الخلفية العامة لكل الشاشات"),
-                ArabToolsCatalog.colorList("toolbar_color", "لون الشريط العلوي", "لون شريط العنوان"),
-                ArabToolsCatalog.colorList("splash_color", "لون شاشة البداية", "شاشة التطبيق الأولى عند الفتح"),
-                Def("amoled_black", "أسود كامل (AMOLED)", "يجعل الخلفية سوداء تماماً لتوفير البطارية"),
-                Def("material_you", "ألوان النظام (Material You)", "يأخذ الألوان من خلفية هاتفك — أندرويد ١٢+"),
-                Def("high_contrast", "تباين عالٍ", "نصوص وألوان أوضح"),
-                Def("clear_custom_colors", "مسح الألوان المخصّصة", "يرجع كل الألوان إلى ألوان التطبيق الأصلية")
-            )
-        ),
-        Group(
-            "الخطوط",
-            listOf(
-                Def("custom_font", "خط مخصّص", "يستعمل ملف خط تختاره أنت"),
-                Def("custom_font_path", "ملف الخط", "مسار ملف الخط في الجهاز", Kind.TEXT, default = ""),
-                Def("custom_font_scale", "حجم الخط المخصّص", "تكبير أو تصغير الخط المخصّص", Kind.TEXT, default = "1.0"),
-                Def(
-                    "letter_spacing", "تباعد الحروف", "يزيد أو ينقص المسافة بين الحروف", Kind.LIST,
-                    entries = listOf("مضغوط", "عادي", "واسع", "واسع جداً"),
-                    values = listOf("0.9", "1.0", "1.1", "1.2"),
-                    default = "1.0"
-                ),
-                Def(
-                    "line_height", "ارتفاع السطر", "المسافة بين الأسطر", Kind.LIST,
-                    entries = listOf("مضغوط", "عادي", "واسع"),
-                    values = listOf("1.0", "1.2", "1.4"),
-                    default = "1.2"
-                ),
-                Def("body_font", "خط النصوص", "الخط المستعمل في الفقرات والقوائم"),
-                Def("title_font", "خط العناوين", "الخط المستعمل في العناوين")
-            )
-        ),
-        Group(
-            "الصفحة الرئيسية",
-            listOf(
-                Def(
-                    "home_columns", "عدد الأعمدة في الرئيسية", "كم بطاقة في الصف الواحد", Kind.LIST,
-                    entries = listOf("عمودان", "٣ أعمدة", "٤ أعمدة", "٥ أعمدة"),
-                    values = listOf("2", "3", "4", "5"),
-                    default = "3"
-                ),
-                Def(
-                    "poster_aspect_ratio", "نسبة صورة البطاقة", "شكل صور الأفلام والمسلسلات", Kind.LIST,
-                    entries = listOf("افتراضي", "عامودي ٢:٣", "مربّع", "أفقي ١٦:٩"),
-                    values = listOf("default", "2_3", "square", "16_9"),
-                    default = "default"
-                ),
-                Def(
-                    "card_corner_radius", "استدارة زوايا البطاقات", "مقدار انحناء الزوايا", Kind.LIST,
-                    entries = listOf("حادة", "خفيفة", "متوسطة", "دائرية"),
-                    values = listOf("0", "8", "16", "24"),
-                    default = "8"
-                ),
-                Def("compact_grid", "شبكة مضغوطة", "بطاقات أصغر وعدد أكثر في الشاشة"),
-                Def("marquee_titles", "عناوين متحرّكة", "العنوان الطويل يتحرّك بدل أن يُقطع"),
-                Def("thumbnail_blur", "تمويه الصور", "يُموّه الصور كي لا تظهر المشاهد لأحد معك"),
-                Def("thumbnail_blur_radius", "مقدار التمويه", "شدة التمويه", Kind.TEXT, default = "20"),
-                Def("shimmer_loading", "وميض التحميل", "يُظهر هيكل البطاقات وامضاً أثناء انتظار التحميل"),
-                Def("skeleton_loading", "هيكل عظمي للتحميل", "مربّعات رمادية مكان البطاقات أثناء التحميل"),
-                Def("hide_home_fab", "إخفاء الزر العائم", "يُخفي الزر الدائري العائم في الرئيسية"),
-                Def("poster_border", "إطار حول الصور", "يضع إطاراً حول بطاقات الأفلام"),
-                ArabToolsCatalog.colorList("poster_border_color", "لون الإطار", "لون الإطار حول البطاقات"),
-                Def("poster_border_width", "سماكة الإطار", "سماكة الإطار بالبكسل", Kind.TEXT, default = "1"),
-                Def("background_poster_watermark_badge", "شارة مائية على الصور", "علامة صغيرة على البطاقة")
-            )
-        ),
-        Group(
-            "الانتقالات والحركة",
-            listOf(
-                Def("enable_nav_animations", "حركات الانتقال بين الشاشات", "تأثير عند الانتقال من شاشة إلى أخرى"),
-                Def(
-                    "nav_animation_speed", "سرعة حركات الانتقال", "كم تستغرق الحركة", Kind.LIST,
-                    entries = listOf("سريعة", "عادية", "بطيئة"),
-                    values = listOf("fast", "normal", "slow"),
-                    default = "normal"
-                ),
-                Def("stagger_animations", "ظهور متتابع للبطاقات", "البطاقات تظهر واحدة بعد أخرى"),
-                Def("stagger_delay", "تأخير التتابع (ملي ثانية)", "الفاصل بين بطاقة وأخرى", Kind.TEXT, default = "50"),
-                Def("ripple_effect", "تأثير الموجة عند اللمس", "دائرة تظهر مكان لمسك"),
-                Def("edge_to_edge", "ملء الحواف", "يمدّ المحتوى إلى حواف الشاشة"),
-                Def("transparent_status_bar", "شريط حالة شفّاف", "يجعل خلفية شريط الحالة شفافة"),
-                Def("scroll_animations", "حركات التمرير", "تأثير عند تمرير القوائم"),
-                Def("smooth_scroll", "تمرير ناعم", "يجعل التمرير أكثر انسيابية")
-            )
-        )
-    )
-)
-
-// ═══════════════════════════════════════════════════════ (٤) الرئيسية والتنقل
+// ═══════════════════════ (٩) التنقّل — `category_navigation`
+// يقابل CSM: NavigationSettingsFragment + NavigationModitions + NavigationBarSurface
 
 internal fun navigationCategory() = Category(
-    "الرئيسية والتنقل",
+    "navigation", "التنقّل",
     listOf(
         Group(
-            "شريط التنقل",
+            "شريط التنقّل",
             listOf(
                 Def(
-                    ArabToolsPrefs.NAV_HIDE_BAR, "إخفاء شريط التنقل السفلي",
+                    ArabToolsPrefs.NAV_HIDE_BAR, "إخفاء شريط التنقّل السفلي",
                     "يُخفي الشريط كاملاً. التطبيق لا يملك قائمة جانبية، فإن أخفيته " +
                         "فاضغط ضغطاً مطوّلاً في مساحة فارغة لإرجاعه",
                     Kind.SWITCH, Impl.LIVE, false
@@ -143,13 +39,12 @@ internal fun navigationCategory() = Category(
                     values = listOf("none", "upper", "lower", "capitalize"),
                     default = "none"
                 ),
-                Def("nav_selected_animation", "حركة التبويب المختار", "تأثير عند التنقل بين التبويبات"),
-                Def("nav_footer_profile_pic", "صورة الحساب أسفل الشريط", "يضع صورتك في نهاية شريط التنقل"),
+                Def("nav_selected_animation", "حركة التبويب المختار", "تأثير عند التنقّل بين التبويبات"),
+                Def("nav_footer_profile_pic", "صورة الحساب أسفل الشريط", "يضع صورتك في نهاية شريط التنقّل"),
                 Def("nav_emoji_icons", "أيقونات تعبيرية", "يستعمل رموزاً بدل الأيقونات العادية"),
-                Def("nav_bar_transparent", "شريط التنقل شفّاف", "يجعل خلفية الشريط شفافة"),
+                Def("nav_bar_transparent", "شريط التنقّل شفّاف", "يجعل خلفية الشريط شفافة"),
                 Def("nav_tab_order", "ترتيب التبويبات", "رتّب تبويبات الشريط كما تريد", Kind.TEXT, default = "home,search,library,downloads,settings"),
-                Def("bottom_navigation", "شريط التنقل السفلي", "استعمل الشريط السفلي (مقابل الشريط الجانبي في الأجهزة العريضة)"),
-                Def("start_with_none_provider", "البدء بلا مصدر", "يفتح الرئيسية بلا مصدر مختار")
+                Def("bottom_navigation", "شريط التنقّل السفلي", "استعمل الشريط السفلي (مقابل الشريط الجانبي في الأجهزة العريضة)"),
             )
         ),
         Group(
@@ -159,66 +54,295 @@ internal fun navigationCategory() = Category(
             )
         ),
         Group(
-            "صفوف الرئيسية",
+            "البدء والشريط الجانبي",
             listOf(
-                Def("category_rows", "إظهار صفوف الأقسام", "صفوف «الأحدث» و«الأكثر مشاهدة» وغيرها"),
-                Def("category_rows_limit", "عدد الصفوف المعروضة", "الصفوف التي تُحمَّل في الرئيسية فقط", Kind.TEXT, default = "8"),
-                Def("category_rows_items", "عدد العناصر في الصف", "كم بطاقة في كل صف", Kind.TEXT, default = "12"),
-                Def("preview_carousel", "معرض المعاينة العلوي", "شريط الصور الكبيرة أعلى الرئيسية"),
-                Def("continue_watching", "صف «متابعة المشاهدة»", "يضع الحلقات التي لم تكملها في الأعلى"),
-                Def("recently_added", "صف «أُضيف حديثاً»", "أحدث ما أُضيف إلى المصادر"),
-                Def("recently_watched", "صف «شوهد حديثاً»", "ما شاهدته قريباً"),
-                Def("random_picks", "صف «اقتراح عشوائي»", "محتوى عشوائي من كل المصادر"),
-                Def("infinite_scroll", "تمرير بلا نهاية", "يُحمّل مزيداً من البطاقات كلما نزلت"),
-                Def("sticky_headers", "عناوين ثابتة", "يبقي اسم الصف ظاهراً أثناء التمرير"),
-                Def("library_random", "زر الاختيار العشوائي", "يختار عملاً عشوائياً من مكتبتك"),
-                Def("scroll_to_top_button", "زر الرجوع إلى الأعلى", "زر يقفز إلى أعلى القائمة")
+                Def(
+                    "startup_page", "صفحة البدء", "الشاشة التي يفتحها التطبيق أولاً", Kind.LIST,
+                    entries = listOf("الرئيسية", "البحث", "المكتبة", "التحميلات", "الإعدادات"),
+                    values = listOf("home", "search", "library", "downloads", "settings"),
+                    default = "home"
+                ),
+                Def("side_panel_enabled", "اللوحة الجانبية", "لوحة تُفتح من الحافة"),
+                Def("side_panel_width", "عرض اللوحة الجانبية", "عرضها بالبكسل", Kind.TEXT, default = "280"),
+                Def("nav_underlay", "طبقة أسفل الشريط", "طبقة خلفية تظهر تحت شريط التنقّل"),
+                Def("skip_hidden_destinations", "تخطّي التبويبات المخفيّة", "لا يقف التنقّل عند تبويب مخفي")
             )
         ),
         Group(
-            "الشريط العلوي",
+            "اللمس والإيماءات",
             listOf(
-                Def("hide_toolbar", "إخفاء الشريط العلوي", "يُخفي شريط العنوان تماماً"),
-                Def("collapsing_toolbar", "شريط علوي منكمش", "يتقلّص الشريط عند النزول"),
-                Def("toolbar_elevation", "ظل الشريط العلوي", "مقدار الظل تحت الشريط", Kind.TEXT, default = "4")
+                Def("swipe_between_pages", "التبديل بين الصفحات بالسحب", "اسحب يميناً أو يساراً لتنتقل"),
+                Def(
+                    "swipe_sensitivity", "حساسية السحب", "كم يجب أن تسحب لتنتقل", Kind.LIST,
+                    entries = listOf("منخفضة", "عادية", "عالية"),
+                    values = listOf("low", "normal", "high"),
+                    default = "normal"
+                ),
+                Def("double_tap_nav", "النقر المزدوج على الشريط", "انقر مرّتين على تبويب للعودة لأعلى"),
+                Def("long_press_nav", "الضغط المطوّل على الشريط", "اضغط مطوّلاً لإظهار خيارات سريعة"),
+                Def("confirm_exit_key", "تأكيد الخروج بزر الرجوع", "يسألك قبل إغلاق التطبيق بزر الرجوع")
             )
-        ),
+        )
+    )
+)
+
+// ═══════════════════════ (١٠) التنبيهات — `category_notifications`
+// يقابل CSM: NotificationsSettingsFragment + NotificationManager + NotificationUI
+
+internal fun notificationsCategory() = Category(
+    "notifications", "التنبيهات",
+    listOf(
         Group(
-            "المكتبة",
+            "إشعارات عامة",
             listOf(
+                Def("update_notifications_enabled", "تنبيه وجود تحديث", "يُخبرك عند صدور تحديث للتطبيق أو الإضافة"),
+                Def("new_episode_alerts", "تنبيه الحلقات الجديدة", "يُخبرك عند نزول حلقة جديدة لمسلسل تتابعه"),
+                Def("notification_sound", "صوت التنبيه", "الصوت المرافق للتنبيهات"),
+                Def("clear_notifications", "مسح كل التنبيهات", "يمحو التنبيهات الظاهرة الآن"),
                 Def(
-                    "library_columns", "أعمدة المكتبة", "كم بطاقة في الصف", Kind.LIST,
-                    entries = listOf("عمودان", "٣ أعمدة", "٤ أعمدة", "٥ أعمدة"),
-                    values = listOf("2", "3", "4", "5"),
-                    default = "3"
-                ),
-                Def(
-                    "library_sort", "ترتيب المكتبة", "الترتيب المستعمل في مكتبتك", Kind.LIST,
-                    entries = listOf("أُضيف حديثاً", "أبجدي", "التقييم", "سنة الإصدار", "آخر مشاهدة"),
-                    values = listOf("date_added", "alpha", "rating", "year", "watched"),
-                    default = "date_added"
-                ),
-                Def("unwatched_first", "غير المُشاهَد أولاً", "يقدّم ما لم تشاهده بعد"),
-                Def("library_loading_shimmer", "وميض أثناء تحميل المكتبة", "هيكل بطاقات وامض بدل الشاشة الفارغة"),
-                Def("library_search_filter", "البحث داخل المكتبة", "شريط بحث في أعلى المكتبة"),
-                Def("library_tab_layout", "تبويبات المكتبة", "أقسام المكتبة كأشرطة تبويب"),
-                Def(
-                    "continuous_playback_last_episode_action", "فعل آخر حلقة", "ماذا يفعل التطبيق عند انتهاء آخر حلقة", Kind.LIST,
-                    entries = listOf("لا شيء", "التالي في المكتبة", "الصفحة الرئيسية"),
-                    values = listOf("none", "next_in_library", "home"),
-                    default = "none"
+                    "dismissed_notifications", "التنبيهات المُستبعَدة", "تنبيهات أخفيتها — لا تُعرض مرة أخرى", Kind.INFO
                 )
             )
         ),
         Group(
-            "الملفات الشخصية",
+            "شكل التنبيه",
             listOf(
-                Def("profile_order", "ترتيب الملفات الشخصية", "رتّب ملفاتك كما تريد", Kind.TEXT, default = ""),
-                Def("hidden_profiles", "الملفات المخفيّة", "ملفات لا تظهر في القائمة", Kind.TEXT, default = ""),
-                Def("custom_profile_picture_enabled", "صورة ملف شخصية مخصّصة", "يستعمل صورة تختارها أنت بدل الافتراضية"),
-                Def("profile_picture", "ملف الصورة", "مساره في الجهاز", Kind.TEXT, default = ""),
-                Def("default_profile", "الملف الافتراضي", "الملف الذي يُفتح عند بدء التطبيق", Kind.TEXT, default = ""),
-                Def("hide_profiles", "إخفاء شريط الملفات الشخصية", "يُخفي شريط تبديل الملفات من الأعلى")
+                Def("notification_card_style", "شكل بطاقة التنبيه", "مظهر التنبيه في شريط التنبيهات"),
+                Def("notification_blur_enabled", "تمويه خلفية التنبيه", "خلفية ضبابية للتنبيه"),
+                Def("notification_overlay_opacity", "شفافية طبقة التنبيه", "شدة ظهور التنبيه فوق التطبيق", Kind.TEXT, default = "80"),
+                Def("notification_preview", "معاينة التنبيه", "يعرض معاينة للتنبيه الحالي", Kind.INFO)
+            )
+        ),
+        Group(
+            "تنبيهات المشاهدة",
+            listOf(
+                Def("status_notification", "تنبيه حالة التشغيل", "تنبيه ثابت أثناء تشغيل فيديو"),
+                Def("now_playing_overlay_enabled", "طبقة «يُشغَّل الآن»", "طبقة تعرض ما يُشغَّل حالياً"),
+            )
+        )
+    )
+)
+
+// ═══════════════════════ (١١) الرقابة الأبوية — `category_parental`
+// يقابل CSM: ParentalSettingsFragment + ParentalPinStore + ParentalTimeLockModitions
+
+internal fun parentalCategory() = Category(
+    "parental", "الرقابة الأبوية",
+    listOf(
+        Group(
+            "القفل والرمز",
+            listOf(
+                Def("parental_time_lock", "قفل وقت المشاهدة", "يحدّ وقت المشاهدة اليومي"),
+                Def("parental_pin", "الرمز السرّي", "رمز من أرقام يحمي الإعدادات", Kind.TEXT, default = ""),
+                Def("change_pin", "تغيير الرمز السرّي", "يستبدل الرمز الحالي"),
+                Def("reset_pin", "إعادة تعيين الرمز", "يمسح الرمز إن نسيته — يحتاج تأكيداً"),
+                Def("parental_recovery", "استعادة الرمز", "طريقة استرجاع الرمز عند نسيانه")
+            )
+        ),
+        Group(
+            "حدود المشاهدة",
+            listOf(
+                Def("parental_schedule", "جدول المشاهدة المسموح", "الوقت الذي يُسمح فيه بالمشاهدة"),
+                Def("parental_time_lock_hour", "ساعة بدء السماح", "بصيغة ٢٤ ساعة", Kind.TEXT, default = "0"),
+                Def("parental_time_lock_minute", "دقيقة بدء السماح", "الدقيقة", Kind.TEXT, default = "0"),
+                Def(
+                    "parental_time_lock_action", "فعل تجاوز الوقت", "ما يحدث عند انتهاء الوقت المسموح", Kind.LIST,
+                    entries = listOf("إيقاف التشغيل", "إظهار تنبيه", "طلب الرمز"),
+                    values = listOf("stop", "warn", "require_pin"),
+                    default = "stop"
+                ),
+                Def("time_lock_temporarily_disable", "إيقاف القفل مؤقتاً", "يمنح استثناءً لمدّة محدّدة"),
+                Def(
+                    "parental_scope", "نطاق الرقابة", "ما تخضع له الرقابة", Kind.LIST,
+                    entries = listOf("التطبيق كاملاً", "المشغّل فقط", "الإعدادات فقط"),
+                    values = listOf("app", "player", "settings"),
+                    default = "app"
+                ),
+                Def("maturity_filter_enabled", "تصفية التصنيف العمري", "يُخفي المحتوى فوق تصنيف محدّد"),
+                Def("hide_adult_content", "إخفاء محتوى البالغين", "يمنع ظهور الأعمال المخصّصة للبالغين")
+            )
+        ),
+        Group(
+            "الحالة",
+            listOf(
+                Def("parental_state", "حالة القفل", "هل القفل مفعّل الآن؟", Kind.INFO),
+                Def("parental_schedule_status", "حالة الجدول", "هل الوقت الآن مسموح؟", Kind.INFO),
+                Def("pin_failed_attempts", "محاولات الرمز الخاطئة", "كم مرة أُدخل رمز خاطئ", Kind.INFO)
+            )
+        )
+    )
+)
+
+// ═══════════════════════ (١٢) المشغّل — `category_player`
+// يقابل CSM: PlayerSettingsFragment + PlayerModitions + AutoSkipModitions + AutoResumeModitions
+
+internal fun playerCategory() = Category(
+    "player", "المشغّل",
+    listOf(
+        Group(
+            "الشاشة والاتجاه",
+            listOf(
+                Def(
+                    ArabToolsPrefs.PLAYER_LANDSCAPE, "تدوير تلقائي إلى الشاشة الأفقية",
+                    "يعمل عند بدء التشغيل فقط، ويعود الوضع الطبيعي عند الخروج منه",
+                    Kind.SWITCH, Impl.LIVE, false
+                ),
+                Def("immersive_mode", "ملء الشاشة أثناء التشغيل", "يُخفي أشرطة النظام كي لا تُقطع الصورة"),
+                Def(ArabToolsPrefs.HIDE_STATUS, "إخفاء شريط الحالة", "يُخفي شريط الوقت والبطارية أعلى الشاشة", Kind.SWITCH, Impl.LIVE, false),
+                ArabToolsCatalog.colorList(ArabToolsPrefs.STATUS_COLOR, "لون شريط الحالة", "لا يعمل على أندرويد 15 وما بعده (النظام يتجاهل اللون)", Impl.LIVE),
+                ArabToolsCatalog.colorList(ArabToolsPrefs.NAV_COLOR, "لون شريط أزرار النظام", "هذا شريط أندرويد السفلي، لا شريط تبويبات التطبيق", Impl.LIVE),
+                Def(
+                    "preferred_aspect_ratio", "نسبة العرض الافتراضية", "كيف تُعرض الصورة داخل المشغّل", Kind.LIST,
+                    entries = listOf("تلقائي", "ملء الشاشة", "16:9", "4:3", "21:9", "مربّع"),
+                    values = listOf("auto", "fill", "16_9", "4_3", "21_9", "square"),
+                    default = "auto"
+                ),
+                Def("auto_fullscreen_on_play", "ملء الشاشة تلقائياً عند التشغيل", "يتجاوز الشاشة الصغيرة ويبدأ ملء الشاشة مباشرة"),
+                Def(
+                    "resize_mode", "نمط تحجيم الفيديو", "كيف يُحجَّم الفيديو داخل الإطار", Kind.LIST,
+                    entries = listOf("ملاءمة", "تمديد", "قصّ", "ملء"),
+                    values = listOf("fit", "stretch", "crop", "fill"),
+                    default = "fit"
+                ),
+                Def("player_screenshot", "زر تصوير الشاشة", "يضيف زراً لالتقاط صورة من الفيديو"),
+                Def("screenshot_prevention", "منع تصوير الشاشة", "يمنع التقاط صورة للفيديو")
+            )
+        ),
+        Group(
+            "الأزرار والتحكّم",
+            listOf(
+                Def("auto_hide_controls", "إخفاء الأزرار تلقائياً", "تُخفى أزرار المشغّل بعد فترة سكون"),
+                Def("auto_hide_delay", "مدّة إخفاء الأزرار (ثوان)", "كم ينتظر قبل إخفاء الأزرار", Kind.TEXT, default = "4"),
+                Def("keep_controls_visible", "إبقاء الأزرار ظاهرة دائماً", "يلغي الإخفاء التلقائي — الأزرار لا تختفي أبداً"),
+                Def(
+                    "double_tap_action", "فعل النقر المزدوج", "ماذا يحدث عند النقر مرّتين على الشاشة", Kind.LIST,
+                    entries = listOf("تقديم/تأخير ١٠ ثوانٍ", "ملء الشاشة", "تشغيل/إيقاف", "لا شيء"),
+                    values = listOf("seek", "fullscreen", "play_pause", "none"),
+                    default = "seek"
+                ),
+                Def(
+                    "long_press_action", "فعل الضغط المطوّل", "ماذا يحدث عند الضغط المطوّل على الشاشة", Kind.LIST,
+                    entries = listOf("تسريع التشغيل", "تغيير السرعة", "لا شيء"),
+                    values = listOf("speed_up", "speed_change", "none"),
+                    default = "speed_up"
+                ),
+                Def("player_mute_button", "زر كتم الصوت", "يضيف زراً لكتم الصوت بلمسة"),
+                Def("player_zoom_buttons", "أزرار التكبير والتصغير", "أزرار لتقريب الصورة"),
+                Def("player_quick_actions", "لوحة الأفعال السريعة", "لوحة سريعة لأدوات المشغّل"),
+                Def("player_episodes_button", "زر قائمة الحلقات", "يفتح قائمة الحلقات من داخل المشغّل"),
+                Def("player_rotate_btt", "زر تدوير الشاشة", "يقلب الاتجاه أثناء التشغيل"),
+                Def("pinch_to_zoom", "التكبير بإصبعين", "كبّر الصورة بإصبعيك"),
+                Def("fullscreen_gesture", "إيماءة الدخول لملء الشاشة", "اسحب لإخفاء أشرطة النظام"),
+                Def("player_buffering_timeout", "مهلة انتظار التحميل (ثوان)", "بعدها يعتبر المصدر متعطّلاً", Kind.TEXT, default = "30")
+            )
+        ),
+        Group(
+            "السرعة والتقديم",
+            listOf(
+                Def("custom_player_speeds", "سرعات تشغيل مخصّصة", "السرعات المتاحة في زر السرعة", Kind.TEXT, default = "0.25,0.5,0.75,1,1.25,1.5,1.75,2,3"),
+                Def(
+                    "player_speed_default", "سرعة التشغيل الافتراضية", "السرعة التي يبدأ بها كل تشغيل", Kind.LIST,
+                    entries = listOf("عادية (١×)", "٠٫٧٥×", "١٫٢٥×", "١٫٥×", "٢×"),
+                    values = listOf("1.0", "0.75", "1.25", "1.5", "2.0"),
+                    default = "1.0"
+                ),
+                Def(
+                    "long_press_seek_speed", "سرعة التقديم عند الضغط المطوّل",
+                    "مضاعِف السرعة أثناء الضغط المطوّل على الشاشة", Kind.LIST,
+                    entries = listOf("٢×", "٣×", "٤×", "٥×"),
+                    values = listOf("2", "3", "4", "5"),
+                    default = "2"
+                ),
+                Def(
+                    "swipe_seek_sensitivity", "حساسية السحب للتقديم", "كم يتحرّك الشريط مقابل سحب الإصبع", Kind.LIST,
+                    entries = listOf("منخفضة", "عادية", "عالية", "عالية جداً"),
+                    values = listOf("low", "normal", "high", "very_high"),
+                    default = "normal"
+                ),
+                Def("remember_zoom", "تذكّر التكبير", "يحفظ مقدار التكبير ويعيده في المرة القادمة"),
+                Def("player_zoom_scale", "مقدار التكبير", "نسبة تكبير الصورة", Kind.TEXT, default = "1.0"),
+                Def("speed_lock_enabled", "قفل السرعة", "يمنع تغيير السرعة بالخطأ"),
+                Def("speed_indicator_badge", "شارة سرعة التشغيل", "يعرض السرعة الحالية على الشاشة"),
+                Def("speed_indicator_duration", "مدّة ظهور الشارة (ملي ثانية)", "كم تبقى الشارة على الشاشة", Kind.TEXT, default = "1500")
+            )
+        ),
+        Group(
+            "التشغيل التلقائي والتخطي",
+            listOf(
+                Def("auto_skip_enabled", "تخطي المقدمة تلقائياً", "يتجاوز مقدمة كل حلقة بلا تدخّل منك"),
+                Def("auto_skip_time", "مدّة المقدمة المحفوظة (ثوان)", "تُستعمل عندما لا يستطيع التطبيق كشف المقدمة بنفسه", Kind.TEXT, default = "85"),
+                Def("auto_skip_keep_first_intro", "لا تتخطَّ مقدمة الحلقة الأولى", "يبقي مقدمة أول حلقة كي تراها"),
+                Def("auto_skip_seen_series", "تخطي المقدمة في المسلسلات المتابَعة", "لا يخمّن في مسلسل جديد لم تشاهده بعد"),
+                Def("auto_skip_outro", "تخطي النهاية تلقائياً", "يقفز إلى الحلقة التالية عند ظهور النهاية"),
+                Def("auto_skip_show_button", "إظهار زر التخطي", "يُظهر زرّاً بدل التخطي الصامت"),
+                Def("auto_resume", "استكمال من آخر موضع", "يفتح الحلقة من حيث توقّفت بدل بدايتها"),
+                Def("auto_resume_show_toast", "إظهار رسالة عند الاستكمال", "يخبرك من أي دقيقة بدأ التشغيل"),
+                Def("auto_resume_min_position", "أقل موضع يُحفظ (ثوان)", "لا يحفظ مواضع أقل من هذا", Kind.TEXT, default = "30"),
+                Def("continuous_playback", "التشغيل المتواصل", "ينتقل تلقائياً إلى الحلقة التالية عند انتهاء الحالية"),
+                Def("continuous_playback_countdown", "مدّة العدّ قبل الحلقة التالية (ثوان)", "كم ينتظر قبل التشغيل التلقائي", Kind.TEXT, default = "5"),
+                Def("auto_mark_watched", "تعليم الحلقة كمُشاهَدة تلقائياً", "يعلّم الحلقة منتهية عند بلوغ نسبة معيّنة"),
+                Def("auto_mark_watched_percent", "نسبة اعتبار الحلقة مُشاهَدة (٪)", "النسبة التي بعدها تُعلَّم الحلقة منتهية", Kind.TEXT, default = "90"),
+                Def("continuous_playback_next", "التشغيل المتواصل ضمن المكتبة", "يستمرّ إلى العمل التالي في مكتبتك"),
+                Def("auto_pause_interrupt", "إيقاف مؤقّت عند مقاطعة", "يوقف التشغيل عند وصول مكالمة أو تنبيه"),
+                Def("player_skip_op", "زر تخطي المقدمة", "يُظهر زر تخطي في المشغّل"),
+                Def("player_skip_next", "زر تخطي إلى التالية", "يُظهر زراً للانتقال للحلقة التالية"),
+                Def("player_completion_action", "فعل انتهاء التشغيل", "ماذا يحدث عند انتهاء الفيديو"),
+                Def("exit_confirm", "تأكيد الخروج من المشغّل", "يسألك قبل إغلاق المشغّل")
+            )
+        ),
+        Group(
+            "الصوت والصورة",
+            listOf(
+                Def("background_audio_enabled", "الصوت في الخلفية", "يستمر الصوت وصورة الشاشة مغلقة"),
+                Def("background_audio_show_notification", "تنبيه الصوت في الخلفية", "يُظهر التحكّم في شريط التنبيهات"),
+                Def("audio_ducking", "خفض الصوت عند وجود تنبيه", "ينخفض صوت الفيديو تلقائياً عند وصول تنبيه"),
+                Def("audio_duck_level", "مقدار خفض الصوت (٪)", "إلى أي نسبة ينخفض الصوت", Kind.TEXT, default = "40"),
+                Def("equalizer_enabled", "مُعدِّل الصوت", "تحكّم في النغمات داخل المشغّل"),
+                Def(
+                    "equalizer_preset", "نمط مُعدِّل الصوت", "النمط الجاهز المستعمل", Kind.LIST,
+                    entries = listOf("بدون", "عادي", "بوب", "روك", "جاز", "كلاسيكي", "كلام"),
+                    values = listOf("none", "normal", "pop", "rock", "jazz", "classical", "speech"),
+                    default = "none"
+                ),
+                Def(
+                    "bass_boost", "تقوية الجهير", "يزيد عمق الأصوات المنخفضة", Kind.LIST,
+                    entries = listOf("بدون", "خفيف", "متوسط", "قوي"),
+                    values = listOf("0", "1", "2", "3"),
+                    default = "0"
+                ),
+                Def("audio_boost", "تقوية الصوت العام", "يرفع مستوى الصوت الكلي"),
+                Def("loudness_normalize", "توحيد مستوى الصوت", "يجعل الحلقات كلها بمستوى واحد"),
+                Def("audio_output", "مخرج الصوت", "أين يُشغَّل الصوت"),
+                Def("player_bg_dim", "تعتيم خلفية المشغّل", "يُعتّم ما حول الفيديو في الوضع العامودي"),
+                Def("player_bg_dim_level", "مقدار التعتيم (٪)", "شدة التعتيم", Kind.TEXT, default = "50"),
+                Def(
+                    "player_color_filter", "فلتر ألوان الفيديو", "يضبط السطوع والتشبّع", Kind.LIST,
+                    entries = listOf("بدون", "سطوع عالٍ", "تباين عالٍ", "دافئ", "بارد", "رمادي"),
+                    values = listOf("none", "bright", "contrast", "warm", "cool", "mono"),
+                    default = "none"
+                ),
+                Def(
+                    "video_effect_preset", "تأثيرات الفيديو", "تأثير بصري على الصورة", Kind.LIST,
+                    entries = listOf("بدون", "خفيف", "متوسط", "قوي"),
+                    values = listOf("none", "light", "medium", "strong"),
+                    default = "none"
+                ),
+                Def("pitch_shift", "تغيير طبقة الصوت", "يرفع أو يخفض طبقة الصوت"),
+                Def("subtitle_burn_in", "دمج الترجمة في الصورة", "تحرق الترجمة داخل الفيديو")
+            )
+        ),
+        Group(
+            "أدوات أثناء المشاهدة",
+            listOf(
+                Def("copy_current_stream_url", "زر نسخ رابط البث", "ينسخ رابط الفيديو الحالي إلى الحافظة"),
+                Def("player_metadata_overlay", "طبقة معلومات الفيديو", "يعرض اسم المسلسل ورقم الحلقة فوق الفيديو"),
+                Def("buffering_speed_display", "عرض سرعة التحميل", "يُظهر سرعة الشبكة أثناء التخزين المؤقت"),
+                Def("video_info_overlay", "طبقة معلومات تقنية", "يعرض الدقّة والترميز ومعدّل الصور"),
+                Def("sleep_timer_duration", "مؤقّت النوم (دقائق)", "يتوقف التشغيل بعد المدّة المحدّدة", Kind.TEXT, default = "30"),
+                Def("quick_bookmark", "علامة سريعة", "يضع علامة عند اللحظة الحالية"),
+                Def("bookmark_scenes_enabled", "علامات المشاهد", "احفظ مشاهد بعينها وارجع إليها"),
+                Def("now_playing_minibar", "شريط التشغيل السفلي", "شريط صغير يعرض ما يُشغَّل"),
+                Def("share_stream", "زر مشاركة البث", "يشارك رابط البث مع من تريد")
             )
         )
     )
