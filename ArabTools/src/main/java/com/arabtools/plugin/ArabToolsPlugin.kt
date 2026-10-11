@@ -33,6 +33,8 @@ class ArabToolsPlugin : Plugin() {
     override fun load(context: Context) {
         // ملف التفضيلات باسم الإضافة حتى لا تتصادم مفاتيحنا مع وحدة أخرى.
         val prefs = context.getSharedPreferences(ArabToolsPrefs.PREFS_NAME, Context.MODE_PRIVATE)
+        // شفاء فوري لأي قفل خلّفه إصدار قديم (إخفاء تبويب الإعدادات) — قبل أي تعديل.
+        ArabToolsPrefs.healLegacy(prefs)
         val application = context.applicationContext as? Application
         if (application != null) {
             val engine = ArabToolsMods(application, prefs)

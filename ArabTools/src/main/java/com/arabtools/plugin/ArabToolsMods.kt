@@ -21,7 +21,7 @@ import android.widget.Toast
 import androidx.appcompat.app.AppCompatDelegate
 import androidx.fragment.app.Fragment
 import androidx.fragment.app.FragmentActivity
-import com.google.android.material.bottomnavigation.BottomNavigationView
+import com.google.android.material.navigation.NavigationBarView
 
 /**
  * محرّك تعديلات «أدوات عربية».
@@ -145,7 +145,7 @@ class ArabToolsMods(
         if (colorOf(prefs.getString(ArabToolsPrefs.STATUS_COLOR, "default")) != null) parts.add("لون شريط الحالة")
         if (colorOf(prefs.getString(ArabToolsPrefs.NAV_COLOR, "default")) != null) parts.add("لون شريط النظام")
         if (prefs.getBoolean(ArabToolsPrefs.NAV_HIDE_BAR, false)) parts.add("إخفاء شريط التنقل")
-        val hidden = ArabToolsPrefs.TABS.filter { prefs.getBoolean(it.key, false) }.map { it.label }
+        val hidden = ArabToolsPrefs.HIDEABLE_TABS.filter { prefs.getBoolean(it.key, false) }.map { it.label }
         if (hidden.isNotEmpty()) parts.add("إخفاء " + hidden.joinToString("، "))
         return if (parts.isEmpty()) "لا شيء (لم تُفتح أي مفاتيح)" else parts.joinToString("، ")
     }
@@ -386,6 +386,17 @@ class ArabToolsMods(
 
     // --------------------------------------------------- (٤) الرئيسية والتنقل
 
+    /**
+     * إخفاء/إظهار تبويبات الشريط، وإخفاء الشريط كاملاً.
+     *
+     * ### قاعدة حماية المستخدم من القفل (أهم إصلاح في هذا الإصدار)
+     * التطبيق **لا يملك قائمة جانبية** — تحقّقنا من حزمته: لا `NavigationView`
+     * ولا أي درج، وروابط التنقل العميقة (`cloudstreamapp:`) تصل إلى البحث/التحميلات/
+     * المشغّل فقط ولا تصل إلى «الإعدادات». فتبويب الإعدادات هو **الطريق الوحيد**
+     * إلى إعدادات الإضافة؛ لو أُخفي (أو أُخفي الشريط كله) لَما بقي للمستخدم أي
+     * سبيل للرجوع. لذلك: التبويبات المحميّة لا تُخفى أبداً ([ArabToolsPrefs.Tab.canHide])،
+     * وإن أخفى المستخدم الشريط كله بقي [updateEscape] منفذاً يعيده بضغط مطوّل.
+     */
     private fun applyNavTabs(activity: Activity, on: Boolean) {
         val hideBar = on && prefs.getBoolean(ArabToolsPrefs.NAV_HIDE_BAR, false)
         val hidden = if (on) hiddenTabIds(activity.resources) else emptySet()
@@ -394,14 +405,20 @@ class ArabToolsMods(
         // لا نمرّ على شجرة العرض إطلاقاً إن لم يطلب المستخدم أي تغيير ولم نكن قد
         // غيّرنا الشريط سابقاً — فلا نُثقل رسم الشاشة بلا سبب. (نترك العدّاد على
         // «لم يُقس بعد» كي يفرّق التشخيص بين «لم يعمل المحرّك» و«لم يجد الشريط».)
-        if (!wantsChange && !navTouched) return
+        if (!wantsChange && !navTouched) {
+            updateEscape(activity, false)
+            return
+        }
 
-        val bars = findViews(activity.window?.decorView) { it is BottomNavigationView }
-            .filterIsInstance<BottomNavigationView>()
+        // كلا الشريطين من النوع نفسه في Material (`NavigationBarView`): الشريط
+        // السفلي في الوضع الرأسي، والـRail في الأفقي — فنعالجهما معاً.
+        val bars = findViews(activity.window?.decorView) { it is NavigationBarView }
+            .filterIsInstance<NavigationBarView>()
         ArabToolsStatus.navBarsFound = bars.size
+        updateEscape(activity, hideBar)
         if (bars.isEmpty()) return
 
-        val signature = hidden.sorted().joinToString(",")
+        val signature = hidden.sorted().joinToString(",") + "|bar=" + hideBar
         val changed = signature != lastTabsSignature
 
         for (bar in bars) {
@@ -413,10 +430,12 @@ class ArabToolsMods(
         navTouched = wantsChange
     }
 
+    /** المعرّفات المطلوب إخفاؤها — بلا التبويبات المحميّة (الإعدادات). */
     private fun hiddenTabIds(resources: Resources?): Set<Int> {
         if (resources == null) return emptySet()
         val hidden = HashSet<Int>()
         for (tab in ArabToolsPrefs.TABS) {
+            if (!tab.canHide) continue          // محميّ: لا يُخفى كي لا يُقفل المستخدم
             if (!prefs.getBoolean(tab.key, false)) continue
             val id = idOf(resources, tab.resName)
             if (id != 0) hidden.add(id)
@@ -425,16 +444,17 @@ class ArabToolsMods(
     }
 
     /**
-     * إعادة بناء تبويبات الشريط من نسخة «الأصل» المحفوظة عند أول رؤية، مع حذف
-     * المخفيّ منها. الحذف عبر القائمة هو الأسلوب المتّبع في Material (لا تكفي
-     * `isVisible`)، والإرجاع ممكن لأننا نحفظ العنوان والأيقونة والترتيب.
+     * يدخل التعديل على قائمة الشريط **بالحد الأدنى**: يُحذف المطلوب فقط بـ
+     * `removeItem`، فتبقى أيقونات الباقي كما رتّبها التطبيق. هذا هو **سبب
+     * اختفاء الأيقونات** سابقاً: `menu.clear()` كان يمحو كل عناصر القائمة ثم
+     * يعيد بناءها، فتضيع أيقونات لم يطلب المستخدم إخفاءها. وعند الإرجاع نُعيد
+     * ما نقص من نسخة «الأصل» المحفوظة قبل أول تعديل (عنوان + أيقونة + ترتيب).
      *
      * مؤكَّد من bytecode التطبيق: مستمع تغيّر الوجهة في `MainActivity` يستدعي
      * `menu.findItem(id)?.setChecked(...)` فقط ولا يُعيد نفخ القائمة، فالحذف يثبت.
      */
-    private fun rebuildMenu(bar: BottomNavigationView, hidden: Set<Int>) {
+    private fun rebuildMenu(bar: NavigationBarView, hidden: Set<Int>) {
         val menu = bar.menu
-
         if (originalNavItems == null) {
             val saved = ArrayList<NavItem>()
             for (i in 0 until menu.size()) {
@@ -446,17 +466,71 @@ class ArabToolsMods(
         val original = originalNavItems ?: return
 
         val wanted = original.filter { it.id !in hidden }
+        // لا نُفرّغ الشريط أبداً: لو صار الحذف سيُخلي القائمة كلها نتراجع ونتركها.
+        if (wanted.isEmpty()) return
+
         val present = HashSet<Int>()
         for (i in 0 until menu.size()) present.add(menu.getItem(i)?.itemId ?: 0)
-        if (present == wanted.map { it.id }.toSet()) return
+        val target = wanted.map { it.id }.toSet()
+        if (present == target) return
 
         val selected = bar.selectedItemId
-        menu.clear()
+
+        // حذف ما زاد فقط — أيقونات الباقي لا تُلمس.
+        present.filter { it != 0 && it !in target }.forEach { safe { menu.removeItem(it) } }
+
+        // إعادة ما نقص من نسخة الأصل (بعنوانه وأيقونته كما كانا).
         wanted.forEachIndexed { index, item ->
+            if (menu.findItem(item.id) != null) return@forEachIndexed
             val added = menu.add(0, item.id, index, item.title ?: "")
             added.icon = item.icon
         }
-        if (wanted.any { it.id == selected }) safe { bar.selectedItemId = selected }
+        if (target.contains(selected)) safe { bar.selectedItemId = selected }
+    }
+
+    // ------------------------------------------------- منفذ النجاة (ضغط مطوّل)
+
+    private var escapeView: View? = null
+
+    /**
+     * إن أخفى المستخدم الشريط كله فلم يبق في التطبيق ما يعيده (لا درج جانبي
+     * ولا رابط عميق إلى الإعدادات). فنُسلّح ضغطاً مطوّلاً على جذر الشاشة يعيد
+     * الشريط فوراً، ونُظهر تنبيهاً مرة واحدة يشرح ذلك. يُسلّح فقط حين يكون
+     * الشريط مخفياً — فلا إزعاج في الاستعمال العادي.
+     */
+    private fun updateEscape(activity: Activity, armed: Boolean) {
+        val decor = activity.window?.decorView ?: return
+        if (!armed) {
+            if (escapeView === decor) safe { decor.setOnLongClickListener(null) }
+            escapeView = null
+            return
+        }
+        if (escapeView === decor) return
+        escapeView = decor
+        safe {
+            decor.isLongClickable = true
+            decor.setOnLongClickListener {
+                safe {
+                    prefs.edit().putBoolean(ArabToolsPrefs.NAV_HIDE_BAR, false).apply()
+                    lastTabsSignature = null
+                    navTouched = false
+                    lastApplyAt = 0L
+                    applyAll(activity)
+                    Toast.makeText(activity, "أدوات عربية: أُعيد شريط التنقل", Toast.LENGTH_SHORT).show()
+                }
+                true
+            }
+        }
+        if (!ArabToolsStatus.escapeHintShown) {
+            ArabToolsStatus.escapeHintShown = true
+            safe {
+                Toast.makeText(
+                    activity,
+                    "اضغط ضغطاً مطوّلاً في مساحة فارغة لإرجاع شريط التنقل",
+                    Toast.LENGTH_LONG
+                ).show()
+            }
+        }
     }
 
     // --------------------------------------------- حماية من تكرار توقّف التطبيق

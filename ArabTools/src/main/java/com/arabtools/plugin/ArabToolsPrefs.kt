@@ -53,15 +53,29 @@ object ArabToolsPrefs {
      * (مقروء من حزمة التطبيق نفسها)، ولا نستورده وقت الترجمة حتى لا تتعلّق
      * الإضافة بإصدار معيّن: نبحث عنه وقت التشغيل بـ`getIdentifier`.
      */
-    data class Tab(val resName: String, val key: String, val label: String)
+    data class Tab(
+        val resName: String,
+        val key: String,
+        val label: String,
+        /** [canHide] = false يعني تبويباً محميّاً لا يُسمح بإخفائه. */
+        val canHide: Boolean = true
+    )
 
+    /**
+     * التطبيق لا يملك قائمة جانبية، وروابط التنقل العميقة لا تصل إلى «الإعدادات»؛
+     * فتبويب الإعدادات هو المنفذ الوحيد إلى إعدادات الإضافة ولذلك [canHide] = false
+     * حتى لا يُقفل المستخدم خارج الإعدادات بلا مخرج.
+     */
     val TABS: List<Tab> = listOf(
         Tab("navigation_home", NAV_HIDE_HOME, "الرئيسية"),
         Tab("navigation_search", NAV_HIDE_SEARCH, "البحث"),
         Tab("navigation_library", NAV_HIDE_LIBRARY, "المكتبة"),
         Tab("navigation_downloads", NAV_HIDE_DOWNLOADS, "التحميلات"),
-        Tab("navigation_settings", NAV_HIDE_SETTINGS, "الإعدادات")
+        Tab("navigation_settings", NAV_HIDE_SETTINGS, "الإعدادات", canHide = false)
     )
+
+    /** التبويبات القابلة للإخفاء فقط (تُعرض في الشاشة). */
+    val HIDEABLE_TABS: List<Tab> = TABS.filter { it.canHide }
 
     /** كل المفاتيح الظاهرة في الشاشة — تستخدمها «إعادة الضبط». */
     val SETTING_KEYS: List<String> = listOf(
@@ -77,5 +91,16 @@ object ArabToolsPrefs {
         val editor = prefs.edit()
         SETTING_KEYS.forEach { editor.remove(it) }
         editor.apply()
+    }
+
+    /**
+     * إصلاح تلقائي لحالة قديمة: الإصدار ٢ سمح بإخفاء تبويب «الإعدادات»، ومن
+     * أخفاه فقد الطريق الوحيد إلى إعدادات التطبيق والإضافة معاً. نُعيد المفتاح
+     * إلى الإغلاق عند كل تحميل للإضافة، فيُشفى القفل بمجرّد تحديث الإضافة.
+     */
+    fun healLegacy(prefs: SharedPreferences) {
+        if (prefs.getBoolean(NAV_HIDE_SETTINGS, false)) {
+            prefs.edit().putBoolean(NAV_HIDE_SETTINGS, false).apply()
+        }
     }
 }

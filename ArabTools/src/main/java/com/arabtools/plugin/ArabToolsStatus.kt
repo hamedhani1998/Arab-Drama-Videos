@@ -51,6 +51,10 @@ object ArabToolsStatus {
     @Volatile
     var guardDisabled: Boolean = false
 
+    /** هل شرحنا للمستخدم منفذ النجاة (الضغط المطوّل) مرة واحدة؟ */
+    @Volatile
+    var escapeHintShown: Boolean = false
+
     /**
      * تقرير عربي قصير يُعرض في نافذة «تشخيص سريع».
      *

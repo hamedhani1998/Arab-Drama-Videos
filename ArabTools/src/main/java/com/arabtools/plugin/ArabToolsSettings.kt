@@ -193,7 +193,8 @@ class ArabToolsSettings(private val prefs: SharedPreferences) : BottomSheetDialo
                 SwitchPreferenceCompat(ctx).apply {
                     key = ArabToolsPrefs.NAV_HIDE_BAR
                     title = "إخفاء شريط التنقل السفلي"
-                    summary = "يُخفي شريط التبويبات السفلي كاملاً"
+                    summary = "يُخفي الشريط كاملاً. التطبيق لا يملك قائمة جانبية، فإن أخفيته " +
+                        "فاضغط ضغطاً مطوّلاً في مساحة فارغة لإرجاعه"
                     setDefaultValue(false)
                 }
             )
@@ -203,7 +204,8 @@ class ArabToolsSettings(private val prefs: SharedPreferences) : BottomSheetDialo
             }
             category.addPreference(tabsCategory)
 
-            for (tab in ArabToolsPrefs.TABS) {
+            // تبويب «الإعدادات» غير مدرج: إخفاؤه يقفل الطريق الوحيد إلى الإعدادات.
+            for (tab in ArabToolsPrefs.HIDEABLE_TABS) {
                 tabsCategory.addPreference(
                     SwitchPreferenceCompat(ctx).apply {
                         key = tab.key
@@ -213,6 +215,16 @@ class ArabToolsSettings(private val prefs: SharedPreferences) : BottomSheetDialo
                     }
                 )
             }
+
+            tabsCategory.addPreference(
+                Preference(ctx).apply {
+                    key = "art_nav_settings_protected"
+                    title = "تبويب «الإعدادات» لا يُخفى"
+                    summary = "لأنه المنفذ الوحيد إلى إعدادات التطبيق وإعدادات هذه الإضافة — " +
+                        "إخفاؤه يمنعك من إعادة أي شيء"
+                    isSelectable = false
+                }
+            )
         }
 
         /** (٥) الأدوات — إعادة الضبط ومعلومات قصيرة. */
