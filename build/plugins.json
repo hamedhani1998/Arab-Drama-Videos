@@ -21,11 +21,30 @@
         "name": "ArabShortDrama"
     },
     {
-        "iconUrl": "https://yt3.googleusercontent.com/SCqr1wMv6zOj1x5p9GlnsIBgYO6IfWIJ4iuEzB-OMtMmoFpIPlFdU1x7d0SMS_smYa6GeIuqA=s200-c-k-c0x00ffffff-no-rj",
-        "fileHash": "sha256-ea0812682e45d1c059df762674cd328621f459c53872da8d77f81e34104bf3a1",
+        "fileHash": "sha256-f03817b52b542dbf5db233236d106946c382f17db99480ea8db26be7a8012833",
         "apiVersion": 1,
         "repositoryUrl": "https://github.com/hamedhani1998/Arab-Drama-Videos",
-        "fileSize": 81139,
+        "fileSize": 30008,
+        "status": 1,
+        "language": "ar",
+        "authors": [
+            "hamedhani1998"
+        ],
+        "tvTypes": [
+            "Others"
+        ],
+        "version": 2,
+        "internalName": "ArabTools",
+        "description": "\u0623\u062f\u0648\u0627\u062a \u0639\u0631\u0628\u064a\u0629 - \u062a\u062e\u0635\u064a\u0635 \u0648\u0627\u062c\u0647\u0629 CloudStream \u0648\u0627\u0644\u0645\u0634\u063a\u0651\u0644 \u0628\u0625\u0639\u062f\u0627\u062f\u0627\u062a \u0639\u0631\u0628\u064a\u0629 \u0643\u0627\u0645\u0644\u0629",
+        "url": "https://raw.githubusercontent.com/hamedhani1998/Arab-Drama-Videos/builds/ArabTools.cs3",
+        "name": "ArabTools"
+    },
+    {
+        "iconUrl": "https://yt3.googleusercontent.com/SCqr1wMv6zOj1x5p9GlnsIBgYO6IfWIJ4iuEzB-OMtMmoFpIPlFdU1x7d0SMS_smYa6GeIuqA=s200-c-k-c0x00ffffff-no-rj",
+        "fileHash": "sha256-56b2f81db5d91eec052d07132e68cfcafc120824e7c57296825aa72a3b6ce50a",
+        "apiVersion": 1,
+        "repositoryUrl": "https://github.com/hamedhani1998/Arab-Drama-Videos",
+        "fileSize": 82440,
         "status": 1,
         "language": "ar",
         "authors": [
@@ -41,10 +60,10 @@
         "name": "aryarabia"
     },
     {
-        "fileHash": "sha256-a692dab5f4cc717a5ab57892096a3221f3fef6bef4008c921a2da49c287fc82f",
+        "fileHash": "sha256-de89e8e3d6a1a55ef75344cf916cc07f250d8c9cb160529e739cb9167be95682",
         "apiVersion": 1,
         "repositoryUrl": "https://github.com/hamedhani1998/Arab-Drama-Videos",
-        "fileSize": 30181,
+        "fileSize": 50869,
         "status": 1,
         "language": "ar",
         "authors": [
@@ -61,10 +80,10 @@
         "name": "DeepDrama"
     },
     {
-        "fileHash": "sha256-57f29279a01be5f9fe36217c2f38aa63f5d6e4fdec1d48ef705fea103d8ec3a9",
+        "fileHash": "sha256-c4f1621035ee36eb1330a52bfe7a073671ea9716a367554db3a719313642b00d",
         "apiVersion": 1,
         "repositoryUrl": "https://github.com/hamedhani1998/Arab-Drama-Videos",
-        "fileSize": 40942,
+        "fileSize": 59260,
         "status": 1,
         "language": "ar",
         "authors": [
@@ -73,17 +92,17 @@
         "tvTypes": [
             "TvSeries"
         ],
-        "version": 1,
+        "version": 5,
         "internalName": "DirectDrama",
-        "description": "DirectDrama - \u0645\u0633\u0644\u0633\u0644\u0627\u062a \u0642\u0635\u064a\u0631\u0629 \u0645\u062a\u0631\u062c\u0645\u0629 \u0645\u0646 27 \u0645\u0646\u0635\u0629",
+        "description": "DirectDrama - \u0645\u0633\u0644\u0633\u0644\u0627\u062a \u0642\u0635\u064a\u0631\u0629 \u0645\u062a\u0631\u062c\u0645\u0629 \u0645\u0646 30 \u0645\u0646\u0635\u0629",
         "url": "https://raw.githubusercontent.com/hamedhani1998/Arab-Drama-Videos/builds/DirectDrama.cs3",
         "name": "DirectDrama"
     },
     {
-        "fileHash": "sha256-1aec1470960cf2792fab72ba2cb095a79fc0ef5bb974ffc2307118c5454e40a9",
+        "fileHash": "sha256-082bd916181fbe8e2b348b5e8149605c254bc6a92102435a10e6695c7ab16b28",
         "apiVersion": 1,
         "repositoryUrl": "https://github.com/hamedhani1998/Arab-Drama-Videos",
-        "fileSize": 34477,
+        "fileSize": 35560,
         "status": 1,
         "language": "ar",
         "authors": [
@@ -100,10 +119,10 @@
         "name": "Drama4All"
     },
     {
-        "fileHash": "sha256-5d04c0d25432f8cb8c4307354c7c51c13ab8ad6e19310a6fb4d63c0b95c4e03f",
+        "fileHash": "sha256-cb42ddc42ddfe485be8701ca7c7494dd0c667bd76c4025af51db759a989ec6b0",
         "apiVersion": 1,
         "repositoryUrl": "https://github.com/hamedhani1998/Arab-Drama-Videos",
-        "fileSize": 47629,
+        "fileSize": 49025,
         "status": 1,
         "language": "ar",
         "authors": [
@@ -138,6 +157,45 @@
         "description": "\u0625\u0636\u0627\u0641\u0629 DramaGlance - \u0645\u0633\u0644\u0633\u0644\u0627\u062a \u062f\u0631\u0627\u0645\u0627 \u0642\u0635\u064a\u0631\u0629 \u0645\u062a\u0631\u062c\u0645\u0629 \u0628\u0627\u0644\u0639\u0631\u0628\u064a\u0629",
         "url": "https://raw.githubusercontent.com/hamedhani1998/Arab-Drama-Videos/builds/DramaGlance.cs3",
         "name": "DramaGlance"
+    },
+    {
+        "fileHash": "sha256-a169e5237691e74a826eb9c662b116848d524ff488f0ee78bd3a27a30176092c",
+        "apiVersion": 1,
+        "repositoryUrl": "https://github.com/hamedhani1998/Arab-Drama-Videos",
+        "fileSize": 39724,
+        "status": 1,
+        "language": "ar",
+        "authors": [
+            "hamedhani1998"
+        ],
+        "tvTypes": [
+            "TvSeries",
+            "Movie"
+        ],
+        "version": 1,
+        "internalName": "DramaTip",
+        "description": "DramaTip - \u062f\u0631\u0627\u0645\u0627 \u0642\u0635\u064a\u0631\u0629 \u0645\u0646 \u0623\u0643\u062b\u0631 \u0645\u0646 \u0662\u0660 \u0645\u0646\u0635\u0629",
+        "url": "https://raw.githubusercontent.com/hamedhani1998/Arab-Drama-Videos/builds/DramaTip.cs3",
+        "name": "DramaTip"
+    },
+    {
+        "fileHash": "sha256-9e494cd58e632549785ee385b02764ceb757d2b82497f606b67ebd22fdc256d4",
+        "apiVersion": 1,
+        "repositoryUrl": "https://github.com/hamedhani1998/Arab-Drama-Videos",
+        "fileSize": 26773,
+        "status": 1,
+        "language": "ar",
+        "authors": [
+            "hamedhani1998"
+        ],
+        "tvTypes": [
+            "TvSeries"
+        ],
+        "version": 1,
+        "internalName": "DramaVideoShow",
+        "description": "DramaVideoShow - \u0645\u0633\u0644\u0633\u0644\u0627\u062a \u0642\u0635\u064a\u0631\u0629 \u062d\u0644\u0642\u0627\u062a \u0643\u0627\u0645\u0644\u0629",
+        "url": "https://raw.githubusercontent.com/hamedhani1998/Arab-Drama-Videos/builds/DramaVideoShow.cs3",
+        "name": "DramaVideoShow"
     },
     {
         "iconUrl": "",
@@ -225,10 +283,10 @@
     },
     {
         "iconUrl": "",
-        "fileHash": "sha256-f7ee1d6413bcce1fe7bd8178d038ca7c2441e299a57148faaf4bf8c073672177",
+        "fileHash": "sha256-5ac46e55e7fbdd2bd73579af34a943a2d5b74c02ffe6c021e72f7b4d35dfd182",
         "apiVersion": 1,
         "repositoryUrl": "https://github.com/hamedhani1998/Arab-Drama-Videos",
-        "fileSize": 28620,
+        "fileSize": 29810,
         "status": 1,
         "language": "ar",
         "authors": [
@@ -246,10 +304,10 @@
     },
     {
         "iconUrl": "https://mosalsaly.com/favicon.ico",
-        "fileHash": "sha256-ff9fa6791d1977fd9dc8293a2627a16677aa2320d4f735cf291bbbe20bc5559b",
+        "fileHash": "sha256-1c649caba5ac177618407ed94e176198128f1134116d0b03a018fc88317b14e8",
         "apiVersion": 1,
         "repositoryUrl": "https://github.com/hamedhani1998/Arab-Drama-Videos",
-        "fileSize": 74473,
+        "fileSize": 75750,
         "status": 1,
         "language": "ar",
         "authors": [
@@ -265,10 +323,10 @@
         "name": "mosalsaly"
     },
     {
-        "fileHash": "sha256-9327b62d0b9f0fe5063a9ce3a69255d2efea9fbad827a7bec26277c5997c5b23",
+        "fileHash": "sha256-1f0906418aa51c30a6288b0085670bc03e465739e6932c4c832cbcbcc28cefb2",
         "apiVersion": 1,
         "repositoryUrl": "https://github.com/hamedhani1998/Arab-Drama-Videos",
-        "fileSize": 72249,
+        "fileSize": 73523,
         "status": 1,
         "language": "ar",
         "authors": [
@@ -285,10 +343,10 @@
         "name": "NartoDrama"
     },
     {
-        "fileHash": "sha256-81ae57fe6f26833a9d379d504fc7c33537058e6e98e0cfaf31a69d45a51b97ab",
+        "fileHash": "sha256-cd22762dae6e29c614df867cc10d9aa1976faa35a629f92dc4c49051a5a6280f",
         "apiVersion": 1,
         "repositoryUrl": "https://github.com/hamedhani1998/Arab-Drama-Videos",
-        "fileSize": 72166,
+        "fileSize": 73443,
         "status": 1,
         "language": "ar",
         "authors": [
@@ -305,10 +363,10 @@
         "name": "NartoEdge"
     },
     {
-        "fileHash": "sha256-1a226e84480e6fff8e10d826d606fc92cfdd7d9159b33bba6815e5e58203f11f",
+        "fileHash": "sha256-88f8f1bb70b6100583155d6a9badc8707585d50c07700e1a2a1d6c74e24a79fe",
         "apiVersion": 1,
         "repositoryUrl": "https://github.com/hamedhani1998/Arab-Drama-Videos",
-        "fileSize": 35339,
+        "fileSize": 36755,
         "status": 1,
         "language": "ar",
         "authors": [
@@ -325,10 +383,10 @@
         "name": "NetShort"
     },
     {
-        "fileHash": "sha256-d8d25df8218d5356a3cd59ce26844338f16926b4bd81ebd05d703cd4c301c6b4",
+        "fileHash": "sha256-aa614995280e3bda1c4f97897f74c4334f772f70071c0a9f5d5df57e50c42d18",
         "apiVersion": 1,
         "repositoryUrl": "https://github.com/hamedhani1998/Arab-Drama-Videos",
-        "fileSize": 76513,
+        "fileSize": 77749,
         "status": 1,
         "language": "ar",
         "authors": [
@@ -346,10 +404,10 @@
     },
     {
         "iconUrl": "https://pakistanilive.com/wp-content/uploads/2026/03/cropped-\u0628\u0627\u0643\u0633\u062a\u0627\u0646\u064a-\u0644\u0627\u064a\u0641-1-192x192.jpg",
-        "fileHash": "sha256-5c70372a8b7795b80a767fbe528c4b1cc5901ced285dc44053829907e610336d",
+        "fileHash": "sha256-67312076d5d00b983739a75ea6d71fe4cac7b8ab58b0e07885ab7cc05fe366d3",
         "apiVersion": 1,
         "repositoryUrl": "https://github.com/hamedhani1998/Arab-Drama-Videos",
-        "fileSize": 48929,
+        "fileSize": 50299,
         "status": 1,
         "language": "ar",
         "authors": [
@@ -366,10 +424,10 @@
     },
     {
         "iconUrl": "",
-        "fileHash": "sha256-93f1a90aeff331959550ceeaeb2214800ea6078a65ff6ac7ecb9030f74c34358",
+        "fileHash": "sha256-6f2d1f31be32d40fc62e67e6924834f7c6608c444107d1fef5bfaba602bdfd41",
         "apiVersion": 1,
         "repositoryUrl": "https://github.com/hamedhani1998/Arab-Drama-Videos",
-        "fileSize": 55342,
+        "fileSize": 56450,
         "status": 1,
         "language": "ar",
         "authors": [
@@ -386,10 +444,10 @@
         "name": "Reelree"
     },
     {
-        "fileHash": "sha256-862db6f95e96fca6fac4d90a76de5dfdbef9a5ff1d25707f669672dd4989f9b7",
+        "fileHash": "sha256-c30927edc4b7085329976af71cad3ebe5174c50ae1cd3f953dcbfa76d0be2784",
         "apiVersion": 1,
         "repositoryUrl": "https://github.com/hamedhani1998/Arab-Drama-Videos",
-        "fileSize": 36332,
+        "fileSize": 37497,
         "status": 1,
         "language": "ar",
         "authors": [
@@ -406,11 +464,30 @@
         "name": "ReelShort"
     },
     {
-        "iconUrl": "",
-        "fileHash": "sha256-331fd12cf19881571a2ad1c84236c79a0654cab2dac9c844c88e1fcba0bf8df3",
+        "fileHash": "sha256-6c386f7f1becd7145c28d3a8f85cb03ec964de52740373c88947e93d51a46454",
         "apiVersion": 1,
         "repositoryUrl": "https://github.com/hamedhani1998/Arab-Drama-Videos",
-        "fileSize": 78135,
+        "fileSize": 24438,
+        "status": 1,
+        "language": "ar",
+        "authors": [
+            "hamedhani1998"
+        ],
+        "tvTypes": [
+            "TvSeries"
+        ],
+        "version": 1,
+        "internalName": "ShahidFree",
+        "description": "ShahidFree - \u0645\u0633\u0644\u0633\u0644\u0627\u062a \u0642\u0635\u064a\u0631\u0629 \u0645\u062a\u0631\u062c\u0645\u0629 \u0648\u0645\u062f\u0628\u0644\u062c\u0629",
+        "url": "https://raw.githubusercontent.com/hamedhani1998/Arab-Drama-Videos/builds/ShahidFree.cs3",
+        "name": "ShahidFree"
+    },
+    {
+        "iconUrl": "",
+        "fileHash": "sha256-d55f0d905ee779d8e2cbb98dfdac52e14b1f20dd3cb39ba5ccca83fd8a1f156f",
+        "apiVersion": 1,
+        "repositoryUrl": "https://github.com/hamedhani1998/Arab-Drama-Videos",
+        "fileSize": 81295,
         "status": 1,
         "language": "ar",
         "authors": [

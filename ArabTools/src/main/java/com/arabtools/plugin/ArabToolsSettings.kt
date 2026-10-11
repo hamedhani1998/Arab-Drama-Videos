@@ -1,6 +1,7 @@
 package com.arabtools.plugin
 
 import android.app.Dialog
+import android.content.Context
 import android.content.SharedPreferences
 import android.os.Bundle
 import android.view.LayoutInflater
@@ -10,11 +11,15 @@ import android.widget.FrameLayout
 import android.widget.Toast
 import androidx.appcompat.app.AlertDialog
 import androidx.fragment.app.FragmentManager
+import androidx.preference.EditTextPreference
 import androidx.preference.ListPreference
 import androidx.preference.Preference
 import androidx.preference.PreferenceCategory
 import androidx.preference.PreferenceFragmentCompat
+import androidx.preference.PreferenceScreen
 import androidx.preference.SwitchPreferenceCompat
+import com.arabtools.plugin.ArabToolsCatalog.Impl
+import com.arabtools.plugin.ArabToolsCatalog.Kind
 import com.google.android.material.bottomsheet.BottomSheetBehavior
 import com.google.android.material.bottomsheet.BottomSheetDialog
 import com.google.android.material.bottomsheet.BottomSheetDialogFragment
@@ -22,9 +27,13 @@ import com.google.android.material.bottomsheet.BottomSheetDialogFragment
 /**
  * إعدادات «أدوات عربية» — عربية بالكامل.
  *
- * تُعرض من زر الإعدادات في قائمة الإضافات. الخيارات تُحفظ في ملف تفضيلات
- * خاص بالوحدة ([ArabToolsPrefs.PREFS_NAME])، ويقرأها [ArabToolsMods] مباشرة
- * عند كل رسم للشاشة، فالتغيير يظهر فوراً دون إعادة تشغيل التطبيق.
+ * تُعرض من زر الإعدادات في قائمة الإضافات. الشاشة تُبنى كلها من
+ * [ArabToolsCatalog.CATEGORIES]، فلا تعريف مكرّر هنا: كل إعداد يوصَف مرة واحدة
+ * في ملفات الكتالوج، وهذه الشاشة ترسمه فقط.
+ *
+ * ### الصدق في العرض
+ * كل عنصر عليه علامة «⏳ قريباً» لم يُنفَّذ بعد — يُعرض ولا يُوهم أنه يعمل.
+ * وما بلا علامة يعمل فعلاً الآن.
  */
 class ArabToolsSettings(private val prefs: SharedPreferences) : BottomSheetDialogFragment() {
 
@@ -73,9 +82,15 @@ class ArabToolsSettings(private val prefs: SharedPreferences) : BottomSheetDialo
             "بنفسجي",
             "أحمر"
         )
+
+        /** وسم العنصر غير المنفَّذ — لا نُوهم المستخدم بأنه يعمل. */
+        const val SOON = "⏳ قريباً — "
     }
 
     class PrefsFragment(private val prefs: SharedPreferences) : PreferenceFragmentCompat() {
+
+        /** مفاتيح ظهرت في هذه الشاشة — يمنع تكرار المفتاح الواحد (يرمي استثناءً). */
+        private val usedKeys = HashSet<String>()
 
         override fun onCreatePreferences(savedInstanceState: Bundle?, rootKey: String?) {
             val ctx = requireContext()
@@ -83,130 +98,142 @@ class ArabToolsSettings(private val prefs: SharedPreferences) : BottomSheetDialo
 
             preferenceScreen = preferenceManager.createPreferenceScreen(ctx)
 
-            addGeneral(ctx)
-            addPlayer(ctx)
-            addAppearance(ctx)
-            addNavigation(ctx)
+            addIntro(ctx)
+            addCatalog(ctx)
             addTools(ctx)
         }
 
-        /** (١) عام — المفتاح الرئيسي وزر الإيقاف المؤقت. */
-        private fun addGeneral(ctx: android.content.Context) {
-            val category = PreferenceCategory(ctx).apply { title = "عام" }
-            preferenceScreen.addPreference(category)
+        // ------------------------------------------------------------ المدخل
 
-            category.addPreference(
-                SwitchPreferenceCompat(ctx).apply {
-                    key = ArabToolsPrefs.MASTER
-                    title = "تفعيل التعديلات"
-                    summary = "المفتاح الرئيسي — إيقافه يُلغي كل التعديلات أدناه فوراً"
-                    setDefaultValue(true)
-                }
-            )
-            category.addPreference(
-                SwitchPreferenceCompat(ctx).apply {
-                    key = ArabToolsPrefs.SAFE_MODE
-                    title = "الوضع الآمن"
-                    summary = "يوقف كل التعديلات مؤقتاً دون فقدان إعداداتها"
-                    setDefaultValue(false)
-                }
-            )
-            category.addPreference(
-                SwitchPreferenceCompat(ctx).apply {
-                    key = ArabToolsPrefs.SHOW_TOAST
-                    title = "رسالة تأكيد عند فتح التطبيق"
-                    summary = "رسالة قصيرة مرة واحدة تُخبرك بالتعديلات المفعّلة فعلاً"
-                    setDefaultValue(true)
-                }
-            )
-        }
-
-        /** (٢) المشغّل. */
-        private fun addPlayer(ctx: android.content.Context) {
-            val category = PreferenceCategory(ctx).apply { title = "المشغّل" }
-            preferenceScreen.addPreference(category)
-
-            category.addPreference(
-                SwitchPreferenceCompat(ctx).apply {
-                    key = ArabToolsPrefs.PLAYER_LANDSCAPE
-                    title = "تدوير تلقائي إلى الشاشة الأفقية"
-                    summary = "يعمل عند بدء التشغيل فقط، ويعود الوضع الطبيعي عند الخروج منه"
-                    setDefaultValue(false)
-                }
-            )
-        }
-
-        /** (٣) المظهر. */
-        private fun addAppearance(ctx: android.content.Context) {
-            val category = PreferenceCategory(ctx).apply { title = "المظهر" }
-            preferenceScreen.addPreference(category)
-
-            category.addPreference(
-                ListPreference(ctx).apply {
-                    key = ArabToolsPrefs.NIGHT_MODE
-                    title = "وضع العرض"
-                    summary = "فرض الوضع الليلي أو النهاري على التطبيق كله"
-                    summaryProvider = ListPreference.SimpleSummaryProvider.getInstance()
-                    entryValues = arrayOf("auto", "dark", "light")
-                    entries = arrayOf("تلقائي (دون تغيير)", "ليلي دائماً", "نهاري دائماً")
-                    setDefaultValue("auto")
-                }
-            )
-            category.addPreference(
-                SwitchPreferenceCompat(ctx).apply {
-                    key = ArabToolsPrefs.HIDE_STATUS
-                    title = "إخفاء شريط الحالة"
-                    summary = "يُخفي شريط الوقت والبطارية أعلى الشاشة"
-                    setDefaultValue(false)
-                }
-            )
-            category.addPreference(
-                ListPreference(ctx).apply {
-                    key = ArabToolsPrefs.STATUS_COLOR
-                    title = "لون شريط الحالة"
-                    summary = "لا يعمل على أندرويد 15 وما بعده (النظام يتجاهل اللون)"
-                    summaryProvider = ListPreference.SimpleSummaryProvider.getInstance()
-                    entryValues = COLOR_VALUES
-                    entries = COLOR_ENTRIES
-                    setDefaultValue("default")
-                }
-            )
-            category.addPreference(
-                ListPreference(ctx).apply {
-                    key = ArabToolsPrefs.NAV_COLOR
-                    title = "لون شريط أزرار النظام السفلي"
-                    summary = "هذا شريط أندرويد السفلي، لا شريط تبويبات التطبيق"
-                    summaryProvider = ListPreference.SimpleSummaryProvider.getInstance()
-                    entryValues = COLOR_VALUES
-                    entries = COLOR_ENTRIES
-                    setDefaultValue("default")
-                }
-            )
-        }
-
-        /** (٤) الرئيسية والتنقل — الشريط كاملاً أو تبويبات بعينها. */
-        private fun addNavigation(ctx: android.content.Context) {
-            val category = PreferenceCategory(ctx).apply { title = "الرئيسية والتنقل" }
-            preferenceScreen.addPreference(category)
-
-            category.addPreference(
-                SwitchPreferenceCompat(ctx).apply {
-                    key = ArabToolsPrefs.NAV_HIDE_BAR
-                    title = "إخفاء شريط التنقل السفلي"
-                    summary = "يُخفي الشريط كاملاً. التطبيق لا يملك قائمة جانبية، فإن أخفيته " +
-                        "فاضغط ضغطاً مطوّلاً في مساحة فارغة لإرجاعه"
-                    setDefaultValue(false)
-                }
-            )
-
-            val tabsCategory = PreferenceCategory(ctx).apply {
-                title = "إخفاء تبويبات محددة"
+        /** بطاقة تشرح الشاشتين: ما يعمل الآن وما هو معروض للمستقبل. */
+        private fun addIntro(ctx: Context) {
+            val liveCount = ArabToolsCatalog.CATEGORIES.sumOf { cat ->
+                cat.groups.sumOf { g -> g.defs.count { it.impl == Impl.LIVE } }
             }
-            category.addPreference(tabsCategory)
+            val totalCount = ArabToolsCatalog.CATEGORIES.sumOf { cat ->
+                cat.groups.sumOf { g -> g.defs.size }
+            }
+            preferenceScreen.addPreference(
+                Preference(ctx).apply {
+                    key = "art_intro"
+                    isSelectable = false
+                    title = "قائمة الإعدادات العربية"
+                    summary = "$totalCount إعداد في ${ArabToolsCatalog.CATEGORIES.size} تصنيف — " +
+                        "يعمل منها الآن $liveCount. " +
+                        "الإعدادات التي عليها «$SOON» معروضة بالعربية لكنها لم تُنفَّذ بعد. " +
+                        "ادخل تصنيفاً من الأسفل لترى إعداداته."
+                }
+            )
+        }
 
-            // تبويب «الإعدادات» غير مدرج: إخفاؤه يقفل الطريق الوحيد إلى الإعدادات.
+        // ------------------------------------------------------------ الكتالوج
+
+        /** يرسم كل تصنيفات الكتالوج، كل تصنيف في شاشة مستقلّة (تدرّج لا قائمة واحدة طويلة). */
+        private fun addCatalog(ctx: Context) {
+            ArabToolsCatalog.CATEGORIES.forEachIndexed { index, cat ->
+                val screen = preferenceManager.createPreferenceScreen(ctx).apply {
+                    key = "art_cat_$index"
+                    title = cat.title
+                    val live = cat.groups.sumOf { g -> g.defs.count { it.impl == Impl.LIVE } }
+                    val total = cat.groups.sumOf { g -> g.defs.size }
+                    summary = "$total إعداد — يعمل منها الآن $live"
+                }
+                renderCategory(ctx, screen, cat, index)
+                preferenceScreen.addPreference(screen)
+            }
+        }
+
+        /** يرسم تصنيفاً واحداً: كل مجموعة `PreferenceCategory` وكل تعريف عنصرُه المناسب. */
+        private fun renderCategory(
+            ctx: Context,
+            screen: PreferenceScreen,
+            cat: ArabToolsCatalog.Category,
+            index: Int
+        ) {
+            usedKeys.clear()
+            cat.groups.forEachIndexed { gIndex, group ->
+                val groupCategory = PreferenceCategory(ctx).apply {
+                    key = "art_g_${index}_$gIndex"
+                    title = group.title
+                }
+                screen.addPreference(groupCategory)
+                group.defs.forEach { def -> addDef(ctx, groupCategory, def) }
+
+                // تبويبات شريط التنقل: مفاتيحها الحيّة لا تأتي من الكتالوج.
+                if (cat.title == "الرئيسية والتنقل" && group.title == "إخفاء تبويبات محددة") {
+                    addNavTabSwitches(ctx, groupCategory)
+                }
+            }
+        }
+
+        /** يضيف عنصراً واحداً بالشكل المناسب لنوعه، وما لم يُنفَّذ يُعرض بلا تفعيل. */
+        private fun addDef(ctx: Context, parent: PreferenceCategory, def: ArabToolsCatalog.Def) {
+            if (!usedKeys.add(def.key)) return
+
+            if (def.impl == Impl.SOON) {
+                parent.addPreference(
+                    Preference(ctx).apply {
+                        key = def.key
+                        title = def.title
+                        summary = SOON + def.summary
+                        isSelectable = false
+                    }
+                )
+                return
+            }
+
+            when (def.kind) {
+                Kind.LIST -> parent.addPreference(
+                    ListPreference(ctx).apply {
+                        key = def.key
+                        title = def.title
+                        summary = def.summary
+                        summaryProvider = ListPreference.SimpleSummaryProvider.getInstance()
+                        entryValues = def.values?.toTypedArray() ?: emptyArray()
+                        entries = def.entries?.toTypedArray() ?: emptyArray()
+                        (def.default as? String)?.let { setDefaultValue(it) }
+                    }
+                )
+
+                Kind.TEXT -> parent.addPreference(
+                    EditTextPreference(ctx).apply {
+                        key = def.key
+                        title = def.title
+                        summary = def.summary
+                        (def.default as? String)?.let { setDefaultValue(it) }
+                    }
+                )
+
+                Kind.SWITCH -> parent.addPreference(
+                    SwitchPreferenceCompat(ctx).apply {
+                        key = def.key
+                        title = def.title
+                        summary = def.summary
+                        (def.default as? Boolean)?.let { setDefaultValue(it) }
+                    }
+                )
+
+                Kind.INFO -> parent.addPreference(
+                    Preference(ctx).apply {
+                        key = def.key
+                        title = def.title
+                        summary = def.summary
+                        isSelectable = false
+                    }
+                )
+            }
+        }
+
+        // ------------------------------------------------------------ تبويبات (حيّة)
+
+        /** مفاتيح إخفاء التبويبات — تعمل فعلاً، وتبويب «الإعدادات» محميّ. */
+        private fun addNavTabSwitches(ctx: Context, parent: PreferenceCategory) {
+            // «إخفاء الشريط كاملاً» يأتي من الكتالوج (LIVE) في مجموعة شريط التنقل،
+            // فلا نُكرّره هنا — تكرار المفتاح نفسه يفسد الشاشة.
+
             for (tab in ArabToolsPrefs.HIDEABLE_TABS) {
-                tabsCategory.addPreference(
+                if (!usedKeys.add(tab.key)) continue
+                parent.addPreference(
                     SwitchPreferenceCompat(ctx).apply {
                         key = tab.key
                         title = "إخفاء «${tab.label}»"
@@ -216,7 +243,7 @@ class ArabToolsSettings(private val prefs: SharedPreferences) : BottomSheetDialo
                 )
             }
 
-            tabsCategory.addPreference(
+            parent.addPreference(
                 Preference(ctx).apply {
                     key = "art_nav_settings_protected"
                     title = "تبويب «الإعدادات» لا يُخفى"
@@ -227,9 +254,14 @@ class ArabToolsSettings(private val prefs: SharedPreferences) : BottomSheetDialo
             )
         }
 
-        /** (٥) الأدوات — إعادة الضبط ومعلومات قصيرة. */
-        private fun addTools(ctx: android.content.Context) {
-            val category = PreferenceCategory(ctx).apply { title = "الأدوات" }
+        // ------------------------------------------------------------ الأدوات
+
+        /** إعادة الضبط والتشخيص — هذه تعمل كلها الآن. */
+        private fun addTools(ctx: Context) {
+            val category = PreferenceCategory(ctx).apply {
+                key = "art_tools"
+                title = "الأدوات (تعمل الآن)"
+            }
             preferenceScreen.addPreference(category)
 
             category.addPreference(
@@ -252,7 +284,7 @@ class ArabToolsSettings(private val prefs: SharedPreferences) : BottomSheetDialo
                 Preference(ctx).apply {
                     key = "art_reset"
                     title = "إعادة ضبط إعدادات الإضافة"
-                    summary = "يعيد كل الخيارات أعلاه إلى الافتراضي"
+                    summary = "يعيد كل الخيارات — العاملة والمعروضة — إلى الافتراضي"
                     setOnPreferenceClickListener {
                         ArabToolsPrefs.reset(prefs)
                         Toast.makeText(ctx, "تمت إعادة الضبط", Toast.LENGTH_SHORT).show()
