@@ -92,9 +92,40 @@ class OnShortProvider(private val prefs: SharedPreferences? = null) : MainAPI() 
         "vibeshort-goodbos" to "VibeShort (عبر Mosalsaly)",
     )
 
-    override val mainPage = mainPageOf(
-        *platformRows.map { (slug, label) -> slug to label }.toTypedArray()
+    // الصفوف العامة (ليست منصّة): صفحة الموقع نفسها. تُضاف قبل صفوف المنصّات
+    // فتُفتح بها الواجهة الرئيسية (أحدث المسلسلات) — كما تفعل صفحة الموقع.
+    // isGeneral=true يعني: الجلب من /ar/<path>/ وليست /ar/platform/<slug>/،
+    // والوسم المضمّن في البطاقة هو المنصة الحقيقية للنشر (تُستخرج من شارة البطاقة).
+    private val generalRows = listOf(
+        Triple("all-series", "أحدث المسلسلات", true),
+        Triple("dubbed", "مسلسلات مدبلجة", true),
     )
+
+    // الصفوف ← (data, الاسم): العام أولاً ثم المنصّات. كل صفّ يُعرض/يُخفى بمفتاحه
+    // في الإعدادات، وكل منصّة بمفتاحها المستقل — بنفس نمط Reelree/DramaTip.
+    override val mainPage = mainPageOf(
+        *visibleRows().map { (d, l) -> d to l }.toTypedArray()
+    )
+
+    // الصفوف الظاهرة: العامة (مفتاحها المستقل) ثم المنصّات (المفتاح الرئيسي + مفتاح
+    // كل منصّة). إن أخفى المستخدم كل شيء نُبقي الصفوف العامة حتى لا تفرغ الواجهة
+    // الرئيسية تماماً — وإلا لا يبقى له طريق للرجوع من الإعدادات.
+    // المفاتيح من OnShortSettingsBottomSheet كي لا تفترق القائمتان.
+    private fun visibleRows(): List<Pair<String, String>> {
+        val master = prefs?.getBoolean(OnShortSettingsBottomSheet.KEY_SHOW_PLATFORMS, true) ?: true
+        val shown = mutableListOf<Pair<String, String>>()
+        shown += generalRows
+            .filter { (slug, _, _) ->
+                prefs?.getBoolean(OnShortSettingsBottomSheet.rowKey(slug), true) != false
+            }
+            .map { (slug, label, _) -> slug to label }
+        if (master) {
+            shown += platformRows.filter { (slug, _) ->
+                prefs?.getBoolean(OnShortSettingsBottomSheet.platformKey(slug), true) != false
+            }
+        }
+        return shown.ifEmpty { generalRows.map { (slug, label, _) -> slug to label } }
+    }
 
     // تذكرة جلستنا المؤقتة لكل مسلسل (مفتاح = postId)
     private class PlayCache(val postId: String, val ticket: String)
@@ -182,7 +213,10 @@ class OnShortProvider(private val prefs: SharedPreferences? = null) : MainAPI() 
     private fun detailUrl(postId: String): String = "https://onshort.net/?p=$postId"
 
     // ---------- الصفحة الرئيسية / العرض ----------
-    private fun parseListingHtml(html: String, seen: MutableSet<String>, platform: String): List<SearchResponse> {
+    // platform == null يعني صفًّا عامًّا (صفحة الموقع): لا منصّة واحدة للصف، فالوسم
+    // المضمّن يُستخرج من شارة البطاقة نفسها (platform-badge) — يُغذّي جسر Mosalsaly
+    // بالمنصة الصحيحة لكل عمل على حدة بدل «» الفارغة.
+    private fun parseListingHtml(html: String, seen: MutableSet<String>, platform: String?): List<SearchResponse> {
         val out = mutableListOf<SearchResponse>()
         for (m in cardRe.findAll(html)) {
             val id = m.groupValues[1]
@@ -192,7 +226,8 @@ class OnShortProvider(private val prefs: SharedPreferences? = null) : MainAPI() 
             val total = m.groupValues[5].toIntOrNull() ?: 1
             val safeTitle = title.replace(Regex("""\s+"""), " ").trim()
             if (safeTitle.isBlank() || !seen.add(url)) continue
-            val metaUrl = embedMeta(url, id, total, safeTitle, poster, platform)
+            val plat = platform ?: badgePlatform(m.value)
+            val metaUrl = embedMeta(url, id, total, safeTitle, poster, plat)
             out.add(newTvSeriesSearchResponse(safeTitle, metaUrl, TvType.TvSeries) {
                 this.posterUrl = poster
             })
@@ -202,16 +237,37 @@ class OnShortProvider(private val prefs: SharedPreferences? = null) : MainAPI() 
 
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse? {
         return try {
-            // request.data = مفتاح الصف = slug المنصة (shortmax/netshort/…)
+            // request.data = مفتاح الصف: slug منصّة (shortmax/netshort/…) أو صفّ عامّ
+            // (all-series/dubbed) — الأخير يُجلب من /ar/<slug>/ لا /ar/platform/<slug>/.
             val slug = request.data
+            val isGeneral = generalRows.any { it.first == slug }
             val p = maxOf(page, 1)
-            val url = if (p == 1) "$ONS_MAIN/platform/$slug/"
-                else "$ONS_MAIN/platform/$slug/page/$p/"
+            val url = if (isGeneral) {
+                if (p == 1) "$ONS_MAIN/$slug/" else "$ONS_MAIN/$slug/page/$p/"
+            } else {
+                if (p == 1) "$ONS_MAIN/platform/$slug/" else "$ONS_MAIN/platform/$slug/page/$p/"
+            }
             val resp = getWithRetry(url, mainUrl, headers()) ?: return null
-            val items = parseListingHtml(resp, java.util.HashSet(), slug)
+            // العامّ: platform=null فتأتي المنصة من شارة كل بطاقة.
+            val items = parseListingHtml(resp, java.util.HashSet(), if (isGeneral) null else slug)
             if (items.isEmpty()) null
             else newHomePageResponse(request.name, items)
         } catch (e: Exception) { null }
+    }
+
+    // منصة النشر من شارة البطاقة: <span class="platform-badge" title="iDrama">
+    // تُطبَّع إلى slug بمقارنة الاسم (بلا مسافات وحالة صغيرة) بأسماء المنصّات المعروفة،
+    // فإن لم تُطابق تُعاد كما هي مُطبَّعة (يكفي أنها غير فارغة: الجسر يفضّلها لا يشترطها).
+    private fun badgePlatform(cardHtml: String): String {
+        val name = Regex("""class="platform-badge"[^>]*title="([^"]*)"""")
+            .find(cardHtml)?.groupValues?.get(1)?.trim() ?: return ""
+        if (name.isBlank()) return ""
+        val norm = name.lowercase().replace(Regex("""[^a-z0-9]"""), "")
+        for ((slug, _) in platformRows) {
+            val slugNorm = slug.replace(Regex("""[^a-z0-9]"""), "")
+            if (slugNorm == norm || slugNorm.startsWith(norm) || norm.startsWith(slugNorm)) return slug
+        }
+        return norm
     }
 
     // ---------- البحث ----------

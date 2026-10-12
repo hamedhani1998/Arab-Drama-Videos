@@ -69,6 +69,23 @@ class EdgeNartoSettingsBottomSheet(private val prefs: SharedPreferences) : Botto
         const val KEY_QUALITY_ORDER = "nte_quality_order"   // "default" | "asc" | "desc"
         const val KEY_SHOW_FULL = "nte_show_full"           // Boolean — الافتراضي true
 
+        // إظهار/إخفاء صفوف الواجهة الرئيسية (nte_row_<slug>، الافتراضي ظاهر).
+        const val KEY_ROW_SUGGEST = "nte_row_suggest"       // «الاقتراحات العربية»
+        const val KEY_ROW_DRAMA = "nte_row_drama"           // «دراما»
+        const val KEY_ROW_DUBBED = "nte_row_dubbed"         // «مدبلج»
+        const val KEY_ROW_ROMANCE = "nte_row_romance"       // «رومانسي»
+        const val KEY_ROW_ACTION = "nte_row_action"         // «أكشن»
+
+        // الصفوف كما تُبنى في المصدر: (مفتاح التفضيلات، اسم الصف).
+        // يجب أن تطابق هذه القائمة ترتيب الصفوف في EdgeNartoProvider.visibleRows().
+        val ROWS: List<Pair<String, String>> = listOf(
+            KEY_ROW_SUGGEST to "الاقتراحات العربية",
+            KEY_ROW_DRAMA to "🎬 دراما",
+            KEY_ROW_DUBBED to "🎙️ مدبلج",
+            KEY_ROW_ROMANCE to "💕 رومانسي",
+            KEY_ROW_ACTION to "⚔️ أكشن",
+        )
+
         fun show(fm: FragmentManager, prefs: SharedPreferences) {
             EdgeNartoSettingsBottomSheet(prefs).show(fm, "nte_settings")
         }
@@ -118,6 +135,25 @@ class EdgeNartoSettingsBottomSheet(private val prefs: SharedPreferences) : Botto
             }
             playbackCategory.addPreference(showFullPref)
 
+            // — إظهار/إخفاء صفوف الواجهة الرئيسية —
+            // الصفوف تُبنى بهذا الترتيب نفسه في المصدر؛ إخفاء صفّ يمنع جلبه أصلاً
+            // (لا بطاقات ولا شبكة)، فتُسرَّع الواجهة بصفوف أقل. إن أخفى المستخدم
+            // الصفوف كلها نُبقي «الاقتراحات العربية» كي لا تفرغ الواجهة الرئيسية.
+            val rowsCategory = PreferenceCategory(ctx)
+            rowsCategory.title = "صفوف الواجهة الرئيسية"
+            rowsCategory.summary = "أزل وسم أي صفّ لإخفائه من الواجهة الرئيسية"
+            preferenceScreen.addPreference(rowsCategory)
+
+            for ((rowKey, rowLabel) in ROWS) {
+                val p = SwitchPreferenceCompat(ctx).apply {
+                    key = rowKey
+                    title = rowLabel
+                    summary = "يعرض صفّ «$rowLabel» في الواجهة الرئيسية"
+                    setDefaultValue(true)
+                }
+                rowsCategory.addPreference(p)
+            }
+
             val resetPref = Preference(ctx).apply {
                 key = "nte_reset_prefs"
                 title = "إعادة الضبط الافتراضي"
@@ -126,6 +162,7 @@ class EdgeNartoSettingsBottomSheet(private val prefs: SharedPreferences) : Botto
                     prefs.edit().apply {
                         remove(KEY_QUALITY_ORDER)
                         remove(KEY_SHOW_FULL)
+                        ROWS.forEach { (k, _) -> remove(k) }
                     }.apply()
                     Toast.makeText(ctx, "تمت إعادة الضبط", Toast.LENGTH_SHORT).show()
                     true

@@ -75,6 +75,43 @@ class OnShortSettingsBottomSheet(private val prefs: SharedPreferences) : BottomS
         const val KEY_MOSALSALY_ENABLED = "os_mosalsaly_enabled"  // Boolean — جسر Mosalsaly، الافتراضي true
         const val KEY_SUB_LANGS = "os_sub_langs"        // String — "ar,en,fr" أو فارغ = الكل
 
+        // إظهار/إخفاء صفوف المنصّات في الواجهة الرئيسية.
+        const val KEY_SHOW_PLATFORMS = "os_show_platforms"    // Boolean — المفتاح الرئيسي، الافتراضي true
+
+        // مفتاح إظهار/إخفاء منصّة بعينها: os_platform_<slug>.
+        fun platformKey(slug: String) = "os_platform_$slug"
+
+        // مفتاح الصفوف العامة (غير المنصّات): os_row_<slug>.
+        fun rowKey(slug: String) = "os_row_$slug"
+
+        // المنصّات كاملةً كما في المصدر: (slug، الاسم الذي يعرضه الموقع).
+        // يجب أن تطابق ترتيب OnShortProvider.platformRows.
+        val PLATFORMS: List<Pair<String, String>> = listOf(
+            "reelshort" to "ReelShort",
+            "dramabox" to "DramaBox",
+            "idrama" to "iDrama",
+            "dramawave" to "DramaWave",
+            "flextv" to "FlexTV",
+            "freereels" to "FreeReels",
+            "microdrama" to "MicroDrama",
+            "moborels" to "MoBorels",
+            "shortswave" to "ShortsWave",
+            "stardusttv" to "StardustTV",
+            "dotdrama" to "DotDrama",
+            "netshort" to "NetShort (عبر Mosalsaly)",
+            "shortmax" to "ShortMax (عبر Mosalsaly)",
+            "goodshort" to "GoodShort (عبر Mosalsaly)",
+            "dramabite" to "DramaBite (عبر Mosalsaly)",
+            "storyreel" to "StoryReel (عبر Mosalsaly)",
+            "vibeshort-goodbos" to "VibeShort (عبر Mosalsaly)",
+        )
+
+        // الصفوف العامة (صفحات الموقع نفسها، ليست منصّات): (slug، الاسم).
+        val GENERAL_ROWS: List<Pair<String, String>> = listOf(
+            "all-series" to "أحدث المسلسلات",
+            "dubbed" to "مسلسلات مدبلجة",
+        )
+
         fun show(fm: FragmentManager, prefs: SharedPreferences) {
             OnShortSettingsBottomSheet(prefs).show(fm, "os_settings")
         }
@@ -191,6 +228,46 @@ class OnShortSettingsBottomSheet(private val prefs: SharedPreferences) : BottomS
             }
             playbackCategory.addPreference(subLangsPref)
 
+            // — الصفوف العامة في الواجهة الرئيسية (صفحات الموقع، ليست منصّات) —
+            // تظهر أولاً قبل صفوف المنصّات. إخفاء صفّ يمنع جلبه أصلاً (لا شبكة).
+            val rowsCategory = PreferenceCategory(ctx)
+            rowsCategory.title = "صفوف الواجهة الرئيسية (عامة)"
+            rowsCategory.summary = "أزل وسم أي صفّ لإخفائه من الواجهة الرئيسية"
+            preferenceScreen.addPreference(rowsCategory)
+
+            for ((slug, label) in GENERAL_ROWS) {
+                val p = SwitchPreferenceCompat(ctx).apply {
+                    key = rowKey(slug)
+                    title = label
+                    summary = "يعرض صفّ «$label» في الواجهة الرئيسية"
+                    setDefaultValue(true)
+                }
+                rowsCategory.addPreference(p)
+            }
+
+            // — المنصّات: مفتاح رئيسي لكل الصفوف، ثم مفتاح لكل منصّة على حدة —
+            val platCat = PreferenceCategory(ctx)
+            platCat.title = "أقسام المنصّات في الواجهة الرئيسية"
+            preferenceScreen.addPreference(platCat)
+
+            val showPlatformsPref = SwitchPreferenceCompat(ctx).apply {
+                key = KEY_SHOW_PLATFORMS
+                title = "المنصّات كلها"
+                summary = "ألغِ وسمها لإخفاء صفوف كل المنصّات دفعةً واحدة"
+                setDefaultValue(true)
+            }
+            platCat.addPreference(showPlatformsPref)
+
+            for ((slug, label) in PLATFORMS) {
+                val p = SwitchPreferenceCompat(ctx).apply {
+                    key = platformKey(slug)
+                    title = label
+                    summary = "يعرض صفّ «أحدث مسلسلات $label» في الواجهة الرئيسية"
+                    setDefaultValue(true)
+                }
+                platCat.addPreference(p)
+            }
+
             val resetPref = Preference(ctx).apply {
                 key = "os_reset_prefs"
                 title = "إعادة الضبط الافتراضي"
@@ -204,6 +281,9 @@ class OnShortSettingsBottomSheet(private val prefs: SharedPreferences) : BottomS
                         remove(KEY_CROSSPOST_ENABLED)
                         remove(KEY_MOSALSALY_ENABLED)
                         remove(KEY_SUB_LANGS)
+                        remove(KEY_SHOW_PLATFORMS)
+                        GENERAL_ROWS.forEach { (s, _) -> remove(rowKey(s)) }
+                        PLATFORMS.forEach { (s, _) -> remove(platformKey(s)) }
                     }.apply()
                     Toast.makeText(ctx, "تمت إعادة الضبط", Toast.LENGTH_SHORT).show()
                     true

@@ -17,6 +17,10 @@ import nartoshared.NartoFetch
 private const val NARTO_HOST = "https://narto-drama.com"
 private const val BRW_HOST = "https://edge.narto-drama.com"
 
+// مفتاح صفّ «الاقتراحات العربية» في mainPage.data(). قيمةٌ ثابتة لا تصادف أي استعلام
+// بحث عربي (البادئة /* تعني: هذا صفّ الموجز لا بحث). getMainPage يتفرّع عليها.
+private const val SUGGEST_ROW = "/*suggest*/"
+
 // Standalone "Narto Drama" extension, pinned to the apex host for playback. v46: this provider
 // carries its OWN domain — all links/cards/detail/refresh URLs use the apex host
 // https://narto-drama.com (per user: "اجعل كل مصدر يحمل الرابط الخاص به"). Browsing HTML
@@ -51,14 +55,43 @@ class NartoDramaProvider(private val prefs: SharedPreferences? = null) : MainAPI
     // queries return DIFFERENT feeds, 0 overlap). fetchSearch caches per query, and getMainPage
     // runs ALL tabs in parallel so hopping tabs never re-fetches. First paint uses the requested
     // tab's own feed.
-    override val mainPage = mainPageOf(
+    //
+    // v3: the first row is «الاقتراحات العربية» — the site's own home feed (the same content the
+    // fallback uses), so the suggested Arabic dramas show at the top of the screen instead of
+    // only appearing when another feed fails. Every row is shown/hidden from the settings
+    // (ntd_row_<slug>, default visible) and the rows are never allowed to become empty.
+    private val suggestRow = SUGGEST_ROW to "الاقتراحات العربية"
+
+    private val categoryRows = listOf(
         "دراما" to "🎬 دراما",
         "مدبلج" to "🎙️ مدبلج",
         "رومانسي" to "💕 رومانسي",
         "أكشن" to "⚔️ أكشن",
     )
 
-    private val homeSections = listOf("دراما", "مدبلج", "رومانسي", "أكشن")
+    override val mainPage = mainPageOf(
+        *visibleRows().map { (d, l) -> d to l }.toTypedArray()
+    )
+
+    // المنصّة/القسم ← مفتاح التفضيلات (ntd_row_<slug>). الربط هنا لأن data الصف
+    // قيمته عربية، والمفتاح ASCII.
+    private fun rowKeyFor(data: String): String = when (data) {
+        SUGGEST_ROW -> NartoDramaSettingsBottomSheet.KEY_ROW_SUGGEST
+        "دراما" -> NartoDramaSettingsBottomSheet.KEY_ROW_DRAMA
+        "مدبلج" -> NartoDramaSettingsBottomSheet.KEY_ROW_DUBBED
+        "رومانسي" -> NartoDramaSettingsBottomSheet.KEY_ROW_ROMANCE
+        "أكشن" -> NartoDramaSettingsBottomSheet.KEY_ROW_ACTION
+        else -> "ntd_row_${data}"
+    }
+
+    // الصفوف التي لم يخفها المستخدم. إن أخفى الكل نُبقي صف «الاقتراحات» حتى لا تفرغ
+    // الواجهة الرئيسية تماماً (وإلا لا يبقى للمستخدم طريق للرجوع من الإعدادات).
+    private fun visibleRows(): List<Pair<String, String>> {
+        val shown = (listOf(suggestRow) + categoryRows).filter { (data, _) ->
+            prefs?.getBoolean(rowKeyFor(data), true) != false
+        }
+        return shown.ifEmpty { listOf(suggestRow) }
+    }
 
     // Referer for all requests/links. This is just an HTTP Referer header the narto stream/
     // subtitle servers expect; it does NOT merge this source with the Edge extension.
@@ -149,22 +182,23 @@ class NartoDramaProvider(private val prefs: SharedPreferences? = null) : MainAPI
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse? {
         val t0 = System.currentTimeMillis()
         return try {
-            val q = request.data.trim()
-            // Fire the 3 OTHER category feeds + the home feed in parallel while the requested
-            // tab's own feed loads, so tab-hopping hits the cache instead of re-fetching a
-            // 4-6s /search page.
+            val isSuggest = request.data == SUGGEST_ROW
+            val q = if (isSuggest) "" else request.data.trim()
+            // Fire the OTHER visible rows' feeds in parallel while the requested row loads, so
+            // tab-hopping hits the cache instead of re-fetching a 4-6s /search page. Hidden rows
+            // are never warmed (that was wasted network on rows the user can't see).
             val warm = coroutineScope {
-                val targets = homeSections.filter { it != q } + "/*home*/"
-                targets.map { warmQ ->
-                    async { if (warmQ == "/*home*/") fetchHomeFeed() else fetchSearch(warmQ) }
+                val targets = visibleRows().map { it.first }.filter { it != request.data }
+                targets.map { d ->
+                    async { if (d == SUGGEST_ROW) fetchHomeFeed() else fetchSearch(d.trim()) }
                 }.awaitAll()
             }
             android.util.Log.e("NartoDrama", "getMainPage q=$q warm=${warm.count { it != null }}")
 
-            var html = fetchSearch(q)
+            var html = if (isSuggest) fetchHomeFeed() else fetchSearch(q)
             var fromFallback = false
             if (html == null || parseSearchItems(html).isEmpty()) {
-                // Tab's own feed failed/empty — never blank the screen: serve the shared home
+                // Row's own feed failed/empty — never blank the screen: serve the shared home
                 // feed instead (always present).
                 android.util.Log.e("NartoDrama", "getMainPage q=$q empty/failed -> fallback home feed")
                 html = fetchHomeFeed()

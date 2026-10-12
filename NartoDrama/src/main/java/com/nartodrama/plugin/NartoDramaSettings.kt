@@ -69,6 +69,23 @@ class NartoDramaSettingsBottomSheet(private val prefs: SharedPreferences) : Bott
         const val KEY_QUALITY_ORDER = "ntd_quality_order"   // "default" | "asc" | "desc"
         const val KEY_SHOW_FULL = "ntd_show_full"           // Boolean — الافتراضي true
 
+        // إظهار/إخفاء صفوف الواجهة الرئيسية (ntd_row_<slug>، الافتراضي ظاهر).
+        const val KEY_ROW_SUGGEST = "ntd_row_suggest"       // «الاقتراحات العربية»
+        const val KEY_ROW_DRAMA = "ntd_row_drama"           // «دراما»
+        const val KEY_ROW_DUBBED = "ntd_row_dubbed"         // «مدبلج»
+        const val KEY_ROW_ROMANCE = "ntd_row_romance"       // «رومانسي»
+        const val KEY_ROW_ACTION = "ntd_row_action"         // «أكشن»
+
+        // الصفوف كما تُبنى في المصدر: (مفتاح التفضيلات، اسم الصف).
+        // يجب أن تطابق هذه القائمة ترتيب Express في NartoDramaProvider.visibleRows().
+        val ROWS: List<Pair<String, String>> = listOf(
+            KEY_ROW_SUGGEST to "الاقتراحات العربية",
+            KEY_ROW_DRAMA to "🎬 دراما",
+            KEY_ROW_DUBBED to "🎙️ مدبلج",
+            KEY_ROW_ROMANCE to "💕 رومانسي",
+            KEY_ROW_ACTION to "⚔️ أكشن",
+        )
+
         fun show(fm: FragmentManager, prefs: SharedPreferences) {
             NartoDramaSettingsBottomSheet(prefs).show(fm, "ntd_settings")
         }
@@ -118,6 +135,25 @@ class NartoDramaSettingsBottomSheet(private val prefs: SharedPreferences) : Bott
             }
             playbackCategory.addPreference(showFullPref)
 
+            // — إظهار/إخفاء صفوف الواجهة الرئيسية —
+            // الصفوف تُبنى بهذا الترتيب نفسه في المصدر؛ إخفاء صفّ يمنع جلبه أصلاً
+            // (لا بطاقات ولا شبكة)، فتُسرَّع الواجهة بصفوف أقل. إن أخفى المستخدم
+            // الصفوف كلها نُبقي «الاقتراحات العربية» كي لا تفرغ الواجهة الرئيسية.
+            val rowsCategory = PreferenceCategory(ctx)
+            rowsCategory.title = "صفوف الواجهة الرئيسية"
+            rowsCategory.summary = "أزل وسم أي صفّ لإخفائه من الواجهة الرئيسية"
+            preferenceScreen.addPreference(rowsCategory)
+
+            for ((rowKey, rowLabel) in ROWS) {
+                val p = SwitchPreferenceCompat(ctx).apply {
+                    key = rowKey
+                    title = rowLabel
+                    summary = "يعرض صفّ «$rowLabel» في الواجهة الرئيسية"
+                    setDefaultValue(true)
+                }
+                rowsCategory.addPreference(p)
+            }
+
             val resetPref = Preference(ctx).apply {
                 key = "ntd_reset_prefs"
                 title = "إعادة الضبط الافتراضي"
@@ -126,6 +162,7 @@ class NartoDramaSettingsBottomSheet(private val prefs: SharedPreferences) : Bott
                     prefs.edit().apply {
                         remove(KEY_QUALITY_ORDER)
                         remove(KEY_SHOW_FULL)
+                        ROWS.forEach { (k, _) -> remove(k) }
                     }.apply()
                     Toast.makeText(ctx, "تمت إعادة الضبط", Toast.LENGTH_SHORT).show()
                     true
