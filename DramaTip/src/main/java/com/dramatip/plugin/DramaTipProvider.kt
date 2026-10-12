@@ -4,11 +4,24 @@ import cloudstreamshared.FormatTag
 import android.content.SharedPreferences
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.withContext
+import java.net.HttpURLConnection
+import java.net.URL
 import java.net.URLEncoder
 
 private const val TIP_UA =
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36"
 private const val TIP_MAIN = "https://dramatip.net/ar"
+
+// نفس وكيل اللاعب المتنقّل — قِيس أنّ مضيفي التشغيل يميّزون به.
+private const val ANDROID_UA = "Mozilla/5.0 (Linux; Android 10)"
+
+// سقف قراءة جسم الفحص: قائمة تشغيل HLS كاملة تقع دونه بمراتب، ويمنع تنزيل VOD ضخم.
+private const val READ_CAP = 524_288
 
 // منصّات الموقع من /ar/sources (slug → الاسم كما يعرضه الموقع). ٢٣ منصة.
 // ثابت على مستوى الملف كي تشاركه الإعدادات (مفتاح إظهار/إخفاء لكل منصّة).
@@ -308,13 +321,232 @@ class DramaTipProvider(private val prefs: SharedPreferences? = null) : MainAPI()
     }
 
     // ---------- روابط التشغيل ----------
-    // خريطة الرمز → صيغة معروضة (قيم إعلان الموقع: mp4/dramawave/m3u8…).
-    private fun declaredFromType(type: String?): String? = when {
-        type == null -> null
-        type.contains("mp4") -> "MP4"
-        type.contains("m3u8") || type.contains("hls") || type.contains("mpegurl") -> "M3U8"
-        type.contains("mpd") || type.contains("dash") -> "DASH"
-        else -> type.uppercase()
+    // أنواع الموقع التي تعني HLS صراحةً (قِيست على ٢٣ منصّة):
+    // hls، hls-enc (صيغة joyreels/shorttv)، goodshort، dramawave، storyreel.
+    // لماذا نحتاجها: GoodShort تبثّ HLS من مسارٍ بلا ‎.m3u8
+    // (…/hls/61502918?q=720p) — قِيس 200 application/vnd.apple.mpegurl و‎#EXTM3U —
+    // فتصنّفه قراءةُ الامتداد وحدها mp4 خطأً، فيحاول اللاعب تفكيكه كملفٍ تدريجيّ
+    // ويفشل. فيتقدّم نوعُ الموقع ويُصلح الوسم والنوعيّ معًا.
+    private val hlsTypes = setOf("hls", "hls-enc", "goodshort", "dramawave", "storyreel")
+
+    private val encRe = Regex(""""enc":"([A-Za-z0-9+/=]+)"""")
+    private val typeRe = Regex(""""type":\s*"([^"]+)"""")
+    private val langRe = Regex(""""language":\s*"([^"]+)"""")
+    private val qualRe = Regex(""""(\d{3,4})":"([A-Za-z0-9+/=]+)"""")
+
+    /**
+     * (نوع الرابط كما يفتحه اللاعب، الصيغة المُعلنة للوسم) من الرابط وإعلان الموقع
+     * والقِيَم المقيسة (نوع المحتوى والجسم إن قُرئ).
+     *
+     * ترتيب الحجّة = ترتيب قوّة الدليل: الجسم المقيس (‎#EXTM3U‎) ثم نوع المحتوى
+     * المقيس ثم امتداد الرابط ثم إعلان الموقع. هذا هو ما يحسم الحالات المتضاربة:
+     * MoboReels تُعلن type=mp4 ورابطها ينتهي ‎.m3u8 (فيفوز الامتداد)، وGoodShort
+     * لا امتداد لها إطلاقًا (فيفوز نوع المحتوى/الجسم).
+     */
+    private fun classify(
+        url: String,
+        type: String?,
+        contentType: String,
+        body: String?,
+    ): Pair<ExtractorLinkType, String?> {
+        val u = url.lowercase()
+        val ct = contentType.lowercase()
+        val t = type?.lowercase()
+        if (ct.contains("dash") || u.contains(".mpd") || u.contains("dash+xml")) return ExtractorLinkType.DASH to null
+        // قائمة تشغيل مقيسة — أقوى دليل، ويسبق كل إعلان.
+        if (ct.contains("mpegurl") || body?.contains("#EXTM3U") == true) return ExtractorLinkType.M3U8 to null
+        if (u.contains(".m3u8")) return ExtractorLinkType.M3U8 to null
+        // قُرئ جسمٌ فعليّ وليس قائمة تشغيل ⇒ ليس HLS مهما أعلن الموقع
+        // (تفاديًا لبثّ mp4 بنوع M3U8 فيفشل اللاعب).
+        if (!body.isNullOrEmpty()) return ExtractorLinkType.VIDEO to (if (t == "mp4") "MP4" else null)
+        if (t != null && t in hlsTypes) return ExtractorLinkType.M3U8 to null
+        if (t == "mp4") return ExtractorLinkType.VIDEO to "MP4"
+        return ExtractorLinkType.VIDEO to null
+    }
+
+    // ---------- قراءة بنية sourceFirst ----------
+    // عنصر chain واحد: نوعه + رابط الفيديو + جوداته (encByQuality).
+    private class ChainEntry(val type: String?, val enc: String?, val qualities: List<Pair<String, String>>)
+
+    /**
+     * نصّ كائن/مصفوفة متوازن الأقواس بدءًا من أول فتحة في/بعد [from]، واعٍ بالنصوص
+     * (فتُهمَل الأقواس داخل علامات التنصيص). نستعمله بدل تتبّع المواضع كما كان
+     * الكود يفعل: المواضع تفترض ترتيبًا لمفتاحٍ ما، والكائن المتوازن لا يفترض شيئًا.
+     */
+    private fun balanced(s: String, from: Int, open: Char, close: Char): String? {
+        val i = s.indexOf(open, from)
+        if (i < 0) return null
+        var depth = 0
+        var j = i
+        var inStr = false
+        var esc = false
+        while (j < s.length) {
+            val c = s[j]
+            if (inStr) {
+                if (esc) esc = false
+                else if (c == '\\') esc = true
+                else if (c == '"') inStr = false
+            } else when (c) {
+                '"' -> inStr = true
+                open -> depth++
+                close -> {
+                    depth--
+                    if (depth == 0) return s.substring(i, j + 1)
+                }
+            }
+            j++
+        }
+        return null
+    }
+
+    /**
+     * الكائن بعد مفتاح ‎"key":‎ — ويتحقّق أنّ أول حرف فعّال «{». هذا التحقّق هو
+     * الفرق بين قراءة القيمة والانزلاق إلى أوّل كائنٍ لاحقٍ في الصفحة كلّها:
+     * ‎"subtitle":null‎ كان سيُطابق أوّل «{» بعده (أي كائنًا لا علاقة له).
+     */
+    private fun objectAfterKey(s: String, key: String, from: Int = 0): String? {
+        val k = s.indexOf(key, from)
+        if (k < 0) return null
+        var i = k + key.length
+        while (i < s.length && (s[i] == ':' || s[i] == ' ' || s[i] == '\t')) i++
+        if (i >= s.length || s[i] != '{') return null
+        return balanced(s, i, '{', '}')
+    }
+
+    /** عناصر chain[] بأسمائها وأنواعها وجوداتها. لا يُلمس nextSourceFirst هنا إطلاقًا. */
+    private fun parseChain(f: String): List<ChainEntry> {
+        val sf = f.indexOf("\"sourceFirst\"")
+        if (sf < 0) return emptyList()
+        val ci = f.indexOf("\"chain\":[", sf)
+        if (ci < 0) return emptyList()
+        val arr = balanced(f, ci, '[', ']') ?: return emptyList()
+        val out = mutableListOf<ChainEntry>()
+        var pos = 0
+        while (true) {
+            val k = arr.indexOf('{', pos)
+            if (k < 0) break
+            val obj = balanced(arr, k, '{', '}') ?: break
+            pos = k + obj.length
+            val qs = mutableListOf<Pair<String, String>>()
+            objectAfterKey(obj, "\"encByQuality\"")?.let { qo ->
+                for (m in qualRe.findAll(qo)) qs.add(m.groupValues[1] to m.groupValues[2])
+            }
+            out.add(ChainEntry(typeRe.find(obj)?.groupValues?.get(1), encRe.find(obj)?.groupValues?.get(1), qs))
+        }
+        return out
+    }
+
+    private fun sourceName(f: String): String {
+        val obj = objectAfterKey(f, "\"sourceFirst\"") ?: return name
+        val m = Regex(""""source":\s*"([^"]*)"""").find(obj)
+        return m?.groupValues?.get(1)?.takeIf { it.isNotBlank() } ?: name
+    }
+
+    /**
+     * نتيجة فحصٍ واحد: حيّ؟ + ما قِيس فعلًا (نوع المحتوى، وجسم محدود لعرضه) + السبب
+     * + هل هي **حكمٌ** (علمٌ) أم **تعذّر معرفة**؟
+     *
+     * التمييز هو ما يمنع تكرار علّة narto الموثّقة: كود حالةٍ (403/404) أو علامةٌ في
+     * جسم البروكسي حكمٌ بأنّ الرابط ميت، أما انقطاع DNS أو مهلة الشبكة فلا يقولان
+     * شيئًا عن الرابط — وإسقاطهما كان يجعل «لا روابط» نتيجةً لخللٍ عابر. وشهادة TLS
+     * الفاسدة استثناء: البايتات موجودة لكن كل عميلٍ صارم يرفضها، فهي حكم.
+     */
+    private class Verdict(
+        val alive: Boolean,
+        val contentType: String,
+        val body: String?,
+        val why: String,
+        val certain: Boolean,
+    )
+
+    /**
+     * مسبار الحيوية — بلا HEAD وبلا Range، لأنّ اللاعب لا يرسل شيئًا منهما.
+     *
+     * قِيس في narto-shared أنّ إضافة Range قلبت الحكم على joyreels (403 معها،
+     * 410 بدونها)، وأنّ بروكسي ‎/e/m/‎ يردّ 200 حتى ولو كان المصدر خلفه منتهيًا؛
+     * فالفحص هنا يقلّد اللاعب حرفيًّا، ويقرأ جسم البروكسي بحثًا عن العلامة بدل
+     * الوثوق بكود الحالة.
+     *
+     * ويُقرأ الجسم أيضًا حين لا يحسم نوعُ المحتوى أنه فيديو تدريجيّ — فقائمة
+     * التشغيل تُعرَف من ‎#EXTM3U‎ وهذا ما يصنّف المسارات بلا امتداد (GoodShort).
+     * والقراءة مسقوفة (‎[READ_CAP]‎ بايت) فلا يُنزَّل MP4 كامل إن صادف VOD.
+     */
+    private class Probe(private val referer: String) {
+        private val cache = java.util.concurrent.ConcurrentHashMap<String, Verdict>()
+
+        suspend fun check(u: String): Verdict {
+            cache[u]?.let { return it }
+            val r = withContext(Dispatchers.IO) { one(u) }
+            cache[u] = r
+            return r
+        }
+
+        suspend fun alive(u: String): Boolean = check(u).alive
+
+        private fun one(u: String): Verdict {
+            val proxy = u.contains("/e/m/") || u.contains("/e/s/")
+            // رابطٌ لا يُبنى ليس حكمًا بأنه ميت (قد يكون ترميزًا غريبًا فقط) — نُبقيه
+            // بلا فحص، كما تفعل قاعدة «الحكم مقابل لا نعرف»: لا نُسقط ما لم نُثبت موته.
+            val uri = try { URL(u) } catch (e: Exception) { return Verdict(true, "", null, "unparseable", false) }
+            var conn: HttpURLConnection? = null
+            return try {
+                val c = uri.openConnection() as HttpURLConnection
+                conn = c
+                c.requestMethod = "GET"
+                c.setRequestProperty("Referer", referer)
+                c.setRequestProperty("User-Agent", ANDROID_UA)
+                // Range على البروكسي فقط (لبثّ جسمٍ صغيرٍ محدود لبضعٍ من الكيلوبايتات).
+                if (proxy) c.setRequestProperty("Range", "bytes=0-65535")
+                c.instanceFollowRedirects = true
+                c.connectTimeout = 7000
+                c.readTimeout = 7000
+                val code = c.responseCode
+                if (code !in 200..399) return Verdict(false, "", null, "HTTP $code", true)
+                val ct = c.contentType.orEmpty()
+                val readBody = proxy || !ct.lowercase().contains("video/")
+                val body = if (readBody) readLimited(c.inputStream, READ_CAP) else null
+                if (proxy) {
+                    val b = body.orEmpty()
+                    if (b.contains("link expired") || b.contains("invalid token") || b.contains("invalid or expired")) {
+                        return Verdict(false, ct, null, "proxy body: ${b.take(48)}", true)
+                    }
+                }
+                Verdict(true, ct, body, "", true)
+            } catch (e: Exception) {
+                // شهادة TLS مرفوضة حكمٌ بأنّ الرابط لا يُشغَّل من أيّ عميلٍ صارم؛ وما عداها
+                // (DNS، مهلة، انقطاع اتصال) لا يقول شيئًا عن الرابط نفسه.
+                Verdict(
+                    false, "", null,
+                    "${e.javaClass.simpleName}: ${e.message?.take(48) ?: "-"}",
+                    e is javax.net.ssl.SSLHandshakeException,
+                )
+            } finally {
+                runCatching { conn?.disconnect() }
+            }
+        }
+
+        // قراءة مسقوفة: تكفي لقائمة تشغيلٍ كاملة، وتمنع تنزيل ملفّ VOD ضخمٍ إن أخطأ التصنيف.
+        private fun readLimited(ins: java.io.InputStream?, max: Int): String = try {
+            if (ins == null) "" else ins.bufferedReader().use { rd ->
+                val sb = StringBuilder()
+                val buf = CharArray(8192)
+                while (sb.length < max) {
+                    val n = rd.read(buf, 0, minOf(buf.size, max - sb.length))
+                    if (n <= 0) break
+                    sb.append(buf, 0, n)
+                }
+                sb.toString()
+            }
+        } catch (e: Exception) { "" }
+    }
+
+    /** اسم دقّة من سطر EXT-X-STREAM-INF: min(العرض، الارتفاع) — الفيديو القصير عموديّ. */
+    private fun resolutionLabel(inf: String): String? {
+        val r = Regex("""RESOLUTION=(\d{3,4})x(\d{3,4})""").find(inf)?.groupValues ?: return null
+        val w = r[1].toIntOrNull() ?: 0
+        val h = r[2].toIntOrNull() ?: 0
+        val n = (minOf(w, h)).takeIf { it > 0 } ?: h
+        return if (n > 0) "${n}p" else null
     }
 
     override suspend fun loadLinks(
@@ -333,85 +565,124 @@ class DramaTipProvider(private val prefs: SharedPreferences? = null) : MainAPI()
             val url = "$TIP_MAIN/series/${escapeSlug(slug)}/episode-$ep"
             val html = fetchText(url) ?: return false
             val f = extractFlight(html) ?: return false
+            val source = sourceName(f)
 
-            // اسم المنصة من غلاف sourceFirst — فكُّ نصّي (indexOf) لا موجِّه، إذ يحوي
-            // غلافُ الكائن «{» حرفًا يفشل بنيةَ الموجِّه (Illegal repetition)
-            // فترمي PatternSyntaxException قبل أي تصنيف → «لايوجد روابط تشغيل».
-            val sfMark = f.indexOf("\"sourceFirst\"")
-            val srcAt = if (sfMark >= 0) f.indexOf("\"source\":", sfMark) else -1
-            val source = if (srcAt >= 0) {
-                val from = srcAt + "\"source\":\"".length
-                val until = f.indexOf('"', from).takeIf { it > from } ?: f.length
-                f.substring(from, until).takeIf { it.isNotBlank() } ?: name
-            } else name
-
-            // العامل على كلمة/فِرق الحلقة: كل enc محصورٌ في كائنه — نُصنّفه
-            // بموضع كائنه (لا نافذة سياق قد تتسرّب إلى الجار):
-            //   chain[]  → فيديو أساس (type + source/refresh)
-            //   subtitle → ترجمة (format + language)
-            //   nextSourceFirst → فيديو بديل (type قبل enc)
-            // تأسّست على قياس ٢٠٢٦-١٠-٠٨: NetShort وMyDramaWave يومها.
-            // (لوغاريتم «after-160» كان يلتهم الفيديو البديل فيجعله ترجمةً →
-            //    «لايوجد روابط تشغيل».)
             val collected = mutableListOf<ExtractorLink>()
-            val seenPlain = mutableSetOf<String>()
-            var sentSub = false
+            // ما اجتاز الفحص، وما تعذّر الحكم عليه (انقطاع عابر لا يُسقط رابطًا) — يُبثّ
+            // هذا بعد ذاك، فيبقى اختيار اللاعب الافتراضي على رابطٍ مُثبتٍ حيّ.
+            val deferred = mutableListOf<ExtractorLink>()
+            val emitted = LinkedHashSet<String>()
+            val probe = Probe(TIP_MAIN)
             val showSubs = prefs?.getBoolean(DramaTipSettingsBottomSheet.KEY_SHOW_SUBTITLES, true) ?: true
+            var sentSub = 0
 
-            // احصر كل enc داخل كائنه بموضعه (لا «نافذة سياق» قد تتسرّب إلى الجار):
-            //   chain[]  → فيديو أساس (أول سيرفر)
-            //   subtitle → ترجمة (format + language)
-            //   nextSourceFirst → فيديو بديل (type قبل enc)
-            val sf = f.indexOf("\"sourceFirst\"")
-            val subIdx = f.indexOf("\"subtitle\"")
-            val nsf = f.indexOf("\"nextSourceFirst\"")
-            val chainEnd = when {
-                subIdx >= 0 -> subIdx
-                nsf >= 0 -> nsf
-                else -> f.length
-            }
-            val subEnd = if (nsf >= 0) nsf else f.length
-            val chainStart = if (sf >= 0) f.indexOf("\"chain\":[", sf) else -1
-
-            // ١) chain[] — فيديو الأساس (قد يكون أكثر من واحد)
-            if (chainStart >= 0 && chainStart < chainEnd) {
-                for (m in Regex(""""enc":"([A-Za-z0-9+/=]+)"""").findAll(f.substring(chainStart, chainEnd))) {
-                    val plain = decryptOrSkip(m.groupValues[1]) ?: continue
-                    if (!seenPlain.add(plain)) continue
-                    emitVideo(source, plain, collected, null, seenPlain)
+            // ١) المرشّحون من chain[]: رابط الأساس + جوداته (encByQuality).
+            //
+            // لا يُقرأ nextSourceFirst إطلاقًا. قِيس 2026-10-12 على أربع منصّات
+            // بحلقتين متتاليتين أنّ nextSourceFirst في الحلقة N يساوي chain في
+            // الحلقة N+1 حرفيًّا (GoodShort 61502918←61502919، Playlet /1/←/2/،
+            // BibiShort /1/←/2/، PineDrama): أي أنه «الحلقة التالية» لا «سيرفرًا
+            // بديلًا». بثّه موسومًا «· بديل» كان يُشغّل حلقةً خاطئة عند اختياره.
+            class Cand(val label: String, val url: String, val type: String?, val qLabel: String?)
+            val cands = mutableListOf<Cand>()
+            for (e in parseChain(f)) {
+                // جودات العنصر: إن دلّت مفاتيحُ عدةٍ على الرابط نفسه (MoreShort: 480/720/1080
+                // كلها لملفٍ واحد) نبثّه مرّة بأعلى دقّة، لا ثلاث مرّات بوسمٍ خاطئ.
+                val byUrl = LinkedHashMap<String, String>()
+                for ((q, qenc) in e.qualities) {
+                    val qu = decryptOrSkip(qenc) ?: continue
+                    val prev = byUrl[qu]
+                    if (prev == null || (q.toIntOrNull() ?: 0) > (prev.toIntOrNull() ?: 0)) byUrl[qu] = q
                 }
+                // الأساس موسومًا بدقّته حين تكون جودةٌ معلنة له نفس الرابط: DramaBox تعلن
+                // ‎1080p‎ وهو الملفّ الذي في ‎enc‎ نفسه، فبلا هذا يصير الرابط بلا دقّةٍ
+                // ظاهرةٍ في مُنتقي الجودات ويهبط إلى ما دون مرتبته.
+                e.enc?.let { decryptOrSkip(it) }?.let { main ->
+                    val q = byUrl[main]
+                    cands.add(Cand(if (q != null) "$source · ${q}p" else source, main, e.type, q?.let { "${it}p" }))
+                }
+                for ((qu, q) in byUrl) cands.add(Cand("$source · ${q}p", qu, e.type, "${q}p"))
+            }
+            if (cands.isEmpty()) {
+                logE("DramaTip.loadLinks $source ep=$ep decrypted nothing")
+                return false
             }
 
-            // ٢) subtitle — الترجمة
-            if (subIdx >= 0 && subIdx < subEnd) {
-                val seg = f.substring(subIdx, subEnd)
-                val m = Regex(""""enc":"([A-Za-z0-9+/=]+)"""").find(seg)
-                if (m != null) {
-                    val plain = decryptOrSkip(m.groupValues[1])
-                    if (plain != null && showSubs) {
-                        val langM = Regex(""""language":\s*"([^"]+)"""").find(seg)
-                        val lang = langM?.groupValues?.get(1)?.substringBefore('_')?.substringBefore('-')
-                            ?.takeIf { it.isNotBlank() } ?: "ar"
-                        subtitleCallback(newSubtitleFile(subLangLabel(lang), plain))
-                        sentSub = true
+            // ٢) فحص المرشّحين كلّهم في وقتٍ واحد: الرحلات مستقلّة، فالتسلسل يكلّف
+            //    مهلةً كاملة لكل رابط ميت (حتى ٧ث للواحد) ويراها المستخدم تأخّرًا.
+            //    وإذا أطفأ المستخدم «فحص الروابط» نُبثّ بلا أي طلب شبكة (وضع سريع)
+            //    فلا يُقاس نوع المحتوى ولا تُفرَّع الجودات — لكن التصنيف يبقى
+            //    صحيحًا لأنّه يسقط إلى الرابط وإعلان الموقع.
+            val probing = prefs?.getBoolean(DramaTipSettingsBottomSheet.KEY_PROBE_LINKS, true) != false
+            val verdicts = coroutineScope {
+                cands.map { c ->
+                    async(Dispatchers.IO) { if (probing) probe.check(c.url) else null }
+                }.awaitAll()
+            }
+
+            // ٣) بثّ الأحياء بترتيب الصفحة؛ وكل HLS حيّ يُفرَّع على جوداته الحقيقية.
+            class Var(val label: String, val url: String, val qLabel: String?)
+            val variants = mutableListOf<Var>()
+            for ((i, c) in cands.withIndex()) {
+                val v = verdicts[i]
+                // الإسقاط للرابط المُثبت موته فقط (كود حالةٍ أو علامةٌ في جسم البروكسي أو
+                // شهادة TLS مرفوضة). أمّا تعذّر الاتصال — انقطاع DNS، مهلة، أو مضيفٌ لا
+                // يُحلّ — فلا يُسقط الرابط: قِيس على dotdrama أنّ مضيفه (videotv.vividshort)
+                // يعطي ConnectionError، وإسقاطه كان سيُظهر «لا روابط» لحلقةٍ قد تعمل.
+                if (v != null && !v.alive && v.certain) {
+                    logD("DramaTip: drop dead ${c.label} ${c.url.take(70)} why=${v.why}")
+                    continue
+                }
+                val cannotTell = v != null && !v.alive
+                if (cannotTell) logD("DramaTip: unjudged ${c.label} ${c.url.take(70)} why=${v?.why}")
+                val (kind, declared) = classify(c.url, c.type, v?.contentType.orEmpty(), v?.body)
+                if (!emitted.add(c.url)) continue
+                addLink(if (cannotTell) deferred else collected, c.label, c.url, c.qLabel, kind, declared)
+                if (cannotTell || kind != ExtractorLinkType.M3U8) continue
+                val body = v?.body ?: continue
+                val base = c.url.substringBeforeLast('/', c.url)
+                var inf: String? = null
+                for (raw in body.replace("\u0000", "").split('\n')) {
+                    val l = raw.trim()
+                    if (l.startsWith("#EXT-X-STREAM-INF:")) {
+                        inf = l.removePrefix("#EXT-X-STREAM-INF:")
+                    } else if (inf != null && l.isNotBlank() && !l.startsWith("#")) {
+                        val q = resolutionLabel(inf)
+                        val vu = if (l.startsWith("http")) l else "$base/$l"
+                        variants.add(Var(c.label + (q?.let { " · $it" } ?: ""), vu, q))
+                        inf = null
                     }
                 }
             }
 
-            // ٣) nextSourceFirst — فيديو بديل
-            if (nsf >= 0) {
-                val seg = f.substring(nsf, minOf(f.length, nsf + 2600))
-                val m = Regex(""""enc":"([A-Za-z0-9+/=]+)"""").find(seg)
-                val typeM = Regex(""""type":\s*"([^"]+)"""").find(seg)
-                if (m != null) {
-                    val plain = decryptOrSkip(m.groupValues[1])
-                    if (plain != null && seenPlain.add(plain)) {
-                        emitVideo("$source · بديل", plain, collected, typeM?.groupValues?.get(1), seenPlain)
+            // ٤) صيغ الـmaster: موجة ثانية بالتوازي أيضًا، ثم بثّها.
+            if (variants.isNotEmpty()) {
+                val ok = coroutineScope {
+                    variants.map { v -> async(Dispatchers.IO) { probe.alive(v.url) } }.awaitAll()
+                }
+                for ((i, v) in variants.withIndex()) {
+                    if (ok[i] && emitted.add(v.url)) addLink(collected, v.label, v.url, v.qLabel, ExtractorLinkType.M3U8, null)
+                }
+            }
+
+            // ٥) الترجمة — كائن subtitle المحصور (يتحقّق objectAfterKey أنّ القيمة كائن
+            //    لا null، فلا ينزلق إلى أوّل «{» لاحق في الصفحة).
+            if (showSubs) {
+                val sobj = objectAfterKey(f, "\"subtitle\"")
+                if (sobj != null) {
+                    val plain = encRe.find(sobj)?.groupValues?.get(1)?.let { decryptOrSkip(it) }
+                    if (!plain.isNullOrBlank()) {
+                        val lang = langRe.find(sobj)?.groupValues?.get(1)
+                            ?.substringBefore('_')?.substringBefore('-')?.takeIf { it.isNotBlank() } ?: "ar"
+                        subtitleCallback(newSubtitleFile(subLangLabel(lang), plain))
+                        sentSub = 1
                     }
                 }
             }
 
             // الترتيب حسب إعدادات المستخدم (افتراضي = ترتيب الصفحة كما هو).
+            // غير المُحكوم يلحق بالمُثبت فيبقى الأول اختيارَ اللاعب الافتراضي.
+            collected.addAll(deferred)
             val order = prefs?.getString(DramaTipSettingsBottomSheet.KEY_QUALITY_ORDER, "default")
             val ordered = when (order) {
                 "asc" -> collected.sortedBy { it.quality }
@@ -424,7 +695,7 @@ class DramaTipProvider(private val prefs: SharedPreferences? = null) : MainAPI()
                 logD("DramaTip.loadLinks $source ep=$ep video=${ordered.size} sub=$sentSub")
                 return true
             }
-            logE("DramaTip.loadLinks $source ep=$ep decrypted nothing")
+            logE("DramaTip.loadLinks $source ep=$ep nothing survived probes")
             false
         } catch (e: Exception) { logE("loadLinks: ${e.message}"); false }
     }
@@ -432,112 +703,25 @@ class DramaTipProvider(private val prefs: SharedPreferences? = null) : MainAPI()
     // يعطي plain النصّ المكشوف أو null عند تعذّر فكّه.
     private fun decryptOrSkip(enc: String): String? = try { decryptEnc(enc) } catch (e: Exception) { logE("decrypt: ${e.message}"); null }
 
-    // فحص حيوية الرابط قبل بثّه: HEAD بنفس رؤوس اللاعب. التنظيف يجعل السيرفر
-    // الأول (ميِّتًا عند بعض المنصّات مثل DramaBox) لا يُبثّ فلا يختاره اللاعب
-    // في صدد 2001/2004. يُعطَّل من الإعدادات (سرعة) عند الحاجة.
-    private suspend fun alive(url: String): Boolean {
-        if (prefs?.getBoolean(DramaTipSettingsBottomSheet.KEY_PROBE_LINKS, true) == false) return true
-        return try {
-            val r = app.head(url, headers = reqHeaders(), referer = TIP_MAIN)
-            val code = r.code
-            if (code == 0 || code == 403) {
-                // HEAD قد يُرفض على بعض الـ CDN بينما GET يعمل — نعيد التحقق بـ GET
-                // برأس Range بايت 0 (نفس شكل طلب اللاعب) ونتحمل 200/206 فقط.
-                val g = app.get(url, headers = reqHeaders() + ("Range" to "bytes=0-0"), referer = TIP_MAIN)
-                val gc = g.code
-                (gc == 200 || gc == 206)
-            } else (code in 200..299)
-        } catch (e: Exception) { false }
-    }
-
-    // يُنشئ رابط إخراج من نصٍّ مصدري.
-    // — نصّ HLS (master): نُوسّعه إلى «جوداتها الحقيقية» من تصريحات
-    //   EXT-X-STREAM-INF (مع تبسيط الواجهة الصغيرة: اسم الجودة = min(العرض،
-    //   الارتفاع) لأن الفيديو القصير عمودي؛ 1080x1920 → 1080p). إن لم نعثر
-    //   على سطور صيغ، نرسل master نفسه كما هو.
-    // — MP4 / نصّ مباشر: يُرسل كرابط فيديو مباشر، ويُوسَم بصيغته.
-    private suspend fun emitVideo(source0: String, plain: String, collected: MutableList<ExtractorLink>, typeRaw: String?, seen: MutableSet<String>) {
-        val lower = plain.lowercase()
-        if (lower.contains(".m3u8") || lower.contains("application/vnd.apple.mpegurl")) {
-            // جلب جسم الـ master ثم فرز صيغه — الرابط لا يحوي أسطرًا بعد
-            // (كان split('\n') يُعيد master كرابط واحد دائمًا فلا تظهر الجودات).
-            if (!alive(plain)) {
-                logD("DramaTip: dropped dead M3U8 master $plain")
-                return
-            }
-            var master = try {
-                app.get(plain, headers = reqHeaders(), referer = TIP_MAIN).text
-            } catch (e: Exception) { logE("master GET: ${e.message}"); null }
-            if (master.isNullOrBlank()) {
-                // تعذّر جلب body → نرسل master كما هو (لنحوّل فعلًا نافعًا).
-                emitHls(source0, plain, null, collected)
-                return
-            }
-            val base = plain.substringBeforeLast('/')
-            var pendingInf: String? = null
-            var emitted = 0
-            // نفكّ NUL من body تلقائيًا
-            master = master.replace("\u0000", "")
-            for (ln in master.split('\n')) {
-                val l = ln.trim()
-                if (l.startsWith("#EXT-X-STREAM-INF:")) {
-                    pendingInf = l.removePrefix("#EXT-X-STREAM-INF:")
-                } else if (pendingInf != null && l.isNotBlank() && !l.startsWith("#")) {
-                    val variant = if (l.startsWith("http")) l else "$base/$l"
-                    if (seen.add(variant)) {
-                        emitHls(source0, variant, pendingInf, collected)
-                        emitted++
-                    }
-                    pendingInf = null
-                }
-            }
-            // master بلا سطور صيغ → نرسله كعرض واحد.
-            if (emitted == 0 && seen.add(plain)) {
-                emitHls(source0, plain, null, collected)
-            }
-            return
-        }
-        // MP4/نصّ مباشر/MPD:
-        val mime = Regex("""mime_type=([^&]+)""").find(plain)?.groupValues?.get(1)
-        val (extType, declared) = when {
-            lower.contains(".mpd") || lower.contains("application/dash+xml") ->
-                ExtractorLinkType.DASH to null
-            mime != null && mime.contains("mp4") ->
-                ExtractorLinkType.VIDEO to "MP4"
-            else -> ExtractorLinkType.VIDEO to declaredFromType(typeRaw)
-        }
-        if (!alive(plain)) {
-            logD("DramaTip: dropped dead ${declared ?: extType.name} $plain")
-            return
-        }
-        val tagged = FormatTag.tagged(source0, plain, extType, declared)
-        collected.add(newExtractorLink(name, tagged, plain, extType) {
+    // يبثّ رابطًا اجتاز الفحص: يوسمه بالصيغة ويضبط دقّته في مُنتقي الجودات.
+    // لاحظ اسم المعامل qLabel لا quality: داخل بناء newExtractorLink تُحلّ
+    // `quality` إلى خاصية المستقبِل، فتُقرأ-تُكتب على نفسها (فخّ ظلّل اسمًا
+    // حذّر منه narto-shared: "referer = referer").
+    private suspend fun addLink(
+        collected: MutableList<ExtractorLink>,
+        label: String,
+        url: String,
+        qLabel: String?,
+        kind: ExtractorLinkType,
+        declared: String?,
+    ) {
+        val tagged = FormatTag.tagged(label, url, kind, declared)
+        collected.add(newExtractorLink(name, tagged, url, kind) {
             this.headers = reqHeaders()
-        })
-    }
-
-    // يبثّ رابط HLS بصيغة/دقّة من تصريح الـ master (أو بلا تصريح).
-    private suspend fun emitHls(source0: String, url: String, inf: String?, collected: MutableList<ExtractorLink>) {
-        if (!alive(url)) {
-            logD("DramaTip: dropped dead M3U8 $url")
-            return
-        }
-        // اسم الدقة الفعّالة = min(العرض، الارتفاع) — الفيديو القصير عمودي.
-        val nameSuffix = buildString {
-            inf?.let {
-                val res = Regex("""RESOLUTION=(\d{3,4})x(\d{3,4})""").find(it)?.groupValues
-                if (res != null && res.size >= 3) {
-                    val w = res[1].toIntOrNull() ?: 0
-                    val h = res[2].toIntOrNull() ?: 0
-                    append((minOf(w, h).takeIf { it > 0 } ?: h)).append('p')
-                }
-                if (Regex("""CODECS="[^"]*mp4a""").containsMatchIn(it)) append(" · صوت")
+            if (!qLabel.isNullOrBlank()) {
+                val q = getQualityFromName(qLabel)
+                if (q > 0) this.quality = q
             }
-        }.let { s -> if (s.isBlank()) "" else " · $s" }
-
-        val tagged = FormatTag.tagged(source0 + nameSuffix, url, ExtractorLinkType.M3U8, null)
-        collected.add(newExtractorLink(name, tagged, url, ExtractorLinkType.M3U8) {
-            this.headers = reqHeaders()
         })
     }
 }
