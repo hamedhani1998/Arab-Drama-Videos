@@ -4,10 +4,12 @@ import cloudstreamshared.FormatTag
 import android.content.SharedPreferences
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
 import java.net.HttpURLConnection
 import java.net.URL
@@ -16,6 +18,7 @@ import java.net.URLEncoder
 private const val TIP_UA =
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36"
 private const val TIP_MAIN = "https://dramatip.net/ar"
+private const val TIP_HOST = "https://dramatip.net"
 
 // نفس وكيل اللاعب المتنقّل — قِيس أنّ مضيفي التشغيل يميّزون به.
 private const val ANDROID_UA = "Mozilla/5.0 (Linux; Android 10)"
@@ -329,6 +332,93 @@ class DramaTipProvider(private val prefs: SharedPreferences? = null) : MainAPI()
     // ويفشل. فيتقدّم نوعُ الموقع ويُصلح الوسم والنوعيّ معًا.
     private val hlsTypes = setOf("hls", "hls-enc", "goodshort", "dramawave", "storyreel")
 
+    // ★ مفتاح العطل: الصفحة تُسلّم وصفةً مُخبَّأة. قِيس 2026-10-12 على DramaBite أنّ
+    // الوصفة نفسها في HTML تحمل رمزًا عمره 8 ساعات (wsTime -28951s) فيردّ الـCDN
+    // 403، بينما /api/episode-source/{book}/{serial}?lang=ar&refresh=1 يعطي الحلقة
+    // نفسها رمزًا عمره 5 ثوانٍ فيردّ 200 — والفرق بين الطلبين سِتّة أحرف.
+    // وصفة الـAPI لا تفقد شيئًا: قِيس أنّها تحمل chain وencByQuality وسطر الترجمة
+    // كما في الصفحة (shorttv: ٤٨٠/٧٢٠/١٠٨٠؛ petadrama: ٥٤٠/٧٢٠/١٠٨٠ + ترجمة ar).
+    private val tipApi = "$TIP_HOST/api/episode-source"
+
+    private fun plainFromDescriptor(json: String): String {
+        val sb = StringBuilder()
+        val seen = HashSet<Int>()
+        var depth = 0
+        var i = 0
+        while (i < json.length) {
+            val c = json[i]
+            if (seen.contains(i)) { i++; continue }
+            when (c) {
+                '{', '[' -> depth++
+                '}', ']' -> depth--
+                '"' -> {
+                    val end = stringEnd(json, i)
+                    if (depth == 2) {
+                        val key = json.substring(i + 1, end)
+                        var k = end + 1
+                        while (k < json.length && json[k].isWhitespace()) k++
+                        if (k < json.length && json[k] == ':' && key != "type" && key != "source") {
+                            k++
+                            while (k < json.length && json[k].isWhitespace()) k++
+                            if (k < json.length && json[k] == '"') {
+                                val ve = stringEnd(json, k)
+                                sb.append(key).append('\u0000').append(json, k + 1, ve).append('\n')
+                                seen.add(k)
+                                seen.add(ve)
+                            }
+                        }
+                    }
+                    i = end
+                }
+            }
+            i++
+        }
+        return sb.toString()
+    }
+
+    private fun stringEnd(s: String, at: Int): Int {
+        var i = at + 1
+        while (i < s.length) {
+            when (s[i]) {
+                '\\' -> i += 2
+                '"' -> return i
+                else -> i++
+            }
+        }
+        return s.length - 1
+    }
+
+    /**
+     * كل الروابط المُفكَّكة (بالصيغة التي يفهمها كود الاستخراج القائم: حقول
+     * ‎enc/qال‎ مفصولة بـNUL) من وصفة الـAPI — أو null إن فشل الطلب.
+     *
+     * طلبٌ منفصل ومعزول تمامًا عن الوصفة الأساسية: أيّ فشل هنا يعيد null فيسقط
+     * الكود على سلوكه القديم، ولا تكون «إعادة الجلب» سببًا في فقدان روابط.
+     */
+    private suspend fun apiLinks(bookId: String, serial: Int): String? {
+        val url = "$tipApi/$bookId/$serial?lang=ar&refresh=1"
+        var lastWhy = "-"
+        for (attempt in 1..3) {
+            try {
+                val res = app.get(url, referer = TIP_MAIN, headers = reqHeaders(), timeout = 20_000L)
+                if (res.code in 200..299) {
+                    val desc = org.json.JSONObject(res.text).optJSONObject("descriptor") ?: return null
+                    return plainFromDescriptor(desc.toString())
+                }
+                // 403 هنا غالبًا حدُّ معدّل لا حكمٌ على الوصفة: {error:forbidden}
+                lastWhy = "HTTP ${res.code}"
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                lastWhy = e.javaClass.simpleName
+            }
+            android.util.Log.e("DramaTip", "episode-source attempt=$attempt/3 ($lastWhy) book=$bookId ser=$serial")
+            if (attempt < 3) delay(700L * attempt)
+        }
+        android.util.Log.e("DramaTip", "episode-source gave up ($lastWhy) book=$bookId ser=$serial")
+        return null
+    }
+
     private val encRe = Regex(""""enc":"([A-Za-z0-9+/=]+)"""")
     private val typeRe = Regex(""""type":\s*"([^"]+)"""")
     private val langRe = Regex(""""language":\s*"([^"]+)"""")
@@ -540,6 +630,27 @@ class DramaTipProvider(private val prefs: SharedPreferences? = null) : MainAPI()
         } catch (e: Exception) { "" }
     }
 
+    /**
+     * عنصر chain واحد ← مرشّحات (اسم، رابط، نوع، دقّة). الأساس أولًا ثم جوداته،
+     * وكل رابط مذكور مرّة واحدة بأعلى دقّة معلنة له (MoreShort: 480/720/1080
+     * لملفٍ واحد ← يُبثّ مرّة).
+     */
+    private fun chainCands(e: ChainEntry, source: String): List<Triple<String, String, String?>> {
+        val out = mutableListOf<Triple<String, String, String?>>()
+        val byUrl = LinkedHashMap<String, String>()
+        for ((q, qenc) in e.qualities) {
+            val qu = decryptOrSkip(qenc) ?: continue
+            val prev = byUrl[qu]
+            if (prev == null || (q.toIntOrNull() ?: 0) > (prev.toIntOrNull() ?: 0)) byUrl[qu] = q
+        }
+        e.enc?.let { decryptOrSkip(it) }?.let { main ->
+            val q = byUrl[main]
+            out.add(Triple(if (q != null) "$source · ${q}p" else source, main, e.type))
+        }
+        for ((qu, q) in byUrl) out.add(Triple("$source · ${q}p", qu, e.type))
+        return out
+    }
+
     /** اسم دقّة من سطر EXT-X-STREAM-INF: min(العرض، الارتفاع) — الفيديو القصير عموديّ. */
     private fun resolutionLabel(inf: String): String? {
         val r = Regex("""RESOLUTION=(\d{3,4})x(\d{3,4})""").find(inf)?.groupValues ?: return null
@@ -567,6 +678,16 @@ class DramaTipProvider(private val prefs: SharedPreferences? = null) : MainAPI()
             val f = extractFlight(html) ?: return false
             val source = sourceName(f)
 
+            // ★ إعادة الجلب: وصفة الصفحة مُخبَّأة وقد تحمل رموزًا منتهية (انظر TIP_API).
+            // الـAPI يُسأل عن الحلقة نفسها من كتابها ورقمها التسلسلي، وتُدمج الوصفتان:
+            // الوصفة المُنعشة أولًا لأنها الأحدث، ثم وصفة الصفحة. كل رابط يُبثّ مرّة
+            // واحدة (emitted أدناه)، فالتكرار بين الوصفتين لا يُضاعف السيرفرات.
+            val bookId = Regex(""""bookId"\s*:\s*"?([0-9]+)"?""").find(f)?.groupValues?.get(1)
+            val firstSerial = Regex(""""firstSerial"\s*:\s*(-?\d+)""").find(f)
+                ?.groupValues?.get(1)?.toIntOrNull() ?: 1
+            val apiDesc = if (bookId != null) apiLinks(bookId, ep + firstSerial - 1) else null
+            if (apiDesc != null) logD("DramaTip: episode-source OK book=$bookId ser=${ep + firstSerial - 1}")
+
             val collected = mutableListOf<ExtractorLink>()
             // ما اجتاز الفحص، وما تعذّر الحكم عليه (انقطاع عابر لا يُسقط رابطًا) — يُبثّ
             // هذا بعد ذاك، فيبقى اختيار اللاعب الافتراضي على رابطٍ مُثبتٍ حيّ.
@@ -585,23 +706,16 @@ class DramaTipProvider(private val prefs: SharedPreferences? = null) : MainAPI()
             // بديلًا». بثّه موسومًا «· بديل» كان يُشغّل حلقةً خاطئة عند اختياره.
             class Cand(val label: String, val url: String, val type: String?, val qLabel: String?)
             val cands = mutableListOf<Cand>()
-            for (e in parseChain(f)) {
-                // جودات العنصر: إن دلّت مفاتيحُ عدةٍ على الرابط نفسه (MoreShort: 480/720/1080
-                // كلها لملفٍ واحد) نبثّه مرّة بأعلى دقّة، لا ثلاث مرّات بوسمٍ خاطئ.
-                val byUrl = LinkedHashMap<String, String>()
-                for ((q, qenc) in e.qualities) {
-                    val qu = decryptOrSkip(qenc) ?: continue
-                    val prev = byUrl[qu]
-                    if (prev == null || (q.toIntOrNull() ?: 0) > (prev.toIntOrNull() ?: 0)) byUrl[qu] = q
+            val seenCands = HashSet<String>()
+            for (desc in listOfNotNull(apiDesc, f)) {
+                val srcName = sourceName(desc)
+                for (e in parseChain(desc)) {
+                    for ((label, u, ty) in chainCands(e, srcName)) {
+                        if (!seenCands.add(u)) continue
+                        val q = Regex("""·\s*(\d{3,4})p$""").find(label)?.groupValues?.get(1)
+                        cands.add(Cand(label, u, ty, q?.let { "${it}p" }))
+                    }
                 }
-                // الأساس موسومًا بدقّته حين تكون جودةٌ معلنة له نفس الرابط: DramaBox تعلن
-                // ‎1080p‎ وهو الملفّ الذي في ‎enc‎ نفسه، فبلا هذا يصير الرابط بلا دقّةٍ
-                // ظاهرةٍ في مُنتقي الجودات ويهبط إلى ما دون مرتبته.
-                e.enc?.let { decryptOrSkip(it) }?.let { main ->
-                    val q = byUrl[main]
-                    cands.add(Cand(if (q != null) "$source · ${q}p" else source, main, e.type, q?.let { "${it}p" }))
-                }
-                for ((qu, q) in byUrl) cands.add(Cand("$source · ${q}p", qu, e.type, "${q}p"))
             }
             if (cands.isEmpty()) {
                 logE("DramaTip.loadLinks $source ep=$ep decrypted nothing")
@@ -668,7 +782,7 @@ class DramaTipProvider(private val prefs: SharedPreferences? = null) : MainAPI()
             // ٥) الترجمة — كائن subtitle المحصور (يتحقّق objectAfterKey أنّ القيمة كائن
             //    لا null، فلا ينزلق إلى أوّل «{» لاحق في الصفحة).
             if (showSubs) {
-                val sobj = objectAfterKey(f, "\"subtitle\"")
+                val sobj = listOfNotNull(apiDesc, f).firstNotNullOfOrNull { objectAfterKey(it, "\"subtitle\"") }
                 if (sobj != null) {
                     val plain = encRe.find(sobj)?.groupValues?.get(1)?.let { decryptOrSkip(it) }
                     if (!plain.isNullOrBlank()) {
