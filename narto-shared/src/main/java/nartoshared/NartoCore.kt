@@ -144,6 +144,86 @@ internal fun NartoSub.langTag(): String = languageCode.subLangTag()
 // Minimal fake JWT the API accepts (claims are not verified, slug/ep are read from the path).
 internal const val fakeRsCtx = "eyJhbGciOiJub25lIn0.eyJ2IjoiMSJ9."
 
+// How many times a page GET is retried while the host keeps failing TRANSIENTLY.
+// MEASURED 2026-10-12 against edge.narto-drama.com/detail/watch/1-flash-sale, 24 sequential
+// GETs: 11x HTTP 200, 1x HTTP 500, 6x SSLHandshakeException, 6x SocketException. More than
+// half the requests to that host fail at the transport layer while the SAME URL answers 200 on
+// the next try — so a single attempt (what every page fetch here did) turns "the host is
+// flaky" into "this show has no episodes" / "500 Internal Server Error" on screen. The retry
+// is what separates the two.
+internal const val PAGE_GET_ATTEMPTS = 4
+internal const val PAGE_GET_RETRY_GAP_MS = 400L
+
+// Fetch a page from a flaky host, retrying the transport/5xx failures that mean "try again",
+// and NEVER handing back an error page.
+//
+// ★ Why the status check is not optional: CloudStream's app.get returns the BODY of a 500 as
+// the response text, so the old `app.get(...).text` path parsed the literal
+// "<title>500 Internal Server Error</title>" page as if it were a show page and found no
+// episodes or no title. A URL that answered is not the same as a URL that succeeded.
+// 4xx and 410 are verdicts about the URL (retrying cannot fix a 404) and are not retried;
+// 5xx, TLS/Socket failures and DNS blips are transient and are.
+internal suspend fun nartoGetPage(
+    url: String,
+    referer: String,
+    tag: String,
+    timeoutMs: Long = 30_000L,
+): String? {
+    var lastWhy = "-"
+    for (attempt in 1..PAGE_GET_ATTEMPTS) {
+        try {
+            val res = com.lagradost.cloudstream3.app.get(
+                url,
+                referer = referer,
+                headers = mapOf("User-Agent" to UA),
+                timeout = timeoutMs,
+            )
+            val code = res.code
+            val body = res.text
+            if (code in 200..299 && !body.isNullOrBlank()) {
+                // Some fronts answer 200 with an error document (a proxy's soft error). Treat
+                // it as a failure so the retry can find the real page.
+                if (!isErrorPage(body)) return body
+                lastWhy = "soft-error page (HTTP 200)"
+            } else {
+                lastWhy = "HTTP $code"
+                // A real verdict on the URL — retrying a 404/410 only burns the budget.
+                if (code in 400..499) {
+                    android.util.Log.e(tag, "page GET VERDICT HTTP $code url=${url.take(90)}")
+                    return null
+                }
+            }
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            // The user left / a newer search replaced this call: not a network failure.
+            throw e
+        } catch (e: Exception) {
+            lastWhy = "${e.javaClass.simpleName}"
+        }
+        android.util.Log.e(
+            tag,
+            "page GET attempt=$attempt/$PAGE_GET_ATTEMPTS failed ($lastWhy) url=${url.take(90)}"
+        )
+        if (attempt < PAGE_GET_ATTEMPTS) {
+            try {
+                kotlinx.coroutines.delay(PAGE_GET_RETRY_GAP_MS * attempt)
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                throw e
+            }
+        }
+    }
+    android.util.Log.e(tag, "page GET gave up after $PAGE_GET_ATTEMPTS ($lastWhy) url=${url.take(90)}")
+    return null
+}
+
+// A 200 whose body is an error document, not a page. Checked on the top of the body only —
+// a real page can legitimately contain the word "error" somewhere.
+internal fun isErrorPage(body: String): Boolean {
+    val head = body.take(1200)
+    return head.contains("Internal Server Error") ||
+        head.contains("500 Internal Server Error") ||
+        Regex("""<title>\s*(500|502|503|504)\b""").containsMatchIn(head)
+}
+
 // The server messages that mean "no playable source right now", as opposed to a network failure.
 internal val UNAVAILABLE_MESSAGES = setOf(
     "stream_temporarily_unavailable",

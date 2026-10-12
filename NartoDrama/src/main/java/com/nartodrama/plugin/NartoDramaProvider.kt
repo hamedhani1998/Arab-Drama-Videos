@@ -10,6 +10,7 @@ import com.lagradost.cloudstream3.utils.*
 import nartoshared.UA
 import nartoshared.loadNartoLinks
 import nartoshared.NartoFetch
+import nartoshared.nartoGetPage
 
 private const val NARTO_HOST = "https://narto-drama.com"
 private const val BRW_HOST = "https://edge.narto-drama.com"
@@ -138,12 +139,11 @@ class NartoDramaProvider(private val prefs: SharedPreferences? = null) : MainAPI
         searchCache[q]?.let { return it }
         val urlEncQ = java.net.URLEncoder.encode(q, "UTF-8")
         try {
-            val html = app.get(
+            val html = nartoGetPage(
                 "$BRW_HOST/search?lang=ar-SA&q=$urlEncQ&page=1&perPage=12",
-                referer = nartoOrigin,
-                headers = mapOf("User-Agent" to UA)
-            ).text
-            if (html.contains("\"@type\":\"ListItem\"")) {
+                nartoOrigin, "NartoDrama"
+            )
+            if (html != null && html.contains("\"@type\":\"ListItem\"")) {
                 searchCache[q] = html
                 return html
             }
@@ -163,8 +163,8 @@ class NartoDramaProvider(private val prefs: SharedPreferences? = null) : MainAPI
     private suspend fun fetchHomeFeed(): String? {
         homeFeedCache?.let { return it }
         try {
-            val html = app.get("$BRW_HOST/", referer = nartoOrigin, headers = mapOf("User-Agent" to UA)).text
-            if (html.contains("\"@type\":\"ListItem\"")) {
+            val html = nartoGetPage("$BRW_HOST/", nartoOrigin, "NartoDrama")
+            if (html != null && html.contains("\"@type\":\"ListItem\"")) {
                 homeFeedCache = html
                 return html
             }
@@ -252,22 +252,23 @@ class NartoDramaProvider(private val prefs: SharedPreferences? = null) : MainAPI
             val slug = Regex("""/detail/watch/([^/?]+)""").find(url)?.groupValues?.get(1) ?: return null
             val loadHost = Regex("""https://([^/]+)/detail/watch/""").find(url)?.groupValues?.get(1)
                 ?.let { "https://$it" } ?: NARTO_HOST
-            var doc: org.jsoup.nodes.Document? = null
-            var attempt = 0
-            // v2 (perf): no retry-sleep punishment. The detail page is server-bound: the HTML
-            // build takes 12-19s on slow slugs, so a generous first timeout gets a real 200 —
-            // extra sleeps on failure only ADD perceived delay. One instant re-probe, then give up.
-            while (attempt < 2 && doc == null) {
-                attempt++
-                try {
-                    doc = app.get("$loadHost/detail/watch/$slug", referer = nartoOrigin, headers = mapOf("User-Agent" to UA), timeout = 30000L).document
-                } catch (e: kotlinx.coroutines.CancellationException) {
-                    throw e // لا محاولة ثانية بعد أن غادر المستخدم الصفحة
-                } catch (e: Exception) {
-                    android.util.Log.e("NartoDrama", "load attempt=$attempt/2 slug=$slug error=${e.message?.take(80)}", e)
-                }
+
+            // ★ Retry + validity live in nartoGetPage now.
+            //
+            // This used to be a single unchecked attempt: no retry on a transport failure, and
+            // no notice that the response was an error document. Both hosts here fail a large
+            // fraction of requests at the transport layer (MEASURED 2026-10-12 on the edge VPS:
+            // 24 GETs of one detail URL ⇒ 11x200, 1x500, 6xSSLHandshakeException, 6xSocketException)
+            // while the SAME URL answers 200 on the next try — which is exactly how a flaky host
+            // becomes "500 Internal Server Error" on the detail screen or a half-built episode
+            // list. Transient failures (5xx/TLS/Socket) are retried; 4xx is a verdict; an error
+            // page is never parsed as a show.
+            val html = nartoGetPage("$loadHost/detail/watch/$slug", nartoOrigin, "NartoDrama")
+            if (html == null) {
+                android.util.Log.e("NartoDrama", "load slug=$slug NO PAGE after retries (${System.currentTimeMillis() - t0}ms)")
+                return null
             }
-            if (doc == null) return null
+            val doc = org.jsoup.Jsoup.parse(html)
             android.util.Log.e("NartoDrama", "load slug=$slug host=$loadHost fetchMs=${System.currentTimeMillis() - t0} eps=" + doc.select("div.episode-list a.episode-item").size)
 
             val title = doc.selectFirst("h1")?.text()?.trim()

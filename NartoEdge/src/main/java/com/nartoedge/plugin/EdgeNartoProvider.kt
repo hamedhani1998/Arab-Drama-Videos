@@ -10,6 +10,7 @@ import com.lagradost.cloudstream3.utils.*
 import nartoshared.UA
 import nartoshared.loadNartoLinks
 import nartoshared.NartoFetch
+import nartoshared.nartoGetPage
 
 private const val EDGE_HOST = "https://edge.narto-drama.com"
 
@@ -139,8 +140,11 @@ class EdgeNartoProvider(private val prefs: SharedPreferences? = null) : MainAPI(
         searchCache[q]?.let { return it }
         val urlEncQ = java.net.URLEncoder.encode(q, "UTF-8")
         try {
-            val html = app.get("$mainUrl/search?lang=ar-SA&q=$urlEncQ&page=1&perPage=12", referer = nartoOrigin, headers = mapOf("User-Agent" to UA)).text
-            if (html.contains("\"@type\":\"ListItem\"")) {
+            val html = nartoGetPage(
+                "$mainUrl/search?lang=ar-SA&q=$urlEncQ&page=1&perPage=12",
+                nartoOrigin, "EdgeNarto"
+            )
+            if (html != null && html.contains("\"@type\":\"ListItem\"")) {
                 searchCache[q] = html
                 return html
             }
@@ -160,8 +164,8 @@ class EdgeNartoProvider(private val prefs: SharedPreferences? = null) : MainAPI(
     private suspend fun fetchHomeFeed(): String? {
         homeFeedCache?.let { return it }
         try {
-            val html = app.get("$mainUrl/", referer = nartoOrigin, headers = mapOf("User-Agent" to UA)).text
-            if (html.contains("\"@type\":\"ListItem\"")) {
+            val html = nartoGetPage("$mainUrl/", nartoOrigin, "EdgeNarto")
+            if (html != null && html.contains("\"@type\":\"ListItem\"")) {
                 homeFeedCache = html
                 return html
             }
@@ -249,22 +253,21 @@ class EdgeNartoProvider(private val prefs: SharedPreferences? = null) : MainAPI(
             val slug = Regex("""/detail/watch/([^/?]+)""").find(url)?.groupValues?.get(1) ?: return null
             val loadHost = Regex("""https://([^/]+)/detail/watch/""").find(url)?.groupValues?.get(1)
                 ?.let { "https://$it" } ?: mainUrl
-            var doc: org.jsoup.nodes.Document? = null
-            var attempt = 0
-            // v2 (perf): no retry-sleep punishment. The detail page is server-bound: the HTML
-            // build takes 12-19s on slow slugs, so a generous first timeout gets a real 200 —
-            // extra sleeps on failure only ADD perceived delay. One instant re-probe, then give up.
-            while (attempt < 2 && doc == null) {
-                attempt++
-                try {
-                    doc = app.get("$loadHost/detail/watch/$slug", referer = nartoOrigin, headers = mapOf("User-Agent" to UA), timeout = 30000L).document
-                } catch (e: kotlinx.coroutines.CancellationException) {
-                    throw e // لا محاولة ثانية بعد أن غادر المستخدم الصفحة
-                } catch (e: Exception) {
-                    android.util.Log.e("EdgeNarto", "load attempt=$attempt/2 slug=$slug error=${e.message?.take(80)}", e)
-                }
+
+            // ★ الرابط يُبذل للمحاولات والتحقق من الصحة في nartoGetPage.
+            //
+            // كان هنا محاولة واحدة بلا تحقق: ولا يُعاد الطلب على فشل النقل، ولا يُلاحَظ أنّ
+            // الرد صفحةُ خطأ. وedge.narto-drama.com يفشل في أكثر من نصف الطلبات للنطاق نفسه
+            // (قِسناه 2026-10-12: 24 طلباً ⇒ 11×200 و1×500 و6×TLS و6×Socket) بينما الرابط
+            // نفسه يُجيب 200 في المحاولة التالية — فكانت النتيجة "500 Internal Server Error"
+            // على شاشة التفاصيل أو قائمةَ حلقاتٍ ناقصة. الآن يُعاد الطلب على الفشل العارض
+            // (5xx/TLS/Socket) ويتوقف فورًا على 4xx (حكمٌ على الرابط)، وصفحةُ الخطأ لا تُحلَّل.
+            val html = nartoGetPage("$loadHost/detail/watch/$slug", nartoOrigin, "EdgeNarto")
+            if (html == null) {
+                android.util.Log.e("EdgeNarto", "load slug=$slug NO PAGE after retries (${System.currentTimeMillis() - t0}ms)")
+                return null
             }
-            if (doc == null) return null
+            val doc = org.jsoup.Jsoup.parse(html)
             android.util.Log.e("EdgeNarto", "load slug=$slug host=$loadHost fetchMs=${System.currentTimeMillis() - t0} eps=" + doc.select("div.episode-list a.episode-item").size)
 
             val title = doc.selectFirst("h1")?.text()?.trim()
@@ -276,6 +279,8 @@ class EdgeNartoProvider(private val prefs: SharedPreferences? = null) : MainAPI(
             var eps = doc.select("div.episode-list a.episode-item")
                 .mapNotNull { el ->
                     val href = el.attr("href") ?: return@mapNotNull null
+                    // الرابط المطلق هو ما تبنيه الصفحة (…/detail/watch/{slug}/{n}?lang=en-US)،
+                    // لكن نحتفظ بمسار الهوست المطلوب ·{loadHost} ليبقى التشغيل على النطاق نفسه.
                     val ep = Regex("""/detail/watch/[^/]+/(\d+)""").find(href)?.groupValues?.get(1)
                         ?.toIntOrNull() ?: return@mapNotNull null
                     newEpisode("$loadHost/detail/watch/$slug/$ep") {
