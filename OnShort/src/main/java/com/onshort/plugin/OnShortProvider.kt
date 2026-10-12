@@ -8,6 +8,8 @@ import com.fasterxml.jackson.databind.ObjectMapper
 import com.fasterxml.jackson.module.kotlin.registerKotlinModule
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
+import java.net.HttpURLConnection
+import java.net.URL
 import java.net.URLDecoder
 import java.net.URLEncoder
 
@@ -592,7 +594,7 @@ class OnShortProvider(private val prefs: SharedPreferences? = null) : MainAPI() 
     // الـAPI حقلان فقط (url, headers) بلا اسم — فلا اسم يُعرض ولا فائدة منه،
     // وكلفته طلبُ شبكة لكل حلقة على مسار التشغيل. نُبقيها مكتوبةً للمرجع،
     // ونمرّر الماستر كاملاً للمشغّل الذي يحلّ الصوت والجودة بنفسه.
-    private data class HlsVariant(val height: Int, val uri: String)
+    private data class HlsVariant(val height: Int, val uri: String, val kind: String = "")
     private data class HlsAudio(val group: String, val name: String, val uri: String)
 
     private suspend fun fetchMaster(url: String): String? = getWithRetry(url, mainUrl)
@@ -651,6 +653,90 @@ class OnShortProvider(private val prefs: SharedPreferences? = null) : MainAPI() 
         }
     }
 
+    // النوع الحقيقي: نثق أولًا بحقل kind الذي يعلنه الـAPI نفسه ("hls" ↔ "media")،
+    // وشكل الرابط بديلًا فقط حين يغيب الحقل أو يحمل قيمة لا نعرفها.
+    // سبب التقديم: رابط HLS قد يأتي بلا امتداد .m3u8 (خادم يختم مساره أو يلفّه برمز)،
+    // فيخطئ فحص الشكل ويُرسله المشغّل كـ MP4 مباشر → "Source error" بلا رسالة.
+    // قِسنا أن الحقلين يتّفقان اليوم على كل رابط في المنصّات الإحدى عشرة — فهذا
+    // تحصينٌ لما قد يتباعد لاحقًا، لا إصلاح خطأ قائم.
+    private fun kindType(kind: String?, uri: String): ExtractorLinkType =
+        when (kind?.trim()?.lowercase()) {
+            "hls", "m3u8", "hls_master" -> ExtractorLinkType.M3U8
+            "media", "mp4", "video", "file" -> ExtractorLinkType.VIDEO
+            else -> linkType(uri)
+        }
+
+    // يقرأ candidates[] من العقدة (لكل مرشّح: دقّة، رابط، ونوعه كما أعلنه الـAPI).
+    private fun candidatesOf(node: JsonNode): List<HlsVariant> {
+        val arr = node.get("candidates") ?: return emptyList()
+        if (!arr.isArray) return emptyList()
+        val out = mutableListOf<HlsVariant>()
+        for (c in arr) {
+            val cu = c.get("url")?.asText() ?: continue
+            if (cu.isBlank()) continue
+            val h = Regex("""\d+""").find(c.get("quality")?.asText() ?: "")?.value?.toIntOrNull() ?: 0
+            out.add(HlsVariant(h, cu, c.get("kind")?.asText().orEmpty()))
+        }
+        return out
+    }
+
+    // الرابط الذي سيُبثّ فعليًا كـ«Auto»: main، وإن كان MP4 بلا توقيع (auth_key)
+    // استبدلناه بأفضل مرشّح موقّع (flextv/dramaboxdb). هذا مُشتقٌّ من منطق emitNode
+    // نفسه كي يفحص مسار loadLinks الرابطَ الذي سيصل المشغّل حقًّا — لا رابطًا آخر
+    // قد يكون سليمًا بينما المُبثّ ميت (أو العكس).
+    private fun effectiveMain(node: JsonNode): String? {
+        val main = node.get("url")?.asText() ?: return null
+        if (main.isBlank()) return null
+        val cands = candidatesOf(node)
+        if (cands.isEmpty()) return main
+        val mainIsHls = kindType(node.get("kind")?.asText(), main) == ExtractorLinkType.M3U8
+        val mainHasAuth = main.contains("auth_key")
+        val best = if (!mainIsHls && !mainHasAuth) {
+            cands.filter { it.uri.contains("auth_key") }.maxByOrNull { it.height } ?: cands.firstOrNull()
+        } else null
+        return best?.uri ?: main
+    }
+
+    // نتيجة فحص الحيوية: alive = الرابط يفتح، certain = الحكم قاطع.
+    // «قاطع» = رمز حالة HTTP أو فشل TLS (الأمر نفسه سيراه المشغّل بلا شك).
+    // «غير قاطع» = فشل نقل: تعذّر حلّ الاسم / مهلة / قطع اتصال — قد يكون تذبذب
+    // شبكة لا موتًا، فلا نُسقط الرابط بسببه.
+    private class LinkVerdict(val alive: Boolean, val certain: Boolean, val why: String)
+
+    // يفحص الرابط الذي سيراه المشغّل فعلًا: GET عارٍ (بلا Range) بنفس الـUA والمرجع
+    // الذين نُمرّرهما للاعب، فيجري الحكم على نفس الطلب ونفس الجهاز ونفس عنوان الشبكة.
+    // لا نقرأ الجسم (إلا ضمنيًا لا) — نكتفي برمز الحالة ثم نقطع الاتصال، فلا نُهدر
+    // عرض النطاق على ملف قد يكون بعشرات الميغابايت.
+    private suspend fun probeMain(url: String): LinkVerdict {
+        var conn: HttpURLConnection? = null
+        return try {
+            conn = (URL(url).openConnection() as HttpURLConnection).apply {
+                requestMethod = "GET"
+                connectTimeout = 5000
+                readTimeout = 5000
+                instanceFollowRedirects = true
+                setRequestProperty("User-Agent", ONS_UA)
+                setRequestProperty("Referer", mainUrl)
+            }
+            val code = conn.responseCode
+            when {
+                code in 200..399 -> LinkVerdict(true, true, "HTTP $code")
+                // 4xx: الخادم رفض صراحةً — المشغّل سيرى الرفض نفسه
+                code in 400..499 -> LinkVerdict(false, true, "HTTP $code")
+                // 5xx: خلل مؤقّت عند الخادم — لا نحكم بالموت
+                else -> LinkVerdict(false, false, "HTTP $code")
+            }
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            // مغادرة المستخدم للحلقة: لا تُبتلع (تُنهي المهمّة فورًا)
+            throw e
+        } catch (e: Exception) {
+            LinkVerdict(false, e is javax.net.ssl.SSLException,
+                "${e.javaClass.simpleName}: ${e.message?.take(48) ?: "-"}")
+        } finally {
+            try { conn?.disconnect() } catch (_: Exception) {}
+        }
+    }
+
     /**
      * يبثّ روابط عقدة تشغيل OnShort (main + candidates + subtitles) إلى القائمة
      * المجمّعة [collected]. يُستخدم للمسار الأصلي (native) ولجسر إعادة البحث —
@@ -676,16 +762,7 @@ class OnShortProvider(private val prefs: SharedPreferences? = null) : MainAPI() 
             // أو "hls" (playlist HLS) — كلا النوعين روابط فيديو صالحة يجب عرضها.
             // (كان فلتر kind=="media" فقط يحذف جودات iDrama/ReelShort/Stardust ذات kind=hls
             //  فيُظهر مزوّد "Auto" واحد بدل كل الجودات المتوفرة — أصلحته.)
-            val candidates = mutableListOf<HlsVariant>()
-            val candArr = node.get("candidates")
-            if (candArr != null && candArr.isArray) {
-                for (c in candArr) {
-                    val cu = c.get("url")?.asText() ?: continue
-                    if (cu.isBlank()) continue
-                    val h = Regex("""\d+""").find(c.get("quality")?.asText() ?: "")?.value?.toIntOrNull() ?: 0
-                    candidates.add(HlsVariant(h, cu))
-                }
-            }
+            val candidates = candidatesOf(node)
             val mainLen = main.length
             val candLens = candidates.map { it.uri.length }.joinToString(",")
             val candHasAuth = candidates.any { it.uri.contains("auth_key") }
@@ -696,8 +773,9 @@ class OnShortProvider(private val prefs: SharedPreferences? = null) : MainAPI() 
             // والأصوات فورًا (يختار الجودة تلقائيًا). لذلك لا نحتاج جلب master مسبقًا
             // (كان هذا الجلب هو سبب تأخير عرض الفيديو والجودات).
             var mainPlay = main
+            var mainKind = node.get("kind")?.asText().orEmpty()
             if (candidates.isNotEmpty()) {
-                val mainIsHls = linkType(main) == ExtractorLinkType.M3U8
+                val mainIsHls = kindType(mainKind, main) == ExtractorLinkType.M3U8
                 val mainInCandidates = candidates.any { it.uri == main }
                 // إصلاح الخوادم التي ترسل main ناقصًا (MP4 بلا auth_key) بينما المرشحات
                 // تحمل توقيعًا: نختار أفضل مرشح موقّع كأساس التشغيل (flextv/dramaboxdb).
@@ -709,8 +787,9 @@ class OnShortProvider(private val prefs: SharedPreferences? = null) : MainAPI() 
                 if (best != null) {
                     logD("OnShort.emitNode REPLACE main(bare) -> cand h=${best.height} (${main.take(55)}... => ${best.uri.take(55)}...)")
                     mainPlay = best.uri
+                    mainKind = best.kind
                 }
-                val effIsHls = linkType(mainPlay) == ExtractorLinkType.M3U8
+                val effIsHls = kindType(mainKind, mainPlay) == ExtractorLinkType.M3U8
                 val effInCands = candidates.any { it.uri == mainPlay }
                 logD("OnShort.emitNode candidates=${candidates.size} mainHls=$effIsHls inCands=$effInCands mainWasHls=$mainIsHls")
 
@@ -753,7 +832,7 @@ class OnShortProvider(private val prefs: SharedPreferences? = null) : MainAPI() 
                     if (minHeight > 0 && v.height < minHeight) continue
                     if (!seen.add(v.uri)) continue
                     val label = "${v.height}p"
-                    collected.add(newExtractorLink(name, FormatTag.tagged("$label · $labelSource", v.uri, linkType(v.uri)), v.uri, linkType(v.uri)) {
+                    collected.add(newExtractorLink(name, FormatTag.tagged("$label · $labelSource", v.uri, kindType(v.kind, v.uri)), v.uri, kindType(v.kind, v.uri)) {
                         this.quality = getQualityFromName("${v.height}p")
                         this.headers = mapOf("User-Agent" to ONS_UA, "Referer" to mainUrl)
                     })
@@ -762,7 +841,7 @@ class OnShortProvider(private val prefs: SharedPreferences? = null) : MainAPI() 
                 // لا يوجد candidates: main وحده. دلّ نوعه (m3u8 = HLS تكيفي كل الجودات،
                 // mp4 = مباشر). بلا جلب — يفتح فورًا.
                 if (prefs?.getBoolean(OnShortSettingsBottomSheet.KEY_SHOW_AUTO, true) != false) {
-                    collected.add(newExtractorLink(name, FormatTag.tagged("Auto · $labelSource", mainPlay, linkType(mainPlay)), mainPlay, linkType(mainPlay)) {
+                    collected.add(newExtractorLink(name, FormatTag.tagged("Auto · $labelSource", mainPlay, kindType(mainKind, mainPlay)), mainPlay, kindType(mainKind, mainPlay)) {
                         this.headers = mapOf("User-Agent" to ONS_UA, "Referer" to mainUrl)
                     })
                 }
@@ -872,13 +951,40 @@ class OnShortProvider(private val prefs: SharedPreferences? = null) : MainAPI() 
 
             val node = fetchEpisode(postId, ep, effectiveTicket)
 
+            // فحص حيوية الرابط الذي سيراه المشغّل (قابل للإطفاء من الإعدادات).
+            // OnShort يُرجع ok=true أحيانًا بينما مضيف الملف ميت (dramaboxdb: اسمٌ لا
+            // يُحلّ عالميًّا) — فيصل المشغّل رابطٌ ميت ويظهر "Source error" بدل أن
+            // تُجرَّب الجسور. الفحص GET عارٍ بنفس UA/المرجع على الجهاز نفسه.
+            var mainSuspect = false   // الرابط الأساسي لم يفتح (بأي سبب)
+            var certainDead = false   // والسبب قاطع (رمز حالة/TLS) لا تذبذب نقل
+            var probeNote = ""
+            if (node != null && (node.get("ok")?.asBoolean() ?: true) &&
+                prefs?.getBoolean(OnShortSettingsBottomSheet.KEY_PROBE_MAIN, true) != false
+            ) {
+                val target = effectiveMain(node)
+                if (!target.isNullOrBlank()) {
+                    val v = probeMain(target)
+                    probeNote = v.why
+                    logD("OnShort.loadLinks probe alive=${v.alive} certain=${v.certain} why=${v.why} ${target.take(60)}")
+                    if (!v.alive) { mainSuspect = true; certainDead = v.certain }
+                }
+            }
+
+            val apiFailed = node == null || !(node.get("ok")?.asBoolean() ?: true)
+
             // سلسلة الجسور لكل مصدر: حين يرفض سيرفر OnShort تشغيل المنشور الحالي
             // (أو يفشل مؤقتًا) نجرّب الجسور المفعّلة بالترتيب — جسر إعادة البحث ثم جسر
             // Mosalsaly — وأول مصدر يُصدر رابطًا حيًا يربح. العمل نفسه قد يكون منشورًا
             // على منصة أخرى قابلة للتشغيل عند OnShort (cross-post) أو على mosalsaly.com
             // (بحث بالعنوان)؛ لا نقيّد على المنصة — بحث العنوان يحدد النجاح تلقائيًا.
-            if (node == null || !(node.get("ok")?.asBoolean() ?: true)) {
-                val reason = if (node == null) "null" else rejectReason(node)
+            // نُدخل الجسور أيضًا حين يكون الـAPI ناجحًا ورابطُه لم يُجب: الجسر قد يجد
+            // للمسلسل نفسه منشورًا سليمًا على منصة أخرى.
+            if (apiFailed || mainSuspect) {
+                val reason = when {
+                    node == null -> "null"
+                    apiFailed -> rejectReason(node)
+                    else -> "main unanswered ($probeNote)"
+                }
                 val bridgeEnabled = prefs?.getBoolean(OnShortSettingsBottomSheet.KEY_BRIDGE_ENABLED, true) ?: true
                 val crossEnabled = prefs?.getBoolean(OnShortSettingsBottomSheet.KEY_CROSSPOST_ENABLED, true) ?: true
                 val mosEnabled = prefs?.getBoolean(OnShortSettingsBottomSheet.KEY_MOSALSALY_ENABLED, true) ?: true
@@ -904,9 +1010,20 @@ class OnShortProvider(private val prefs: SharedPreferences? = null) : MainAPI() 
                         logD("OnShort.loadLinks Mosalsaly bridge did not produce links")
                     }
                 }
-                // لا جسر (معطّل) أو لم يجد نصًا — أبلغ بالسبب ونُرجع false
+                // لا جسر (معطّل) أو لم يجد نصًا.
+                // ملاذ أخير: الـAPI نجح لكن رابطَه لم يُجب بسبب **غير قاطع**
+                // (تعذّر حلّ الاسم / مهلة / قطع اتصال) — قد يكون تذبذب شبكة لا موتًا،
+                // فلا نُسقط منصّة سليمة بريبة. نُخرج روابط OnShort كما هي، كما كان
+                // سلوك المصدر قبل هذا الفحص تمامًا.
+                if (node != null && !apiFailed && !certainDead) {
+                    logD("OnShort.loadLinks probe unjudged ($probeNote) -> emit OnShort links anyway")
+                    if (!node.get("url")?.asText().isNullOrBlank()) emitNode(node, "OnShort", collected, subtitleCallback)
+                    emitSorted(prefs, collected, callback)
+                    return true
+                }
+                // أبلغ بالسبب ونُرجع false
                 if (node == null) logD("OnShort.loadLinks fetchEpisode null -> false")
-                else logD("OnShort.loadLinks ok=false -> false (${reason})")
+                else logD("OnShort.loadLinks no links -> false ($reason)")
                 return false
             }
 

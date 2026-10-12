@@ -74,6 +74,9 @@ class OnShortSettingsBottomSheet(private val prefs: SharedPreferences) : BottomS
         const val KEY_CROSSPOST_ENABLED = "os_crosspost_enabled"  // Boolean — جسر إعادة البحث، الافتراضي true
         const val KEY_MOSALSALY_ENABLED = "os_mosalsaly_enabled"  // Boolean — جسر Mosalsaly، الافتراضي true
         const val KEY_SUB_LANGS = "os_sub_langs"        // String — "ar,en,fr" أو فارغ = الكل
+        // فحص حيوية الرابط قبل بثّه. الافتراضي true (الإصلاح مفعّل).
+        // إطفاؤه يوفّر رحلة شبكة واحدة لكل تشغيل لكنه يُعيد الرابط الميت للمشغّل.
+        const val KEY_PROBE_MAIN = "os_probe_main"      // Boolean — الافتراضي true
 
         // إظهار/إخفاء صفوف المنصّات في الواجهة الرئيسية.
         const val KEY_SHOW_PLATFORMS = "os_show_platforms"    // Boolean — المفتاح الرئيسي، الافتراضي true
@@ -215,6 +218,18 @@ class OnShortSettingsBottomSheet(private val prefs: SharedPreferences) : BottomS
             }
             playbackCategory.addPreference(mosPref)
 
+            // فحص حيوية الرابط: قبل بثّ الرابط نطلبه طلبًا عاريًا (بنفس ما يفعله
+            // المشغّل)؛ فإن لم يُجب جرّبنا الجسور أعلاه بدل تمريره ميتًا. بعض المنصّات
+            // ترجع ok=true بينما مضيف الملف نفسه لم يعد موجودًا (dramaboxdb).
+            // إطفاؤه يوفّر رحلة واحدة لكل تشغيل — لكن الرابط الميت يصل المشغّل.
+            val probePref = SwitchPreferenceCompat(ctx).apply {
+                key = KEY_PROBE_MAIN
+                title = "فحص الرابط قبل التشغيل"
+                summary = "يجرّب الرابط أولًا، فإن كان ميتًا انتقل للجسور بدل تمريره للمشغّل"
+                setDefaultValue(true)
+            }
+            playbackCategory.addPreference(probePref)
+
             // تصفية لغات الترجمة. قِسنا المنصّات: dramawave وfreereels تعيدان
             // ٢٥ ترجمة لكل حلقة (pl, ja, ko, tr, ru, de, pt, es, hi, zh, vi…)،
             // فقائمة المشغّل تطول بلا نهاية. هذا الحقل يعرض ما تكتبه فقط
@@ -303,6 +318,7 @@ class OnShortSettingsBottomSheet(private val prefs: SharedPreferences) : BottomS
                         remove(KEY_BRIDGE_ENABLED)
                         remove(KEY_CROSSPOST_ENABLED)
                         remove(KEY_MOSALSALY_ENABLED)
+                        remove(KEY_PROBE_MAIN)
                         remove(KEY_SUB_LANGS)
                         remove(KEY_SHOW_PLATFORMS)
                         remove(KEY_ROW_LIMIT)
