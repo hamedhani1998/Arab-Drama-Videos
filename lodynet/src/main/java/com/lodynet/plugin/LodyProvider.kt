@@ -71,9 +71,15 @@ class LodyProvider(private val prefs: SharedPreferences? = null) : MainAPI() {
      * لاحقة الحلقة في روابط الموقع. ثلاث صيغ:
      *   -ep14 / -ep14-end    و    -e07    و    -الحلقة-54
      * والصيغة الأخيرة تصل من HTML مُرمَّزة: %d8%a7%d9%84%d8%ad%d9%84%d9%82%d8%a9-54
+     *
+     * ★ وذيلٌ اختياري بعد وسم الحلقة: الموقع يكتب أحياناً `…-الحلقة-260-مترجم`
+     * و`…-حلقة-108-hd` و`…-حلقة-126-مترجم-عربي` و`…-الحلقة-23-والأخيرة`. بغير
+     * هذا الذيل لا يُقصّ الوسم (لأنه ليس في النهاية) فيتفرّع المسلسل الواحد إلى
+     * مفتاحين ⇒ بطاقتان مكررتان في «مضاف حديثا». الذيل مقصور على مقاطع قصيرة
+     * غير رقمية فلا يبتلع اسم المسلسل.
      */
     private val epSuffixRe = Regex(
-        """-(?:ep\d+(?:-end)?|e\d+|(?:ال|%d8%a7%d9%84)?(?:حلقة|%d8%ad%d9%84%d9%82%d8%a9)-\d+)/?$""",
+        """-(?:ep\d+(?:-end)?|e\d+|(?:ال|%d8%a7%d9%84)?(?:حلقة|%d8%ad%d9%84%d9%82%d8%a9)-?\d+)(?:-[^\d/]{1,12})*/?$""",
         RegexOption.IGNORE_CASE
     )
 
@@ -95,15 +101,27 @@ class LodyProvider(private val prefs: SharedPreferences? = null) : MainAPI() {
     private fun seriesKeyOf(url: String): String = epSuffixRe.replace(url.trimEnd('/'), "")
 
     /**
-     * روابط الحلقات التي يمكن استنتاج قسم مسلسلها منها — أي لاحقة حلقة
-     * **رقمية** يدعمها الموقع. لاحقة «الحلقة-N» العربية وحدها مستبعدة:
-     * تلك روابط قسم (`…/category/<slug>/الحلقة-45`) وليست مواضيع، فلا
-     * معرّف لها في واجهة ووردبريس.
+     * ★ اكتشاف المسلسل من ترميز JSON-LD داخل صفحة الحلقة نفسها — بلا أي طلب
+     * إضافي. كل صفحة حلقة تُعلن مسلسلها صراحةً في مخطط Schema.org:
+     *     "about": { "@id": "https://lodynet.top/category/<slug>/#tvseries" }
+     * أما صفحة الفيلم فتحمل "@type":"Movie" ولا تحمل "#tvseries" إطلاقاً.
+     * قِيس ذلك على ستّ صفحات: أربع حلقات — بالصيغ -ep2 و-الحلقة-37 و-حلقة-126 —
+     * ظهر فيها الوسم، وفيلمان لم يظهر فيهما.
+     *
+     * وهو أوثق من تخمين شكل الرابط: البوابة السابقة كانت تقبل الصيغة اللاتينية
+     * `-epN` وحدها، فسقطت 17 من 23 بطاقة في «مضاف حديثا» إلى فرع الفيلم فظهرت
+     * أفلاماً. وأوثق أيضاً من مجرّد تجريد اللاحقة: صفحة
+     * `…/مسلسل-لهيب-الحقد-حلقة-126-مترجم-عربي` قسمها `…/category/لهيب-الحقد/`
+     * — أي لا يشبه رابط الحلقة أبداً.
      */
-    private val RESOLVABLE_EP_RE = Regex(
-        """-(?:ep\d+(?:-end)?|e\d+)(?:/|$)""",
-        RegexOption.IGNORE_CASE
+    private val tvSeriesIdRe = Regex(
+        "\"@id\"\\s*:\\s*\"(https?://[^\"]+/category/[^\"]*?)#tvseries\""
     )
+
+    /** رابط قسم المسلسل من JSON-LD، أو null إن كانت الصفحة فيلماً. */
+    private fun seriesCategoryFromJsonLd(html: String): String? =
+        tvSeriesIdRe.find(html)?.groupValues?.get(1)
+            ?.replace("\\/", "/")?.trimEnd('/')?.takeIf { it.isNotBlank() }?.plus("/")
 
     /**
      * يُكمل الروابط النسبية. مهم جداً: بحث القالب (RequestSearch.php) يعيد
@@ -314,9 +332,11 @@ class LodyProvider(private val prefs: SharedPreferences? = null) : MainAPI() {
             )
             if (title.isBlank()) continue
             val coverEl = a.selectFirst("[data-src], img, .NewlyCover")
+            // ★ الغلاف كان يُترك بلا `abs()` — و`data-src` يصل نسبياً أحياناً
+            // فينكسر. نُكمله هنا كما نُكمل الرابط تماماً.
             val cover = coverEl?.let {
-                it.attr("data-src").ifBlank { it.attr("src") }.ifBlank { null }
-            }
+                it.attr("data-src").ifBlank { it.attr("src") }
+            }?.let { abs(it) }?.ifBlank { null }
             res.add(RawCard(title, href, cover))
         }
         return res
@@ -425,8 +445,10 @@ class LodyProvider(private val prefs: SharedPreferences? = null) : MainAPI() {
                 val key = seriesKeyOf(url)
                 if (out.containsKey(key)) continue
                 val name = seriesNameOf(title)
-                val movie = isMovieTitle(name)
-                out[key] = cardOf(name, if (movie) url else key, cover)
+                // الرابط الحقيقي في الحالتين: `load()` صار يعرف المسلسل من
+                // صفحة الحلقة نفسها (JSON-LD)، فلا حاجة لرابط مجرّد قد يقع
+                // على صفحة الحلقة 1 أو على رابط غير موجود.
+                out[key] = cardOf(name, url, cover)
             }
             if (out.isNotEmpty()) return out.values.toList()
         } catch (e: Exception) {
@@ -461,42 +483,64 @@ class LodyProvider(private val prefs: SharedPreferences? = null) : MainAPI() {
     private fun isSeriesPage(html: String): Boolean =
         catIdRe.containsMatchIn(html) && !html.contains("ServersWatch")
 
-    override suspend fun load(url: String): LoadResponse? {
-        val doc = try {
-            app.get(url, headers = mapOf("User-Agent" to UA)).document
-        } catch (_: Exception) { null } ?: return null
+    /** غلاف الصفحة (`og:image`) — يُمرَّر كمرشّح غلاف لصفحة المسلسل. */
+    private fun ogImageOf(doc: Document): String? =
+        doc.selectFirst("meta[property='og:image']")?.attr("content")?.ifBlank { null }
 
+    override suspend fun load(url: String): LoadResponse? {
+        val resp = try {
+            app.get(url, headers = mapOf("User-Agent" to UA))
+        } catch (_: Exception) { null } ?: return null
+        val doc = resp.document
         val html = doc.html()
+        // بعد أي تحويل: الصفحة الفعلية هي التي نحتاجها.
+        val pageUrl = resp.url.ifBlank { url }
 
         // ---- مسلسل ----
-        // صفحة القسم (…/category/<slug>) هي صفحة المسلسل: لا تحمل h1،
-        // وحلقاتها روابط عادية بلاحقة «الحلقة-N» — لا class="ItemEpisode".
-        // لذلك نقرأها من واجهة ووردبريس التي تُعيد الحلقات كلها دفعة واحدة.
+        // صفحة القسم (…/category/<slug>) هي صفحة المسلسل: تحمل ترويسة ووردبريس
+        // و`og:title` باسم المسلسل، وحلقاتها تُقرأ من واجهة ووردبريس دفعة واحدة.
         if (isSeriesPage(html)) {
             val catId = catIdRe.find(html)?.groupValues?.get(1)
             if (catId != null) {
-                val res = loadSeries(url, catId, doc)
-                if (res != null) return res
+                loadSeries(pageUrl, catId, doc)?.let { return it }
             }
         }
 
-        // ---- مسلسل وصلنا من رابطه حلقة ----
-        // وهذا حال بطاقات «مضاف حديثاً»: رابط حلقة، لا رابط قسم. لا نستطيع
-        // قراءة صفحة القسم من هذا الرابط (تجريده يقع على صفحة الحلقة 1)،
-        // فيُستنتج قسم المسلسل من أقسام الموضوع عبر واجهة ووردبريس.
-        if (RESOLVABLE_EP_RE.containsMatchIn(url)) {
-            val catId = seriesCatFromEpisode(url)
-            if (catId != null) {
-                val catUrl = CAT + java.net.URLEncoder.encode(catId, "UTF-8") + "/"
-                Log.d(TAG, "'$url' -> series category $catId")
-                // صفحة القسم تُقرأ لواجهة ووردبريس (loadSeries) وتُستخدم
-                // أيضاً لاستخراج الاسم والغلاف بعيداً عن عنوان الحلقة.
-                val catDoc = try {
-                    app.get(catUrl, headers = mapOf("User-Agent" to UA)).document
-                } catch (_: Exception) { null }
-                val res = loadSeries(catUrl, catId, catDoc ?: doc)
-                if (res != null) return res
+        // ---- حلقة مسلسل وصلتنا من رابط حلقة ----
+        // وهذا حال بطاقات «مضاف حديثا»: رابطها حلقة لا قسم. الصفحة تُعلن
+        // مسلسلها في ترميز JSON-LD، فنأخذ **الرابط الصحيح** منه بلا تخمين.
+        var seriesUrl = seriesCategoryFromJsonLd(html)
+        var seriesId: String? = null
+        var seriesDoc: Document? = null
+        if (seriesUrl != null) {
+            seriesDoc = try {
+                app.get(seriesUrl, headers = mapOf("User-Agent" to UA)).document
+            } catch (_: Exception) { null }
+            seriesId = seriesDoc?.let { catIdRe.find(it.html())?.groupValues?.get(1) }
+            if (seriesId == null) {
+                Log.w(TAG, "json-ld series '$seriesUrl' had no category id")
+                seriesUrl = null
             }
+        }
+
+        // احتياط (إن غاب الترميز أو تعذّرت قراءة القسم): مصفوفة أقسام الموضوع
+        // عبر واجهة ووردبريس. أغلى بطلبين فلا يعمل إلا عند الحاجة.
+        if (seriesUrl == null) {
+            val ref = seriesCatFromEpisode(pageUrl)
+            if (ref != null) {
+                seriesUrl = ref.link
+                seriesId = ref.id
+                seriesDoc = try {
+                    app.get(ref.link, headers = mapOf("User-Agent" to UA)).document
+                } catch (_: Exception) { null }
+            }
+        }
+
+        if (seriesUrl != null && seriesId != null) {
+            Log.d(TAG, "'$pageUrl' -> series '$seriesUrl' (#$seriesId)")
+            // صفحة الحلقة تُمرَّر كمرشّح غلاف: صفحة القسم غالباً بلا og:image.
+            loadSeries(seriesUrl, seriesId, seriesDoc ?: doc, coverHint = ogImageOf(doc))
+                ?.let { return it }
         }
 
         // ---- فيلم / حلقة مفردة ----
@@ -506,15 +550,14 @@ class LodyProvider(private val prefs: SharedPreferences? = null) : MainAPI() {
         )
         if (title.isBlank()) return null
 
-        val poster = doc.selectFirst("meta[property='og:image']")?.attr("content")
-            ?.ifBlank { null }
+        val poster = ogImageOf(doc)
             ?: doc.selectFirst("img[src*='/wp-content/uploads/']")?.attr("data-src")
                 ?.ifBlank { null }
 
         val plot = doc.selectFirst("[class*=Story], [class*=story], [class*=description], [class*=Details]")
             ?.text()?.takeIf { it.length > 20 }?.take(700)
 
-        return newMovieLoadResponse(seriesNameOf(title), url, TvType.Movie, url) {
+        return newMovieLoadResponse(seriesNameOf(title), pageUrl, TvType.Movie, pageUrl) {
             this.posterUrl = poster
             this.plot = plot
         }
@@ -536,8 +579,13 @@ class LodyProvider(private val prefs: SharedPreferences? = null) : MainAPI() {
      *
      * نتحقق من الأب أيضاً — لا نثق بالمعرّف وحده — حتى لا يُبنى مسلسل وهمي
      * من أي رابط في حال تغيّر الموقع.
+     *
+     * ونُعيد **رابط القسم الحقيقي** لا معرّفه وحده: بناؤه يدوياً بـ
+     * `/category/<رقم>/` يعطي **404** (قِيس)، الصفحة الحقيقية `/category/<slug>/`.
      */
-    private suspend fun seriesCatFromEpisode(url: String): String? {
+    private data class SeriesRef(val id: String, val link: String)
+
+    private suspend fun seriesCatFromEpisode(url: String): SeriesRef? {
         val slug = java.net.URLDecoder.decode(
             url.trimEnd('/').substringAfterLast('/'), "UTF-8"
         ).ifBlank { return null }
@@ -565,16 +613,19 @@ class LodyProvider(private val prefs: SharedPreferences? = null) : MainAPI() {
         if (catIds.isEmpty()) return null
 
         for (cid in catIds) {
-            val parent = try {
+            val link = try {
                 val c = app.get(
-                    "$WP_CATS/$cid?_fields=parent",
+                    "$WP_CATS/$cid?_fields=parent,link",
                     headers = mapOf("User-Agent" to UA)
                 ).text
-                org.json.JSONObject(c).optInt("parent", 0)
+                val o = org.json.JSONObject(c)
+                // الأب غير صفري ⇒ قسم مسلسل (الأفلام كل أقسامها رئيسية).
+                if (o.optInt("parent", 0) == 0) continue
+                abs(o.optString("link", "").replace("\\/", "/").trim())
             } catch (_: Exception) {
-                0
+                continue
             }
-            if (parent != 0) return cid.toString()
+            if (link.isNotBlank()) return SeriesRef(cid.toString(), link)
         }
         return null
     }
@@ -588,7 +639,12 @@ class LodyProvider(private val prefs: SharedPreferences? = null) : MainAPI() {
      * طويلة حقاً (سر الحنين 150، أمْنِية وإن تحققت 899)، فبطلب واحد كانت
      * الحلقات 1–50 تسقط من مسلسل من 150 حلقة. نتابع الصفحات حتى النقص.
      */
-    private suspend fun loadSeries(url: String, catId: String, doc: Document): LoadResponse? {
+    private suspend fun loadSeries(
+        url: String,
+        catId: String,
+        doc: Document,
+        coverHint: String? = null
+    ): LoadResponse? {
         val baseTitle = clean(
             doc.selectFirst("meta[property='og:title']")?.attr("content").orEmpty()
                 .ifBlank { doc.selectFirst("title")?.text().orEmpty().substringBefore(" - ") }
@@ -648,13 +704,10 @@ class LodyProvider(private val prefs: SharedPreferences? = null) : MainAPI() {
 
         val ordered = uniq.sortedWith(compareBy({ it.num ?: Int.MAX_VALUE }, { it.title }))
 
-        // غلاف المسلسل: صفحة القسم بلا og:image، لكن بطاقة المسلسل نفسها
-        // مضمّنة فيها كـ ItemNewly باسم مطابق (‎…/uploads/…/هوس-220x220.webp).
-        var poster: String? = doc.selectFirst("meta[property='og:image']")
-            ?.attr("content")?.ifBlank { null }
-        // حين لا تكون `doc` صفحةَ القسم (بطاقةُ «مضاف حديثاً» رابطُ حلقة،
-        // و`loadSeries` قد تُمرَّر صفحة الحلقة) يكون og:image صورةَ الحلقة،
-        // ولا تصلح غلافاً للمسلسل. نستبعدها بمطابقة الاسم.
+        // غلاف المسلسل: صفحة القسم بلا og:image فعلاً (قِيس)، فنجمع المرشّحات
+        // ونرتّبها بمطابقة الاسم أولاً ثم نقبل أول صورة — لأن أسماء ملفات
+        // الموقع رخوة (غلاف «ورود و ذنوب» ملفّه `ورد-وذنوب.webp` فلا يجتاز
+        // مطابقة الاسم فيصير الغلاف null بلا داعٍ).
         val want = name.replace(Regex("""\s+"""), " ").trim()
         val posterLooksRight = { u: String? ->
             if (u.isNullOrBlank()) false
@@ -665,23 +718,28 @@ class LodyProvider(private val prefs: SharedPreferences? = null) : MainAPI() {
                     base.contains(stem.takeLast(8))
             }
         }
-        if (!posterLooksRight(poster)) poster = null
-        if (poster == null) {
-            poster = rawCards(doc).firstOrNull {
-                seriesNameOf(it.title).replace(Regex("""\s+"""), " ").trim() == want &&
-                    !it.cover.isNullOrBlank()
-            }?.cover
-        }
-        // احتياطي أخير: أي صورة في مجلد الرفع تحمل اسم المسلسل.
-        if (poster == null && want.length > 4) {
-            poster = Regex("""(https?://lodynet\.top/wp-content/uploads/[^"'\s)]+)""")
+
+        val candidates = mutableListOf<String>()
+        doc.selectFirst("meta[property='og:image']")?.attr("content")
+            ?.ifBlank { null }?.let { candidates.add(it) }
+        coverHint?.ifBlank { null }?.let { candidates.add(it) }
+        // غلاف بطاقة المسلسل نفسه مضمّن في الصفحة كـ ItemNewly باسم مطابق.
+        rawCards(doc).firstOrNull {
+            seriesNameOf(it.title).replace(Regex("""\s+"""), " ").trim() == want
+        }?.cover?.ifBlank { null }?.let { candidates.add(it) }
+        // وأي صورة في مجلد الرفع تحمل اسم المسلسل.
+        if (want.length > 4) {
+            Regex("""(https?://lodynet\.top/wp-content/uploads/[^"'\s)]+)""")
                 .findAll(doc.html())
                 .map { it.groupValues[1] }
                 .firstOrNull { u ->
                     val base = java.net.URLDecoder.decode(u.substringAfterLast('/'), "UTF-8")
                     base.contains(want.replace("مسلسل ", "").trim().take(6))
-                }
+                }?.let { candidates.add(it) }
         }
+
+        val poster: String? = candidates.firstOrNull { posterLooksRight(it) }
+            ?: candidates.firstOrNull { it.isNotBlank() }
 
         val episodes = ordered.map { e ->
             newEpisode(e.url) {
@@ -902,14 +960,30 @@ class LodyProvider(private val prefs: SharedPreferences? = null) : MainAPI() {
         }
 
         // 2) مُستخرِجات CloudStream المدمجة (voe/mixdrop/okru/uqload/doodstream…)
-        var resolved = 0
+        //    ★ لا نُمرّرها كما هي: المُستخرِج المدمج يُسمّي الرابط باسمه وحده
+        //    («Voe»، «Okru») بلا وسم الصيغة، فتظهر في المشغّل روابط بلا نوع
+        //    (mp4/hls/dash) بينما روابط megamax وLody Plus تحمله — وهذا سبب
+        //    «بعض الروابط لا يظهر نوعها». نُعيد تغليفها بالوسم نفسه.
+        //    callback الـ loadExtractor ليس suspend لذا نجمع أولاً ثم نُعيد
+        //    الإرسال خارجه (newExtractorLink مُعلَّمة suspend).
+        val fromBuiltIn = mutableListOf<ExtractorLink>()
         try {
-            loadExtractor(embedUrl, referer, subtitleCallback) { link ->
-                resolved++
-                callback.invoke(link)
-            }
+            loadExtractor(embedUrl, referer, subtitleCallback) { l -> fromBuiltIn.add(l) }
         } catch (e: Exception) {
             Log.d(TAG, "$serverName: built-in extractor miss (${e.message})")
+        }
+        var resolved = 0
+        for (l in fromBuiltIn) {
+            // نستبعد صفحة HTML صريحة فقط (‎.html/htm/php) — المشغّل يعطي فيها
+            // 2004. ولا نستعمل isDeadUrl هنا: قاعدتها «ينتهي بـ/» تصلح
+            // لروابط embeds لكنها قد تُسقط رابط وسائط حقيقي بلا امتداد.
+            val path = l.url.substringBefore('?').substringBefore('#').lowercase()
+            if (path.endsWith(".html") || path.endsWith(".htm") || path.endsWith(".php")) {
+                Log.w(TAG, "$serverName: HTML page from built-in extractor — skipped")
+                continue
+            }
+            callback.invoke(tagLink(l, serverName))
+            resolved++
         }
         if (resolved > 0) {
             Log.d(TAG, "$serverName: resolved by built-in extractor ($resolved)")
@@ -1111,5 +1185,27 @@ class LodyProvider(private val prefs: SharedPreferences? = null) : MainAPI() {
                 )
             }
         )
+    }
+
+    /**
+     * ★ يُعيد تغليف رابطٍ جاء من مُستخرِج مدمج ليحمل **اسم الخادم ووسم
+     * صيغته** معاً. المُستخرِج المدمج يُسمّي الرابط باسم المضيف وحده («Voe»)
+     * بلا وسم، فتظهر روابطه في المشغّل بلا نوع بينما روابط megamax تحمله.
+     * نحفظ الجودة والترويسات التي أعادها المُستخرِج كما هي.
+     */
+    private suspend fun tagLink(l: ExtractorLink, serverName: String): ExtractorLink {
+        val host = Regex("""https?://(?:www\.)?([^/?#]+)""")
+            .find(l.url)?.groupValues?.get(1)?.ifBlank { null } ?: "server"
+        val label = serverName.ifBlank { l.name.ifBlank { host } } + " · " + host
+        return newExtractorLink(
+            source = "لودي نت",
+            name = FormatTag.tagged(label, l.url, l.type),
+            url = l.url,
+            type = l.type
+        ) {
+            this.quality = l.quality
+            this.referer = l.referer
+            this.headers = l.headers
+        }
     }
 }
