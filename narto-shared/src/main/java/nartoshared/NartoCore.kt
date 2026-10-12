@@ -80,7 +80,11 @@ internal val DEAD_HOST_PATTERNS = listOf("montagehub")
 
 // Dead verdicts, with a short TTL. joyreels hands out signed tokens that go stale fast, so
 // remembering the answer keeps a replay from re-spending the whole probe timeout on it.
-internal val deadLinkCache = LinkedHashMap<String, Long>()
+//
+// Concurrent: probes now run in parallel (emitBatch), so this map has several writers at once.
+// A plain LinkedHashMap corrupts under that (lost entries, and a resize can spin); a
+// ConcurrentHashMap cannot, and its per-key reads/writes are exactly the shape used here.
+internal val deadLinkCache = java.util.concurrent.ConcurrentHashMap<String, Long>()
 internal const val DEAD_LINK_TTL_MS = 5 * 60 * 1000L
 
 // Narto playback API. Narto aggregates short-drama from MANY backends (shortmax, NetShort,

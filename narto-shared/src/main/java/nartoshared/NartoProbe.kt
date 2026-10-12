@@ -32,7 +32,22 @@ internal class Probe(private val referer: String) {
     var deadByVerdict: Boolean = false
 
     fun isAlive(u: String): Boolean {
-        val host = u.substringAfter("//").substringBefore("/").lowercase()
+        val (alive, why, verdict) = probeLink(u)
+        // isAlive runs on several threads at once: emitBatch and the multi_resolutions block
+        // both fan out over one Probe. lastWhy/deadByVerdict are single-slot state a caller
+        // reads immediately after a false verdict, so every write must be atomic and visible —
+        // a torn or invisible verdict is exactly how the last-resort branch ends up emitting a
+        // link the probe just rejected. (Last-writer-wins for the reason string is inherent to
+        // a shared slot; the flag itself is only ever raised, as before.)
+        synchronized(this) {
+            lastWhy = why
+            if (verdict) deadByVerdict = true
+        }
+        return alive
+    }
+
+    // The actual probe, with NO shared state: returns (alive, why, isVerdict).
+    private fun probeLink(u: String): Triple<Boolean, String, Boolean> {
         // Probe every third-party host too, not just narto-drama.com. montagehub (sulao.
         // montagehub.xyz) is genuinely dead (NXDOMAIN) but is NOT on narto-drama.com, so the old
         // `return true` for anything non-narto handed the player a URL that can never play.
@@ -51,10 +66,8 @@ internal class Probe(private val referer: String) {
         val useRange = probeBody
         deadLinkCache[u]?.let { at ->
             if (System.currentTimeMillis() - at < DEAD_LINK_TTL_MS) {
-                lastWhy = "cached dead"
                 // A remembered verdict is still a verdict, not an inability to tell.
-                deadByVerdict = true
-                return false
+                return Triple(false, "cached dead", true)
             }
         }
         return try {
@@ -74,36 +87,34 @@ internal class Probe(private val referer: String) {
             }
             val code = httpConn.responseCode
             if (code !in 200..399) {
-                lastWhy = "HTTP $code"
-                deadByVerdict = true
                 deadLinkCache[u] = System.currentTimeMillis()
-                return false
+                return Triple(false, "HTTP $code", true)
             }
             if (probeBody) {
                 val body = httpConn.inputStream?.bufferedReader()?.use { it.readText() } ?: ""
                 val expired = body.contains("link expired") || body.contains("invalid token")
                 if (expired) {
-                    lastWhy = "body says link expired"
-                    deadByVerdict = true
                     deadLinkCache[u] = System.currentTimeMillis()
+                    Triple(false, "body says link expired", true)
+                } else {
+                    Triple(true, "", false)
                 }
-                !expired
             } else {
-                true
+                Triple(true, "", false)
             }
         } catch (e: Exception) {
             // A dead TLS cert lands here as SSLHandshakeException — naming it distinguishes a
             // cert problem from a generic "dead token".
-            lastWhy = "${e.javaClass.simpleName}: ${e.message?.take(60) ?: "-"}"
+            val why = "${e.javaClass.simpleName}: ${e.message?.take(60) ?: "-"}"
             // Split the two exception families, because they mean opposite things.
             // A BAD CERTIFICATE is a verdict about the link: the bytes are there but every strict
             // client, ExoPlayer included, refuses it, so emitting it guarantees "Source error".
             // A DNS/TIMEOUT failure says nothing about the link and must not be treated as a
             // verdict — that case exists to let the last-resort branch hand the player a
             // possibly-live URL.
-            if (e is javax.net.ssl.SSLHandshakeException) deadByVerdict = true
+            val verdict = e is javax.net.ssl.SSLHandshakeException
             deadLinkCache[u] = System.currentTimeMillis()
-            false
+            Triple(false, why, verdict)
         }
     }
 }

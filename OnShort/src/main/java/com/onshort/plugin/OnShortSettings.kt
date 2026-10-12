@@ -78,6 +78,10 @@ class OnShortSettingsBottomSheet(private val prefs: SharedPreferences) : BottomS
         // إظهار/إخفاء صفوف المنصّات في الواجهة الرئيسية.
         const val KEY_SHOW_PLATFORMS = "os_show_platforms"    // Boolean — المفتاح الرئيسي، الافتراضي true
 
+        // حدّ عدد صفوف المنصّات المعروضة. سبب وجوده: CloudStream لا يرسم الواجهة حتى
+        // ينتهي *آخر* صفّ، فكل صفّ يضيف زمنًا. "all" = كل المنصّات (الافتراضي).
+        const val KEY_ROW_LIMIT = "os_row_limit"              // String: "all" | "6" | "4" | "2"
+
         // مفتاح إظهار/إخفاء منصّة بعينها: os_platform_<slug>.
         fun platformKey(slug: String) = "os_platform_$slug"
 
@@ -245,7 +249,7 @@ class OnShortSettingsBottomSheet(private val prefs: SharedPreferences) : BottomS
                 rowsCategory.addPreference(p)
             }
 
-            // — المنصّات: مفتاح رئيسي لكل الصفوف، ثم مفتاح لكل منصّة على حدة —
+            // — المنصّات: مفتاح رئيسي لكل الصفوف، ثم حدّ العدد، ثم مفتاح لكل منصّة —
             val platCat = PreferenceCategory(ctx)
             platCat.title = "أقسام المنصّات في الواجهة الرئيسية"
             preferenceScreen.addPreference(platCat)
@@ -257,6 +261,25 @@ class OnShortSettingsBottomSheet(private val prefs: SharedPreferences) : BottomS
                 setDefaultValue(true)
             }
             platCat.addPreference(showPlatformsPref)
+
+            // حدّ عدد الصفوف — أسرع رافعة لسرعة ظهور الواجهة الرئيسية، لأنّ التطبيق
+            // لا يرسمها حتى ينتهي آخر صفّ. «الكل» يبقي السلوك كما هو بلا تغيير.
+            val rowLimitPref = ListPreference(ctx).apply {
+                key = KEY_ROW_LIMIT
+                title = "عدد صفوف المنصّات المعروضة"
+                summary = "أقل صفوف = ظهور أسرع للواجهة الرئيسية (المنصّات كلها متاحة من الأعلى)"
+                summaryProvider = ListPreference.SimpleSummaryProvider.getInstance()
+                entryValues = arrayOf("all", "8", "6", "4", "2")
+                entries = arrayOf(
+                    "كل المنصّات (افتراضي)",
+                    "أول 8 منصّات",
+                    "أول 6 منصّات",
+                    "أول 4 منصّات",
+                    "أول منصّتين"
+                )
+                setDefaultValue("all")
+            }
+            platCat.addPreference(rowLimitPref)
 
             for ((slug, label) in PLATFORMS) {
                 val p = SwitchPreferenceCompat(ctx).apply {
@@ -282,6 +305,7 @@ class OnShortSettingsBottomSheet(private val prefs: SharedPreferences) : BottomS
                         remove(KEY_MOSALSALY_ENABLED)
                         remove(KEY_SUB_LANGS)
                         remove(KEY_SHOW_PLATFORMS)
+                        remove(KEY_ROW_LIMIT)
                         GENERAL_ROWS.forEach { (s, _) -> remove(rowKey(s)) }
                         PLATFORMS.forEach { (s, _) -> remove(platformKey(s)) }
                     }.apply()

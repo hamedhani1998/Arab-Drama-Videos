@@ -120,9 +120,14 @@ class OnShortProvider(private val prefs: SharedPreferences? = null) : MainAPI() 
             }
             .map { (slug, label, _) -> slug to label }
         if (master) {
-            shown += platformRows.filter { (slug, _) ->
+            // حدّ عدد الصفوف: CloudStream لا يرسم الواجهة حتى ينتهي آخر صفّ، فعدد الصفوف
+            // هو رافعة السرعة الأولى. "all" = كل المنصّات (الافتراضي، بلا تغيير).
+            val limit = prefs?.getString(OnShortSettingsBottomSheet.KEY_ROW_LIMIT, "all")
+            val max = limit?.trim()?.toIntOrNull()
+            val rows = platformRows.filter { (slug, _) ->
                 prefs?.getBoolean(OnShortSettingsBottomSheet.platformKey(slug), true) != false
             }
+            shown += if (max != null && max > 0) rows.take(max) else rows
         }
         return shown.ifEmpty { generalRows.map { (slug, label, _) -> slug to label } }
     }
@@ -133,6 +138,19 @@ class OnShortProvider(private val prefs: SharedPreferences? = null) : MainAPI() 
     // ذاكرة تخزين مؤقت للبحث: الاستعلامات المتكررة تعود فورًا دون لمس السيرفر البطيء/المحدود.
     // خريطة query -> (millis, النتائج). نُعيده فقط إذا كان قديمًا بأقل من 5 دقائق.
     @Volatile private var searchCache: MutableMap<String, Pair<Long, List<SearchResponse>>>? = null
+
+    // ★ ذاكرة صفوف الواجهة الرئيسية: "slug|page" -> (millis, البطاقات).
+    //
+    // سببه مقيس على الجهاز 2026-10-12: CloudStream يستدعي getMainPage لكل صفوف mainPage
+    // عند كل رسم، ولا يرسم الواجهة حتى ينتهي *آخر* صفّ — وأبطأ صفّ عندنا 37.9ث
+    // (microdrama)، وmoborels تجاوز المهلة عند 23.9ث. فبلا ذاكرة كان كل فتح للسجلّ
+    // يعيد جلب 19 صفحة من سيرفر بطيء/مقيّد. الآن الرسم الثاني (وإعادة الرسم، والعودة
+    // من شاشة أخرى) فوريّ من الذاكرة.
+    //
+    // عند فشل جلبٍ جديد نُعيد آخر نسخة ناجحة بدل إفراغ الصفّ — فلا تختفي صفوفٌ كانت
+    // ظاهرة لأنّ السيرفر تعثّر لحظةً (نفس درس «فشل الجلب يُفرغ كل شيء»).
+    private val rowCache = java.util.concurrent.ConcurrentHashMap<String, Pair<Long, List<SearchResponse>>>()
+    private val ROW_CACHE_TTL_MS = 10 * 60 * 1000L
     // خيط الجلب الخلفي الحالي — حتى ينتظر loadLinks عليه بدلًا من إعادة جلب الصفحة البطيئة
     @Volatile private var prefetchThread: Thread? = null
 
@@ -242,16 +260,40 @@ class OnShortProvider(private val prefs: SharedPreferences? = null) : MainAPI() 
             val slug = request.data
             val isGeneral = generalRows.any { it.first == slug }
             val p = maxOf(page, 1)
+            val ckey = "$slug|$p"
+
+            // ١) ذاكرة طازجة → فورًا (هذا ما يجعل إعادة فتح الواجهة سريعة)
+            val hit = rowCache[ckey]
+            if (hit != null && System.currentTimeMillis() - hit.first < ROW_CACHE_TTL_MS) {
+                logD("OnShort.getMainPage CACHE hit '$ckey' cards=${hit.second.size}")
+                return newHomePageResponse(request.name, hit.second)
+            }
+
             val url = if (isGeneral) {
                 if (p == 1) "$ONS_MAIN/$slug/" else "$ONS_MAIN/$slug/page/$p/"
             } else {
                 if (p == 1) "$ONS_MAIN/platform/$slug/" else "$ONS_MAIN/platform/$slug/page/$p/"
             }
-            val resp = getWithRetry(url, mainUrl, headers()) ?: return null
+            val t0 = System.currentTimeMillis()
+            val resp = getWithRetry(url, mainUrl, headers())
             // العامّ: platform=null فتأتي المنصة من شارة كل بطاقة.
-            val items = parseListingHtml(resp, java.util.HashSet(), if (isGeneral) null else slug)
-            if (items.isEmpty()) null
-            else newHomePageResponse(request.name, items)
+            val items = if (resp == null) emptyList()
+                else parseListingHtml(resp, java.util.HashSet(), if (isGeneral) null else slug)
+
+            if (items.isEmpty()) {
+                // ٢) الفشل/الفراغ لا يُفرغ الصفّ: أَعِد آخر نسخة ناجحة (مهما كان عمرها).
+                //    صفٌّ كان ظاهرًا لا يجب أن يختفي لأنّ السيرفر تعثّر لحظة.
+                if (hit != null && hit.second.isNotEmpty()) {
+                    logE("OnShort.getMainPage STALE fallback '$ckey' cards=${hit.second.size} (fetch empty/failed)")
+                    return newHomePageResponse(request.name, hit.second)
+                }
+                logE("OnShort.getMainPage '$ckey' empty and no cache (fetchMs=${System.currentTimeMillis() - t0})")
+                return null
+            }
+
+            rowCache[ckey] = System.currentTimeMillis() to items
+            logD("OnShort.getMainPage FETCH '$ckey' cards=${items.size} fetchMs=${System.currentTimeMillis() - t0}")
+            newHomePageResponse(request.name, items)
         } catch (e: Exception) { null }
     }
 
@@ -1052,9 +1094,17 @@ class OnShortProvider(private val prefs: SharedPreferences? = null) : MainAPI() 
             //  - "Media refresh failed: FlexTV ALL-EPISODES failed" (فاختبار حي 2026-09: HTTP 424)
             //    = مصدر FlexTV الأصلي ينكسر لكن simulator يجدب "ALL-EPISODES" ويصدم 424 — لا بدّ
             //    جودات ولا روابط وسيطة. معاملةٌ نهائية: أوقف فورًا بدل 4 محاولات + fallback بطيء.
+            //  - "Media refresh failed: cURL error 28: Operation timed out after 18001 milliseconds"
+            //    (قِسناه على الجهاز 2026-10-12: HTTP 424 بعد 30.5ث). هذه الحالة كانت تتسلّل من
+            //    الفحص أعلاه لأنّ الرسالة لا تحمل "HTTP 4xx" — فأُعيدت المحاولة 4 مرّات
+            //    ≈122 ثانية على خادم ينتهي مهلة الـcURL عنده عند 18ث. المهلة من جهة المصدر
+            //    ليست عارضة: نفس المسار يُعاد بلا تغيير في المصدر. أما قيمتها فنهائية هنا.
             val notHandled = msg.contains("REST bridge") || msg.contains("not handled")
             val flextvDead = msg.contains("flextv") && msg.contains("ALL-EPISODES") && msg.contains("failed")
-            val refreshFail = msg.contains("refresh failed") && (Regex("""HTTP\s+[45]\d\d""").containsMatchIn(msg) || flextvDead)
+            // مهلة cURL من جهة المصدر (28 = Operation timed out) ¬ نفس معنى HTTP 5xx: المصدر لا يجيب.
+            val curlTimeout = msg.contains("cURL error 28") || msg.contains("Operation timed out")
+            val refreshFail = msg.contains("refresh failed") &&
+                (Regex("""HTTP\s+[45]\d\d""").containsMatchIn(msg) || flextvDead || curlTimeout)
             // رفضٌ نهائي حقيقي = المزود مرفوض من الوسيط (REST bridge/not handled) أو مصدره
             // معطّل نهائيًا (Media refresh failed + HTTP 5xx/424/FlexTV). هذه لا جدوى من إعادتها.
             val permanentReject = notHandled || refreshFail

@@ -7,9 +7,6 @@ import com.fasterxml.jackson.databind.ObjectMapper
 import com.fasterxml.jackson.module.kotlin.registerKotlinModule
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
-import kotlinx.coroutines.async
-import kotlinx.coroutines.awaitAll
-import kotlinx.coroutines.coroutineScope
 import nartoshared.UA
 import nartoshared.loadNartoLinks
 import nartoshared.NartoFetch
@@ -181,17 +178,15 @@ class EdgeNartoProvider(private val prefs: SharedPreferences? = null) : MainAPI(
         return try {
             val isSuggest = request.data == SUGGEST_ROW
             val q = if (isSuggest) "" else request.data.trim()
-            // Fire the OTHER visible rows' feeds in parallel while the requested row loads, so
-            // tab-hopping hits the cache instead of re-fetching a 4-6s /search page. Hidden rows
-            // are never warmed (that was wasted network on rows the user can't see).
-            val warm = coroutineScope {
-                val targets = visibleRows().map { it.first }.filter { it != request.data }
-                targets.map { d ->
-                    async { if (d == SUGGEST_ROW) fetchHomeFeed() else fetchSearch(d.trim()) }
-                }.awaitAll()
-            }
-            android.util.Log.e("EdgeNarto", "getMainPage q=$q warm=${warm.count { it != null }}")
 
+            // ★ No warm, no waiting on the other rows.
+            //
+            // This used to awaitAll() every visible row before it even started the requested
+            // row's fetch, so the first paint waited on the SLOWEST row. And CloudStream itself
+            // calls getMainPage for every row of mainPage at once on each render — so the warm
+            // asked the slow server for the same pages twice (measured on device: a 37.9 s row,
+            // with the home screen painted only after it). Each call now fetches its own row
+            // immediately; searchCache/homeFeedCache keep tab-hops and re-renders instant.
             var html = if (isSuggest) fetchHomeFeed() else fetchSearch(q)
             var fromFallback = false
             if (html == null || parseSearchItems(html).isEmpty()) {

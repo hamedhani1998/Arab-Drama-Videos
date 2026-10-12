@@ -174,6 +174,40 @@ internal suspend fun loadNartoLinks(
             emitNow(u, label, q, apiIsHls)
         }
 
+        // فحص مرشّحين *بالتوازي* ثم تسجيلهم بترتيب القائمة المكتوبة.
+        //
+        // المسبار يسلسل رحلاته، ومع مهلة 7 ثوانٍ صار كل مرشّح ميت يكلّف 7ث كاملة قبل أن
+        // يُجرَّب التالي — وهي كلفة تظهر للمستخدم كتأخّر في عرض السيرفرات. الرحلات مستقلّة
+        // تمامًا (طلبٌ لكل رابط بلا حالة مشتركة)، فتُفحص معًا، وترتيب التسجيل يبقى كما هو.
+        suspend fun emitBatch(
+            cands: List<Triple<String, String, String>>,
+            hintFor: (String) -> Boolean? = { null },
+        ) {
+            val fresh = cands.filter { (u, _, _) ->
+                if (u.isBlank() || u in emitted) return@filter false
+                val host = u.substringAfter("//").substringBefore("/").substringBefore(":").lowercase()
+                if (DEAD_HOST_PATTERNS.any { host.contains(it) }) {
+                    skippedDead++
+                    android.util.Log.e(tag, "emitBatch SKIP dead host $host")
+                    return@filter false
+                }
+                true
+            }
+            if (fresh.isEmpty()) return
+            val verdicts = coroutineScope {
+                fresh.map { (u, _, _) -> async(Dispatchers.IO) { probe.isAlive(u) } }.awaitAll()
+            }
+            for ((i, c) in fresh.withIndex()) {
+                val (u, label, q) = c
+                if (!verdicts[i]) {
+                    skippedDead++
+                    android.util.Log.e(tag, "emitBatch SKIP dead link $u ($label) why=${probe.lastWhy}")
+                    continue
+                }
+                emitNow(u, label, q, hintFor(u))
+            }
+        }
+
         // Decode a proxy ("/e/m/{jwt}") into the real signed src the provider intended. The src is
         // a normal HLS host (akamai-static.shorttv.live, video-v6.mydramawave.com, ...) — emitting
         // that host directly avoids the nested-relative-proxy infinite spin.
@@ -182,37 +216,41 @@ internal suspend fun loadNartoLinks(
             // ★ «إظهار رابط كامل» = مفعّل افتراضياً، أي سلوك اليوم حرفياً. فقط حين يُطفئه
             //   المستخدم نتخطّى بثّ رابط «كامل» — ولا نلمس روابط الجودات.
             val showFull = prefs?.getBoolean(showFullKey, true) != false
+            val isAkamai = src.contains("akamai-static.shorttv.live")
+            // المرشّحون بترتيب البثّ نفسه: «كامل» أولاً ثم الجودات تنازلياً — تُفحص كلها
+            // معاً ثم تُسجَّل بهذا الترتيب (انظر emitBatch).
+            val cands = mutableListOf<Triple<String, String, String>>()
             if (!src.contains("/e/m/") && showFull) {
                 // If the proxy resolves to an akamai shorttv master, its segments are
                 // `main/segment-N.ts` WITHOUT the auth_key → the raw master 403s mid-play. The
                 // proxy re-wraps each segment as /e/s/{jwt} (with auth), so for akamai the SAFE
                 // link is the proxy itself, not the raw src.
-                if (src.contains("akamai-static.shorttv.live")) {
-                    emit(proxyUrl, "كامل", "480p")
-                } else {
-                    emit(src, "كامل", proxyQuality(src))
-                }
+                if (isAkamai) cands.add(Triple(proxyUrl, "كامل", "480p"))
+                else cands.add(Triple(src, "كامل", proxyQuality(src)))
             }
             // Derive the sibling qualities when the URL still carries `{uuid}_{q}/main.m3u8`.
             // MEASURED 2026-10-02: shortmax no longer uses this shape — it is now
             // `/{token}/main.m3u8` with no `_{q}` and no query, so this regex does not match and
-            // we return below. That is harmless: shortmax's own qualities arrive as distinct
+            // we emit no variants. That is harmless: shortmax's own qualities arrive as distinct
             // signed tokens in multi_resolutions and are emitted verbatim, each labelled from the
             // API's own `resolution` field. This block still serves any other backend that keeps
             // the older shape.
-            val mm = Regex("""(.+?)_(\d{3,4})(?:p)?/main\.m3u8(\?.*)""").find(src) ?: return
             // akamai raw variants would 403 on their auth-less segments — for akamai the proxy
-            // re-wrap (emitted above) is the ONLY safe link, so do NOT add raw variants.
-            if (src.contains("akamai-static.shorttv.live")) return
-            val base = mm.groupValues[1]             // .../hls/{uuid}
-            val query = mm.groupValues[3]            // ?auth_key=...
-            val baseQ = mm.groupValues[2].toIntOrNull() ?: 480
-            val ordered = listOf(1080, 720, 480).filter { it >= baseQ || it == 480 }
-                .sortedByDescending { it }
-            for (q in ordered) {
-                val url = "${base}_${q}/main.m3u8$query"
-                emit(url, "${q}p", "${q}p")
+            // re-wrap (candidate above) is the ONLY safe link, so do NOT add raw variants.
+            if (!isAkamai) {
+                val mm = Regex("""(.+?)_(\d{3,4})(?:p)?/main\.m3u8(\?.*)""").find(src)
+                if (mm != null) {
+                    val base = mm.groupValues[1]        // .../hls/{uuid}
+                    val query = mm.groupValues[3]       // ?auth_key=...
+                    val baseQ = mm.groupValues[2].toIntOrNull() ?: 480
+                    val ordered = listOf(1080, 720, 480).filter { it >= baseQ || it == 480 }
+                        .sortedByDescending { it }
+                    for (q in ordered) {
+                        cands.add(Triple("${base}_${q}/main.m3u8$query", "${q}p", "${q}p"))
+                    }
+                }
             }
+            emitBatch(cands)
         }
 
         // 1) "كامل" — prefer real CDN hosts over the /e/m/{jwt} proxy. A proxy's HLS has nested
@@ -228,48 +266,52 @@ internal suspend fun loadNartoLinks(
             .filter { it.isNotBlank() && isProxyUrl(it) }
             .distinct()
 
-        var directEmitted = 0
-        var directOk = 0
         // ★ «إظهار رابط كامل» — يُقرأ مرّة واحدة هنا: عند الإطفاء نتخطّى استخدام الروابط
-        //   المباشرة (لأن موضع بثّها موسوم «كامل»)؛ الافتراضي true = نفس حلقة اليوم حرفياً.
+        //   المباشرة (لأن موضع بثّها موسوم «كامل»)؛ الافتراضي true = نفس سلوك اليوم حرفياً.
         val showFull = prefs?.getBoolean(showFullKey, true) != false
-        for (u in if (showFull) directs else emptyList()) {
-            if (directEmitted >= 2) break
-            // On slow CDNs (shortmax-stream) a 1080 master's big segments drain the buffer as fast
-            // as it fills ("plays a bit then spins"). Prefer the 480 token so the default "كامل"
-            // starts smooth; the multi_resolutions emissions below still give 1080/720 to the
-            // quality picker.
-            //
-            // MEASURED 2026-10-11: cdn.narto-drama.com is ALIVE (JDK/openssl Mozilla handshake
-            // OK — only Windows-Python's OS store cried "expired"; removed from DEAD_HOST_PATTERNS).
-            // The OLD code swapped ANY direct whose host contains "cdn.narto-drama.com" for the
-            // LOWEST shortmax-stream token. On works whose multi_resolutions is [] that inserted
-            // NOTHING in place of the one working link (lms-lmhzwr / fkh-lgr), and the player got
-            // the montagehub play_url instead → perceived "no playback". Now: if the direct host
-            // is not the dead montagehub family, emit the direct AS IS and let the probe decide.
-            // The lowest-token substitution is kept ONLY for a direct that probes dead on a live
-            // CDN host (the probe itself now re-verifies a fresh token, and shortmax's own
-            // segments still need the smooth-start preference).
-            val shortmaxTokens = resp.multiResolutions.orEmpty()
-                .filter { it.streamUrl?.contains("shortmax-stream") == true && it.streamUrl.isNotBlank() }
-            // Emit the direct through the probe first — it refreshes/re-verifies a fresh token
-            // instead of judging from cache, so a live cdn direct is not falsely skipped.
-            val before = emitted.size
-            emit(u, "كامل", proxyQuality(u), apiHintFor(u))
-            val directAlive = emitted.size > before
-            if (!directAlive && shortmaxTokens.isNotEmpty() && !u.contains("/e/m/")) {
-                // The direct is dead but tokens exist — «كامل» becomes a token.
-                val picked = shortmaxTokens.minWithOrNull(compareBy { it.resolution ?: 1080 })?.streamUrl
-                val pickedQ = picked?.let { pu -> shortmaxTokens.firstOrNull { it.streamUrl == pu } }
-                    ?.let { qualityOfRes(it) }
-                val before2 = emitted.size
-                emit(picked ?: u, "كامل", pickedQ ?: proxyQuality(u), apiHintFor(picked ?: u))
-                if (emitted.size > before2) directOk++
-            } else if (directAlive) {
-                directOk++
-            }
-            directEmitted++
+        // On slow CDNs (shortmax-stream) a 1080 master's big segments drain the buffer as fast
+        // as it fills ("plays a bit then spins"). Prefer the 480 token so the default "كامل"
+        // starts smooth; the multi_resolutions emissions below still give 1080/720 to the
+        // quality picker.
+        //
+        // MEASURED 2026-10-11: cdn.narto-drama.com is ALIVE (JDK/openssl Mozilla handshake
+        // OK — only Windows-Python's OS store cried "expired"; removed from DEAD_HOST_PATTERNS).
+        // The OLD code swapped ANY direct whose host contains "cdn.narto-drama.com" for the
+        // LOWEST shortmax-stream token. On works whose multi_resolutions is [] that inserted
+        // NOTHING in place of the one working link (lms-lmhzwr / fkh-lgr), and the player got
+        // the montagehub play_url instead → perceived "no playback". Now: if the direct host
+        // is not the dead montagehub family, the direct is emitted AS IS and the probe decides.
+        // The lowest-token substitution is kept ONLY as a fallback when a direct probes dead on
+        // a live CDN host, so the "كامل" slot is still filled.
+        val shortmaxTokens = resp.multiResolutions.orEmpty()
+            .filter { it.streamUrl?.contains("shortmax-stream") == true && it.streamUrl.isNotBlank() }
+        // (url, label, quality) — نفس عقد emitBatch.
+        val pickToken = shortmaxTokens.minWithOrNull(compareBy { it.resolution ?: 1080 })?.let { tk ->
+            val pu = tk.streamUrl.orEmpty()
+            if (pu.isBlank()) null else Triple(pu, "كامل", qualityOfRes(tk))
         }
+
+        // ★ المرشّحون المباشرون يُفحصون معاً ثم يُسجَّلون بترتيب الأفضلية.
+        //
+        // كان كل مرشّح يمرّ بالمسبار وحده: على رابط ميت هذا يعني مهلة 7ث كاملة قبل أن
+        // يُجرَّب التالي — حتى 4 مهلٍ متتالية (28ث) في مسار «كامل» وحده، ويراها المستخدم
+        // تأخّراً في ظهور السيرفرات. الرحلات مستقلّة فيُفحص المرشّحون في وقت واحد، ويُسجَّل
+        // أول حيّ بترتيب القائمة (الأفضلية محفوظة كما هي). الترتيب: للمنحدر المباشر
+        // أقرب الرابطين مباشراً، ثم «كامل» من المنحدر الاحتياطي (أدنى توكين) — وكلاهما
+        // في موضع «كامل» الواحد (لا يُنتَج رابطان متساويان في الموضع، فسلوك اليوم محفوظ).
+        val directCands = mutableListOf<Triple<String, String, String>>()
+        if (showFull) {
+            val seenCands = mutableSetOf<String>()
+            for (u in directs.take(2)) {
+                if (seenCands.add(u)) directCands.add(Triple(u, "كامل", proxyQuality(u)))
+                // المنحدر الاحتياطي «كامل» من أدنى توكين — للرابط المباشر الميت على CDN حيّ.
+                if (pickToken != null && !u.contains("/e/m/") && seenCands.add(pickToken.first)) {
+                    directCands.add(pickToken)
+                }
+            }
+        }
+        emitBatch(directCands, hintFor = { apiHintFor(it) })
+        var directOk = directCands.count { it.first in emitted }
         if (directOk == 0 && showFull) {
             // MEASURED 2026-10-03: the API's direct token is frequently already 410, and the
             // quality list is NOT always populated (multi_resolutions is [] for many works). So

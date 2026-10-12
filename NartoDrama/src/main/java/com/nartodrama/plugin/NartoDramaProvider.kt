@@ -7,9 +7,6 @@ import com.fasterxml.jackson.databind.ObjectMapper
 import com.fasterxml.jackson.module.kotlin.registerKotlinModule
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
-import kotlinx.coroutines.async
-import kotlinx.coroutines.awaitAll
-import kotlinx.coroutines.coroutineScope
 import nartoshared.UA
 import nartoshared.loadNartoLinks
 import nartoshared.NartoFetch
@@ -184,17 +181,15 @@ class NartoDramaProvider(private val prefs: SharedPreferences? = null) : MainAPI
         return try {
             val isSuggest = request.data == SUGGEST_ROW
             val q = if (isSuggest) "" else request.data.trim()
-            // Fire the OTHER visible rows' feeds in parallel while the requested row loads, so
-            // tab-hopping hits the cache instead of re-fetching a 4-6s /search page. Hidden rows
-            // are never warmed (that was wasted network on rows the user can't see).
-            val warm = coroutineScope {
-                val targets = visibleRows().map { it.first }.filter { it != request.data }
-                targets.map { d ->
-                    async { if (d == SUGGEST_ROW) fetchHomeFeed() else fetchSearch(d.trim()) }
-                }.awaitAll()
-            }
-            android.util.Log.e("NartoDrama", "getMainPage q=$q warm=${warm.count { it != null }}")
 
+            // ★ لا تسخين ولا انتظار للصفوف الأخرى.
+            //
+            // كان هذا الموضع يجمع كل الصفوف الظاهرة بـawaitAll() ثم يبدأ جلب الصف المطلوب،
+            // أي أنّ أول رسم ينتظر *آخر* صفّ. ثم إنّ CloudStream نفسه يستدعي getMainPage
+            // لكل صفوف mainPage معاً عند كل رسم — فالتسخين كان يطلب من السيرفر البطيء
+            // الطلبات نفسها مرّتين (قِسنا على الجهاز: صفّ 37.9ث، فكانت الواجهة تُرسم بعده).
+            // الآن كل نداء يجلب صفّه وحده فوراً، والذاكرتان (searchCache/homeFeedCache)
+            // تجعلان التنقّل بين الصفوف وإعادة الرسم فوريّين.
             var html = if (isSuggest) fetchHomeFeed() else fetchSearch(q)
             var fromFallback = false
             if (html == null || parseSearchItems(html).isEmpty()) {
