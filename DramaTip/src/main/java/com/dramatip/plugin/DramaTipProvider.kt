@@ -315,6 +315,18 @@ class DramaTipProvider(private val prefs: SharedPreferences? = null) : MainAPI()
         "QC6Ir2trghxRAyyyWZEOEFR4GgLhnfQ4A19I3QBlQkc=", android.util.Base64.NO_WRAP
     )
 
+    // مرجع المنصّة من الرابط: آخر نطاقين (مثال: shorttv.live، netshort.com).
+    // للبروكسي /e/m/ أو /e/s/ (نارتو) نستخدم dramatip.net لأن اللاعب يُمرّر من هناك.
+    private fun platformReferer(url: String): String {
+        val isNartoProxy = url.contains("/e/m/") || url.contains("/e/s/")
+        if (isNartoProxy) return TIP_MAIN
+        val host = Regex("""https?://([^/]+)""").find(url)?.groupValues?.get(1)
+        if (host == null) return TIP_MAIN
+        val parts = host.split('.')
+        val root = if (parts.size >= 2) parts.takeLast(2).joinToString(".") else host
+        return "https://$root/"
+    }
+
     private fun decryptEnc(enc: String): String {
         val b = android.util.Base64.decode(enc, android.util.Base64.NO_WRAP)
         val spec = javax.crypto.spec.GCMParameterSpec(128, b, 0, 12)
@@ -560,8 +572,11 @@ class DramaTipProvider(private val prefs: SharedPreferences? = null) : MainAPI()
      * ويُقرأ الجسم أيضًا حين لا يحسم نوعُ المحتوى أنه فيديو تدريجيّ — فقائمة
      * التشغيل تُعرَف من ‎#EXTM3U‎ وهذا ما يصنّف المسارات بلا امتداد (GoodShort).
      * والقراءة مسقوفة (‎[READ_CAP]‎ بايت) فلا يُنزَّل MP4 كامل إن صادف VOD.
+     *
+     * المرجع (Referer) يُحسب لكل رابط من خلال `platformReferer(url)` —
+     * shorttv يحتاج referer shorttv.live، netshort يحتاج netshort.com، إلخ.
      */
-    private class Probe(private val referer: String) {
+    private inner class Probe {
         private val cache = java.util.concurrent.ConcurrentHashMap<String, Verdict>()
 
         suspend fun check(u: String): Verdict {
@@ -583,7 +598,7 @@ class DramaTipProvider(private val prefs: SharedPreferences? = null) : MainAPI()
                 val c = uri.openConnection() as HttpURLConnection
                 conn = c
                 c.requestMethod = "GET"
-                c.setRequestProperty("Referer", referer)
+                c.setRequestProperty("Referer", platformReferer(u))
                 c.setRequestProperty("User-Agent", ANDROID_UA)
                 // Range على البروكسي فقط (لبثّ جسمٍ صغيرٍ محدود لبضعٍ من الكيلوبايتات).
                 if (proxy) c.setRequestProperty("Range", "bytes=0-65535")
@@ -693,7 +708,7 @@ class DramaTipProvider(private val prefs: SharedPreferences? = null) : MainAPI()
             // هذا بعد ذاك، فيبقى اختيار اللاعب الافتراضي على رابطٍ مُثبتٍ حيّ.
             val deferred = mutableListOf<ExtractorLink>()
             val emitted = LinkedHashSet<String>()
-            val probe = Probe(TIP_MAIN)
+            val probe = Probe()
             val showSubs = prefs?.getBoolean(DramaTipSettingsBottomSheet.KEY_SHOW_SUBTITLES, true) ?: true
             var sentSub = 0
 
