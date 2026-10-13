@@ -697,7 +697,8 @@ class DramaTipProvider(private val prefs: SharedPreferences? = null) : MainAPI()
             // الـAPI يُسأل عن الحلقة نفسها من كتابها ورقمها التسلسلي، وتُدمج الوصفتان:
             // الوصفة المُنعشة أولًا لأنها الأحدث، ثم وصفة الصفحة. كل رابط يُبثّ مرّة
             // واحدة (emitted أدناه)، فالتكرار بين الوصفتين لا يُضاعف السيرفرات.
-            val bookId = Regex(""""bookId"\s*:\s*"?([0-9]+)"?""").find(f)?.groupValues?.get(1)
+            // bookId قد يكون أبجديًا رقميًا مع شرطات (bilitv: "asrr-lzwj-lkhfy-at")
+            val bookId = Regex(""""bookId"\s*:\s*"([^"]+)"""").find(f)?.groupValues?.get(1)
             val firstSerial = Regex(""""firstSerial"\s*:\s*(-?\d+)""").find(f)
                 ?.groupValues?.get(1)?.toIntOrNull() ?: 1
             val apiDesc = if (bookId != null) apiLinks(bookId, ep + firstSerial - 1) else null
