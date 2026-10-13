@@ -194,9 +194,31 @@ class DramaTipProvider(private val prefs: SharedPreferences? = null) : MainAPI()
     override suspend fun search(query: String): List<SearchResponse>? {
         return try {
             val q = URLEncoder.encode(query, "UTF-8")
-            val h = fetchText("$TIP_MAIN/series?q=$q") ?: return null
-            val items = parseCollection(h, java.util.HashSet())
-            if (items.isEmpty()) null else items
+            val seen = java.util.HashSet<String>()
+            val allItems = mutableListOf<SearchResponse>()
+
+            // 1) البحث العام (كما كان) — يعيد 24 نتيجة
+            val general = fetchText("$TIP_MAIN/series?q=$q")
+            if (general != null) {
+                val items = parseCollection(general, seen)
+                allItems.addAll(items)
+            }
+
+            // 2) البحث في كل منصّة على حدة — بعضها لا يظهر في البحث العام
+            // ننفّذ الطلبات بالتوازي لتقليل المهلة الكلية
+            val platformSlugs = platformRows.map { it.first }
+            val results = coroutineScope {
+                platformSlugs.map { slug ->
+                    async(Dispatchers.IO) {
+                        val url = "$TIP_MAIN/source/${escapeSlug(slug)}?q=$q"
+                        val h = fetchText(url)
+                        if (h != null) parseCollection(h, seen) else emptyList()
+                    }
+                }.awaitAll()
+            }
+            for (items in results) allItems.addAll(items)
+
+            if (allItems.isEmpty()) null else allItems
         } catch (e: Exception) { null }
     }
 
