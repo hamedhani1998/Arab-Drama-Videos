@@ -374,52 +374,22 @@ class DramaTipProvider(private val prefs: SharedPreferences? = null) : MainAPI()
     // كما في الصفحة (shorttv: ٤٨٠/٧٢٠/١٠٨٠؛ petadrama: ٥٤٠/٧٢٠/١٠٨٠ + ترجمة ar).
     private val tipApi = "$TIP_HOST/api/episode-source"
 
+    // ★ 2026-10-14. الوصفة تُسلَّم كـ {"source":…,"chain":[{"enc":…,"type":…,
+    // "source":…,"encByQuality":{…}},{"enc":…,…}], "subtitle":null|{…}}.
+    //
+    // الكود القديم «plainFromDescriptor» جمع فقط حقول القيمة النصية على عمقٍ
+    // ثابت (depth==2) — أي فقط داخل كائن subtitle. فعندما يكون subtitle = null
+    // (PineDrama، NetShort، FlickReels، …) يُنتج نصًّا فارغًا، و parseChain()
+    // يعود به []، فيُظهر «لا روابط» حتى لو أن الوصفة حاملة chain كاملة.
+    //
+    // والحلّ بسيط: لا نُflat الـJSON، نُعيد له هيكله كاملاً (كما كان يفعل
+    // pageFlight) بدل جمع الحقول. هذا يُطابق parseChain()/sourceName()/
+    // objectAfterKey("subtitle") التي ت—allها ت_ops on كائن sourceFirst.
     private fun plainFromDescriptor(json: String): String {
-        val sb = StringBuilder()
-        val seen = HashSet<Int>()
-        var depth = 0
-        var i = 0
-        while (i < json.length) {
-            val c = json[i]
-            if (seen.contains(i)) { i++; continue }
-            when (c) {
-                '{', '[' -> depth++
-                '}', ']' -> depth--
-                '"' -> {
-                    val end = stringEnd(json, i)
-                    if (depth == 2) {
-                        val key = json.substring(i + 1, end)
-                        var k = end + 1
-                        while (k < json.length && json[k].isWhitespace()) k++
-                        if (k < json.length && json[k] == ':' && key != "type" && key != "source") {
-                            k++
-                            while (k < json.length && json[k].isWhitespace()) k++
-                            if (k < json.length && json[k] == '"') {
-                                val ve = stringEnd(json, k)
-                                sb.append(key).append('\u0000').append(json, k + 1, ve).append('\n')
-                                seen.add(k)
-                                seen.add(ve)
-                            }
-                        }
-                    }
-                    i = end
-                }
-            }
-            i++
-        }
-        return sb.toString()
-    }
-
-    private fun stringEnd(s: String, at: Int): Int {
-        var i = at + 1
-        while (i < s.length) {
-            when (s[i]) {
-                '\\' -> i += 2
-                '"' -> return i
-                else -> i++
-            }
-        }
-        return s.length - 1
+        // json = محتوى descriptor (Object). نُلفّه بـ "sourceFirst" كي يجده
+        // parseChain()/sourceName()/objectAfterKey("subtitle") كما يجدونه في
+        // pageFlight. الـJSON الأصلي يُ conserves كما هو — لا تفكيك.
+        return "\"sourceFirst\":$json"
     }
 
     /**
