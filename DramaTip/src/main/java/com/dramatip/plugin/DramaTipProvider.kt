@@ -382,13 +382,13 @@ class DramaTipProvider(private val prefs: SharedPreferences? = null) : MainAPI()
     // (PineDrama، NetShort، FlickReels، …) يُنتج نصًّا فارغًا، و parseChain()
     // يعود به []، فيُظهر «لا روابط» حتى لو أن الوصفة حاملة chain كاملة.
     //
-    // والحلّ بسيط: لا نُflat الـJSON، نُعيد له هيكله كاملاً (كما كان يفعل
+    // والحلّ بسيط: لا نُفلطح الـJSON، نُعيد له هيكله كاملاً (كما كان يفعل
     // pageFlight) بدل جمع الحقول. هذا يُطابق parseChain()/sourceName()/
-    // objectAfterKey("subtitle") التي ت—allها ت_ops on كائن sourceFirst.
+    // objectAfterKey("subtitle") التي كلّها تعمل على كائن sourceFirst.
     private fun plainFromDescriptor(json: String): String {
         // json = محتوى descriptor (Object). نُلفّه بـ "sourceFirst" كي يجده
         // parseChain()/sourceName()/objectAfterKey("subtitle") كما يجدونه في
-        // pageFlight. الـJSON الأصلي يُ conserves كما هو — لا تفكيك.
+        // pageFlight. الـJSON الأصلي يبقى كما هو — لا تفكيك.
         return "\"sourceFirst\":$json"
     }
 
@@ -578,6 +578,28 @@ class DramaTipProvider(private val prefs: SharedPreferences? = null) : MainAPI()
             return r
         }
 
+        /**
+         * إعادة فحص رابطٍ سبق أن سقط — لتمييز السقطة العابرة من الموت الدائم.
+         * يُعاد الفحص فعلًا (لا يُقرأ من الذاكرة) حتى ثلاث مرّات، لأنّ مضيفات
+         * dramatip كثيرة العطل العابر (قِيس على بروكسي narto ردُّ 403 ثم 200
+         * للطلب نفسه)، وسلسلةٌ من عنصرٍ واحد تسقط بسقطةٍ واحدة. ولا يعود الحكم
+         * الجديد أسوأ من الأول: المهلة أو انقطاع الاتصال لا يُثبتان موتًا فيُحفظ
+         * الأول، والحكم القاطع يبقى قاطعًا.
+         */
+        suspend fun recheck(u: String): Verdict? {
+            val prev = cache[u]
+            var best = prev
+            for (attempt in 1..3) {
+                val fresh = withContext(Dispatchers.IO) { one(u) }
+                if (fresh.alive) { cache[u] = fresh; return fresh }
+                if (fresh.certain) best = fresh
+                if (attempt < 3) delay(500L * attempt)
+            }
+            val result = best
+            if (result != null) cache[u] = result
+            return result
+        }
+
         suspend fun alive(u: String): Boolean = check(u).alive
 
         private fun one(u: String): Verdict {
@@ -608,14 +630,35 @@ class DramaTipProvider(private val prefs: SharedPreferences? = null) : MainAPI()
                         return Verdict(false, ct, null, "proxy body: ${b.take(48)}", true)
                     }
                 }
+                // ★ 2026-10-16. رابطٌ يدّعي HLS (امتداد ‎.m3u8‎ أو نوع محتوى mpegurl)
+                // وقُرئ جسمه فوجد **ليس** قائمة تشغيل ⇒ هو صفحة خطأ مُتنكّرة بزي
+                // قائمة تشغيل. قِيس على DramaBox: مسار ‎/v1/dramabox/…m3u8‎ يردّ
+                // 200 بقالب HTML بمقاس 27KB، فيُصنَّف M3U8 بالامتداد ويُبثّ، فيردّ
+                // اللاعب «خطأ 3002» (بايتات ليست وسائط). الحكم هنا يمنعه من الأصل.
+                val claimsHls = u.contains(".m3u8") || ct.lowercase().contains("mpegurl")
+                if (claimsHls && !body.isNullOrEmpty() && !body.contains("#EXTM3U")) {
+                    return Verdict(false, ct, body, "not a playlist: ${body.take(48)}", true)
+                }
                 Verdict(true, ct, body, "", true)
             } catch (e: Exception) {
-                // شهادة TLS مرفوضة حكمٌ بأنّ الرابط لا يُشغَّل من أيّ عميلٍ صارم؛ وما عداها
-                // (DNS، مهلة، انقطاع اتصال) لا يقول شيئًا عن الرابط نفسه.
+                // شهادة TLS مرفوضة حكمٌ: البايتات موجودة لكنّ كلّ عميلٍ صارم يرفضها.
+                // ★ 2026-10-16. ومضيفٌ لا يُحلّ اسمه أصلًا حكمٌ كذلك: لا عميلَ يبلغه.
+                // قِيس على DotDrama أنّ مضيفه videotv.vividshort.com لم يُحلّ قطّ؛
+                // وحين كان ‎UnknownHostException‎ يُعدّ «تعذّر معرفة» بُثّ الرابط
+                // الميت فاختار اللاعب التشغيل وأظهر «خطأ 2001» — وهو عطلُ شبكةٍ في
+                // ظاهر الأمر لا رابطٌ ميت. نُعيد الحلّ مرّةً صريحةً قبل الحكم كي لا
+                // يُسقط سباقُ DNS عابرٌ رابطًا حيًّا. وما عدا ذلك (مهلة، انقطاع
+                // اتصال) لا يقول شيئًا عن الرابط — يُبثّ بلا حكمٍ في آخر القائمة.
+                var certain = e is javax.net.ssl.SSLHandshakeException
+                if (e is java.net.UnknownHostException) {
+                    val stillDead = try { java.net.InetAddress.getByName(uri.host); false }
+                    catch (_: Exception) { true }
+                    certain = stillDead
+                }
                 Verdict(
                     false, "", null,
                     "${e.javaClass.simpleName}: ${e.message?.take(48) ?: "-"}",
-                    e is javax.net.ssl.SSLHandshakeException,
+                    certain,
                 )
             } finally {
                 runCatching { conn?.disconnect() }
@@ -713,19 +756,33 @@ class DramaTipProvider(private val prefs: SharedPreferences? = null) : MainAPI()
             // BibiShort /1/←/2/، PineDrama): أي أنه «الحلقة التالية» لا «سيرفرًا
             // بديلًا». بثّه موسومًا «· بديل» كان يُشغّل حلقةً خاطئة عند اختياره.
             class Cand(val label: String, val url: String, val type: String?, val qLabel: String?)
-            val cands = mutableListOf<Cand>()
-            val seenCands = HashSet<String>()
-            for (desc in listOfNotNull(apiDesc, f)) {
+            fun candsOf(desc: String): List<Cand> {
+                val out = mutableListOf<Cand>()
                 val srcName = sourceName(desc)
                 for (e in parseChain(desc)) {
                     for ((label, u, ty) in chainCands(e, srcName)) {
-                        if (!seenCands.add(u)) continue
                         val q = Regex("""·\s*(\d{3,4})p$""").find(label)?.groupValues?.get(1)
-                        cands.add(Cand(label, u, ty, q?.let { "${it}p" }))
+                        out.add(Cand(label, u, ty, q?.let { "${it}p" }))
                     }
                 }
+                return out
             }
-            if (cands.isEmpty()) {
+
+            // ★ 2026-10-16. الأولوية للوصفة المُنعشة وحدها متى حملت chain صالحة،
+            // ولا تُدمج بوصفة الصفحة (كما كانت تفعل listOfNotNull). السبب: وصفة
+            // الصفحة مُخبَّأة وقد تعود برموزٍ **حيّة الشكل ميتة المفعول** (توكنٌ
+            // مضى أوانه أو مضيفٌ تغيّر) — فلا يكشفها فحصٌ ولا يُسقطها، وتُبثّ أوّلًا
+            // لأنّ ترتيب الإسقاط هو ترتيب المرشّحين، فيختارها اللاعب الافتراضيًّا
+            // ويفشل التشغيل بلا سببٍ ظاهر. لكنّها تبقى **خطّ نجاة**: قِيس على BiliTV
+            // أن مضيف الأنعش وحدَه يسقط بـ403 عابر فتبقى الحلقة بلا روابط، فنجعل
+            // روابط الصفحة مرشّحاتٍ أخيرةً بعد الأنعش — تُبثّ في الآخر فلا تسرق
+            // الافتراضيَّ من رابطٍ مُثبتٍ حيّ.
+            val seenCands = HashSet<String>()
+            val freshCands = apiDesc?.let { candsOf(it) }.orEmpty()
+            val pageCands = candsOf(f)
+            val cands = if (freshCands.isNotEmpty()) freshCands + pageCands else pageCands
+            val uniq = cands.filter { seenCands.add(it.url) }
+            if (uniq.isEmpty()) {
                 logE("DramaTip.loadLinks $source ep=$ep decrypted nothing")
                 return false
             }
@@ -736,27 +793,49 @@ class DramaTipProvider(private val prefs: SharedPreferences? = null) : MainAPI()
             //    فلا يُقاس نوع المحتوى ولا تُفرَّع الجودات — لكن التصنيف يبقى
             //    صحيحًا لأنّه يسقط إلى الرابط وإعلان الموقع.
             val probing = prefs?.getBoolean(DramaTipSettingsBottomSheet.KEY_PROBE_LINKS, true) != false
-            val verdicts = coroutineScope {
-                cands.map { c ->
-                    async(Dispatchers.IO) { if (probing) probe.check(c.url) else null }
-                }.awaitAll()
+            // ★ 2026-10-16. إعادة فحص المُسقَط (حتى ٣ مرّات داخل recheck) قبل قبول
+            // الإسقاط. مضيفات بثّ dramatip كثيرة العطل العابر (narto يردّ 403
+            // لطلبٍ ويقبل التالي بالقيمة نفسها)، وسلسلةٌ من عنصرٍ واحد يسقط عنصرها
+            // = «لا روابط» للحلقة كلّها. والإعادة تُحفظ بحيث لا تعود أسوأ من الأول:
+            // المهلة أو انقطاع الاتصال لا يُثبتان شيئًا، والحكم القاطع يبقى قاطعًا.
+            suspend fun probeAll(list: List<Cand>): List<Verdict?> = coroutineScope {
+                list.map { c -> async(Dispatchers.IO) { if (probing) probe.check(c.url) else null } }.awaitAll()
+            }
+            var verdicts = probeAll(uniq)
+            run {
+                // تُعاد السقطات القابلة للعَرض وحدها — كود حالة أو علامة بروكسي أو
+                // جسمٌ ليس قائمة تشغيل — لأنّها هي التي تُردّ عابرةً على مضيفات
+                // dramatip. ولا تُعاد المهلة (٧ ثوانٍ لكل محاولة ولا تُثبت شيئًا)،
+                // ولا المضيف الذي لا يُحلّ (الحلّ يُعاد صريحًا داخل one())، ولا
+                // فشل شهادة TLS (قاطعٌ بالطبع).
+                val toRetry = uniq.filterIndexed { i, _ ->
+                    val v = if (probing) verdicts[i] else null
+                    v != null && !v.alive && (v.why.startsWith("HTTP ") ||
+                        v.why.startsWith("proxy body:") || v.why.startsWith("not a playlist:"))
+                }
+                if (toRetry.isEmpty()) return@run
+                val again = coroutineScope {
+                    toRetry.map { c -> async(Dispatchers.IO) { probe.recheck(c.url) } }.awaitAll()
+                }
+                val byUrl = toRetry.mapIndexed { i, c -> c.url to again[i] }.toMap()
+                verdicts = uniq.mapIndexed { i, c -> byUrl[c.url] ?: verdicts[i] }
             }
 
             // ٣) بثّ الأحياء بترتيب الصفحة؛ وكل HLS حيّ يُفرَّع على جوداته الحقيقية.
             class Var(val label: String, val url: String, val qLabel: String?)
             val variants = mutableListOf<Var>()
-            for ((i, c) in cands.withIndex()) {
+            for ((i, c) in uniq.withIndex()) {
                 val v = verdicts[i]
                 // الإسقاط للرابط المُثبت موته فقط (كود حالةٍ أو علامةٌ في جسم البروكسي أو
-                // شهادة TLS مرفوضة). أمّا تعذّر الاتصال — انقطاع DNS، مهلة، أو مضيفٌ لا
-                // يُحلّ — فلا يُسقط الرابط: قِيس على dotdrama أنّ مضيفه (videotv.vividshort)
-                // يعطي ConnectionError، وإسقاطه كان سيُظهر «لا روابط» لحلقةٍ قد تعمل.
+                // شهادة TLS مرفوضة أو مضيفٌ لا يُحلّ بعد إعادة محاولةٍ صريحة). أمّا
+                // تعذّر الاتصال (مهلة أو انقطاع) فلا يُسقط الرابط — يُبثّ في الآخر.
                 if (v != null && !v.alive && v.certain) {
                     logD("DramaTip: drop dead ${c.label} ${c.url.take(70)} why=${v.why}")
                     continue
                 }
                 val cannotTell = v != null && !v.alive
-                if (cannotTell) logD("DramaTip: unjudged ${c.label} ${c.url.take(70)} why=${v?.why}")
+                val why = v?.why
+                if (cannotTell) logD("DramaTip: cannot-tell ${c.label} ${c.url.take(70)} why=$why")
                 val (kind, declared) = classify(c.url, c.type, v?.contentType.orEmpty(), v?.body)
                 if (!emitted.add(c.url)) continue
                 addLink(if (cannotTell) deferred else collected, c.label, c.url, c.qLabel, kind, declared)
