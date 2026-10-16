@@ -129,6 +129,28 @@ class DramaTipProvider(private val prefs: SharedPreferences? = null) : MainAPI()
         app.get(url, referer = TIP_MAIN, headers = reqHeaders()).text
     } catch (e: Exception) { logE("fetch $url: ${e.message}"); null }
 
+    /**
+     * يجلب **نصّ** ملفّ الترجمة من رابطها. لا يُعاد المحاولة ولا يُطلق استثناءً:
+     * ترجمةٌ تعذّرت لا يجوز أن تُفقد الحلقة روابطها.
+     *
+     * ولماذا لا نسلم الرابط نفسه للمشغّل: قِيس على MoboReels أن رابط الموقع
+     * ‎…/api/v1/series/{id}/subtitles/{n}?format=srt‎ **بلا امتداد** — والمشغّل
+     * يميّز مسار الترجمة بالامتداد ونوع المحتوى، وهذا ما يجعل الخادم المحلي
+     * يخدمها موسومةً `text/vtt` و`.vtt`.
+     */
+    private suspend fun fetchSubtitleText(url: String): String? = try {
+        app.get(
+            url,
+            referer = platformReferer(url),
+            headers = mapOf(
+                "User-Agent" to TIP_UA,
+                "Accept" to "*/*",
+                "Accept-Language" to "ar,en;q=0.8"
+            ),
+            timeout = 20_000L
+        ).text.takeIf { it.isNotBlank() }
+    } catch (e: Exception) { logE("subtitle $url: ${e.message}"); null }
+
     // ---------- JSON-LD ----------
     private fun jsonLdDoc(html: String): org.json.JSONObject? {
         val m = Regex("""<script type="application/ld\+json">(.*?)</script>""", RegexOption.DOT_MATCHES_ALL)
@@ -537,6 +559,40 @@ class DramaTipProvider(private val prefs: SharedPreferences? = null) : MainAPI()
     }
 
     /**
+     * كل كائنات الترجمة في وصفةٍ ما — بالشكلين:
+     *  - كائن  `"subtitle":{"enc":…,"format":"srt","language":"ar"}` (MoboReels)
+     *  - مصفوفة `"subtitle":[{enc,language},{enc,language}]` (منصّاتٌ متعدّدة اللغات)
+     *
+     * ولا نستعمل `objectAfterKey` هنا لأنّها تشترط أن يلي المفتاحَ «{» مباشرةً،
+     * فيسقط الشكل المصفوفي كاملًا بلا سطر سجلٍّ واحد — وهو أحد أسباب اختفاء
+     * الترجمة. والنصّ لا يُفكّ هنا، فالقرار في موضع البثّ.
+     */
+    private fun subtitleObjects(s: String): List<String> {
+        val k = s.indexOf("\"subtitle\"")
+        if (k < 0) return emptyList()
+        var i = k + "\"subtitle\"".length
+        while (i < s.length && (s[i] == ':' || s[i] == ' ' || s[i] == '\t')) i++
+        if (i >= s.length) return emptyList()
+        return when (s[i]) {
+            '{' -> listOfNotNull(balanced(s, i, '{', '}'))
+            '[' -> {
+                val arr = balanced(s, i, '[', ']') ?: return emptyList()
+                val out = mutableListOf<String>()
+                var pos = 0
+                while (true) {
+                    val b = arr.indexOf('{', pos)
+                    if (b < 0) break
+                    val obj = balanced(arr, b, '{', '}') ?: break
+                    pos = b + obj.length
+                    out.add(obj)
+                }
+                out
+            }
+            else -> emptyList() // null أو نصّ — لا ترجمة
+        }
+    }
+
+    /**
      * نتيجة فحصٍ واحد: حيّ؟ + ما قِيس فعلًا (نوع المحتوى، وجسم محدود لعرضه) + السبب
      * + هل هي **حكمٌ** (علمٌ) أم **تعذّر معرفة**؟
      *
@@ -866,18 +922,45 @@ class DramaTipProvider(private val prefs: SharedPreferences? = null) : MainAPI()
                 }
             }
 
-            // ٥) الترجمة — كائن subtitle المحصور (يتحقّق objectAfterKey أنّ القيمة كائن
-            //    لا null، فلا ينزلق إلى أوّل «{» لاحق في الصفحة).
+            // ٥) الترجمة — تُقدَّم من **خادمٍ محليّ** لأنّ المشغّل يطلب رابطًا
+            //    حقيقيًّا ولا يقبل نصًّا خامًّا ولا `data:` (وكان تسليم النصّ
+            //    المفكوك بوصفه رابطًا هو سبب اختفاء الترجمة على **كلّ** المنصّات
+            //    لا على MoboReels وحدها — انظر DramaTipSubServer).
+            //
+            //    والوصفة تحمل الترجمة على شكلين: كائنًا واحدًا
+            //    `"subtitle":{"enc":…,"format":"srt","language":"ar"}` (MoboReels)،
+            //    أو مصفوفة `"subtitle":[{…},{…}]` — فنجمع الشكلين. و`objectAfterKey`
+            //    لا تصلح لهذا لأنّها تشترط «{» بعد المفتاح فيسقط الشكل المصفوفي.
+            //
+            //    ونكرّر على الوصفتين (الأنعش ثم الصفحة) ونتعقّب النصوص المُبثّة،
+            //    فلا تتكرّر ترجمةٌ واحدة في القائمة حين تحمل الوصفتان الملفّ نفسه.
             if (showSubs) {
-                val sobj = listOfNotNull(apiDesc, f).firstNotNullOfOrNull { objectAfterKey(it, "\"subtitle\"") }
-                if (sobj != null) {
-                    val plain = encRe.find(sobj)?.groupValues?.get(1)?.let { decryptOrSkip(it) }
-                    if (!plain.isNullOrBlank()) {
+                // نجمع أولًا ثم نُبثّ: الوصفتان (الأنعش والصفحة) تحملان الترجمة
+                // نفسها، فالدمج بالرابط يمنع جلبتين متطابقتين، والدمج بالنصّ
+                // يمنع ظهور مسارٍ واحد مرّتين في قائمة المشغّل.
+                val subSources = LinkedHashMap<String, String>()
+                for (desc in listOfNotNull(apiDesc, f)) {
+                    for (sobj in subtitleObjects(desc)) {
+                        val enc = encRe.find(sobj)?.groupValues?.get(1) ?: continue
+                        val value = decryptOrSkip(enc)?.trim()?.takeIf { it.isNotBlank() } ?: continue
                         val lang = langRe.find(sobj)?.groupValues?.get(1)
                             ?.substringBefore('_')?.substringBefore('-')?.takeIf { it.isNotBlank() } ?: "ar"
-                        subtitleCallback(newSubtitleFile(subLangLabel(lang), plain))
-                        sentSub = 1
+                        subSources.putIfAbsent(value, lang)
                     }
+                }
+                val emittedText = HashSet<String>()
+                for ((value, lang) in subSources) {
+                    // القيمة **رابطٌ** على المنصّات المقيسة كلّها (MoboReels:
+                    // ‎…/subtitles/1?format=srt‎، JoyReels: ‎….srt‎، BiliTV:
+                    // بروكسي narto ‎/e/s/‎) — لا نصَّ SRT. وإن جاء نصٌّ خامًّا على
+                    // منصّةٍ أخرى نخدمه كما هو فلا نُهدر الحالتين.
+                    val text = if (value.startsWith("http")) {
+                        fetchSubtitleText(value) ?: continue
+                    } else value
+                    if (!emittedText.add(text)) continue
+                    val local = DramaTipSubServer.register(text) ?: continue
+                    subtitleCallback(newSubtitleFile(subLangLabel(lang), local))
+                    sentSub++
                 }
             }
 
