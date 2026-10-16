@@ -164,12 +164,34 @@ class DramaTipProvider(private val prefs: SharedPreferences? = null) : MainAPI()
      * سُدىً وهو جوهر هذا الإصلاح.
      */
     private fun bareSlug(s: String): String {
-        val raw = s.substringAfterLast('/').substringBefore('?').trim()
+        // نشذّ ما بعد «؟»/«#» **ثم** الذيل المائل: عنوانٌ ينتهي بـ«/» كان يعطي
+        // مقطعًا فارغًا (`substringAfterLast('/')` = "") فيُسقط putSeriesMeta
+        // المفتاح الفارغ صامتًا ⇒ لا كاش ⇒ لا bookId ⇒ «لا روابط».
+        val path = s.substringBefore('?').substringBefore('#').trimEnd('/')
+        val raw = path.substringAfterLast('/').trim()
+        if (raw.isBlank()) return ""
         if ('%' !in raw) return raw
         return try {
             java.net.URLDecoder.decode(raw, "UTF-8").trim()
         } catch (e: Exception) { raw }
     }
+
+    /**
+     * هل الحِمل حِملُ **حلقةٍ حقيقيّة** أم صفحةُ خطأ/404 بزيّ Next؟ كلاهما
+     * يُنتج flight غير فارغ، فلا يصلح `null` وحده فاصلًا. والفارق المقيس:
+     * كائن `sourceFirst` (وما فيه من `bookId`) **لا يوجد إلا في حِملٍ صحيح**.
+     *
+     * لماذا هذا الفصل جوهريّ: قِيس 2026-10-16 على FlickReels أنّ
+     * ‎/episode-999‎ و‎/episode-abc‎ و‎/episode-0‎ **والسلَّغ المُرمَّز مرّتين**
+     * تعيد كلّها flight بحجم ‎101KB‎ بلا `sourceFirst` وبلا `bookId` (254KB أقلّ
+     * من الصفحة الحقيقيّة). وكان `loadLinks` يقرأها بالكائن لا بالحقل:
+     * `f?.let { metaOf(it) } ?: seriesMeta[...]` — فحملٌ غير فارغ ⇒ يُختار
+     * `metaOf` الفارغ ⇒ `bookId=null` ⇒ **لا يُسأل الـAPI أصلًا**، و`parseChain`
+     * يعود فارغًا ⇒ «لم يعثر على روابط». والصفحة الحقيقيّة للسلَّغ نفسه موجودة
+     * في الكاش من `load()`، فلا يجوز أن يُحجب عنها.
+     */
+    private fun hasSourceFirst(f: String?): Boolean =
+        f != null && f.contains("\"sourceFirst\"")
 
     /**
      * يجلب حِمل صفحة الحلقة، ويكرّر الفشل **العابر** حتّى ثلاث مرّات.
@@ -189,9 +211,16 @@ class DramaTipProvider(private val prefs: SharedPreferences? = null) : MainAPI()
             val html = fetchText(url)
             if (html != null) {
                 val f = extractFlight(html)
-                if (f != null) return f
+                // ★ 2026-10-16. لا يكفي ألّا يكون null: صفحة 404 تُنتج flight
+                // بحجم 101KB بلا `sourceFirst` (انظر hasSourceFirst). فمعيار
+                // القبول صار وجودَ `sourceFirst` صريحًا، وما دونه يُعالَج
+                // كفشلٍ عابر يُعاد، فإن أبى أن يتحسّن عاد null فيُتّكأ على
+                // معطيات الكاش بدل أن يُحجب عنها.
+                if (hasSourceFirst(f)) return f
+                logE("DramaTip: flight بلا sourceFirst (صفحة خطأ/404؟) attempt=$attempt/3 url=$url")
+            } else {
+                logE("DramaTip: episode flight attempt=$attempt/3 url=$url")
             }
-            logE("DramaTip: episode flight attempt=$attempt/3 url=$url")
             if (attempt < 3) delay(700L * attempt)
         }
         return null
@@ -326,7 +355,20 @@ class DramaTipProvider(private val prefs: SharedPreferences? = null) : MainAPI()
             // نحفظ معطيات السلسلة (الكتاب وأوّلٌ تسلسلي واسم المصدر) الآن:
             // فيها يُسأل الـAPI عن روابط أيّ حلقة، ولا تتغيّر بحلقةٍ بعينها
             // (بخلاف الرموز المشفّرة في `chain` — انظر SeriesMeta).
-            extractFlight(h)?.let { putSeriesMeta(bareSlug(url), metaOf(it)) }
+            // لا نُخبِّئ إلا معطًى **قابلًا للاستعمال** (bookId أو مصدر): فحِمل
+            // صفحة 404 يمرّ من هنا بلا `sourceFirst`، وتخبئته كانت تُنشئ مدخلًا
+            // فارغًا يحجب كلّ كتابٍ حقيقيّ لاحق عن نفس السلَّغ.
+            extractFlight(h)?.let { fl ->
+                if (hasSourceFirst(fl)) {
+                    val m = metaOf(fl)
+                    if (m.bookId != null || m.source != null) {
+                        putSeriesMeta(bareSlug(url), m)
+                        logD("DramaTip: meta cached slug=${bareSlug(url)} book=${m.bookId} src=${m.source}")
+                    }
+                } else {
+                    logE("DramaTip: load() flight بلا sourceFirst (صفحة 404؟) url=$url")
+                }
+            }
             val tvs = tvsNode(h) ?: return null
             val title = tvs.optString("name").replace(Regex("""\s+"""), " ").trim()
                 .takeIf { it.isNotBlank() } ?: return null
@@ -494,17 +536,34 @@ class DramaTipProvider(private val prefs: SharedPreferences? = null) : MainAPI()
      * الكود على سلوكه القديم، ولا تكون «إعادة الجلب» سببًا في فقدان روابط.
      */
     private suspend fun apiLinks(bookId: String, serial: Int): String? {
+        // ★ 2026-10-16. كانت مهلةً واحدة ثابتة (٢٠ث) في كل محاولة، ومحاولات
+        // الكود الثلاث تتقاسم الفشل نفسه. الصيغة الجديدة: محاولتان بمهلةٍ أقصر
+        // (١٢ث) تُبقيان الزمن الكلي في حدود رسالةٍ واحدة، ثم محاولةٌ ثالثة
+        // بمهلةٍ أطول (٢٥ث) تُنجي حين يكون المضيف بطيئًا لا غائبًا — وهو
+        // الفرق بين «انتهت المهلة» و«لا روابط». ولا يضرّ الحالة السليمة:
+        // المهلة سقفٌ لا انتظار، فالطلب الناجح يعود فورًا.
+        //
+        // ولم نُضاعف بالتوازي: قِيس أنّ الخدمة إمّا تردّ كاملةً أو تفشل
+        // كاملةً في اللحظة (١٢ طلبًا متوازيًا نجحت كلّها، و٤٠ متتابعًا كذلك)،
+        // فالتغطية المكانيّة لا تُنجي شيئًا والعلاج زمنيّ.
         val url = "$tipApi/$bookId/$serial?lang=ar&refresh=1"
         var lastWhy = "-"
         for (attempt in 1..3) {
             try {
-                val res = app.get(url, referer = TIP_MAIN, headers = reqHeaders(), timeout = 20_000L)
+                val timeout = if (attempt >= 3) 25_000L else 12_000L
+                val res = app.get(url, referer = TIP_MAIN, headers = reqHeaders(), timeout = timeout)
                 if (res.code in 200..299) {
-                    val desc = org.json.JSONObject(res.text).optJSONObject("descriptor") ?: return null
-                    return plainFromDescriptor(desc.toString())
+                    val desc = org.json.JSONObject(res.text).optJSONObject("descriptor")
+                    // وصفةٌ بلا chain لا تُغني (قد تكون استجابةً جزئيّة): تُعامَل
+                    // فشلًا فتُعاد، ولا تُبتلع صامتةً فيرى المستخدم «لا روابط».
+                    if (desc != null && desc.optJSONArray("chain") != null) {
+                        return plainFromDescriptor(desc.toString())
+                    }
+                    lastWhy = if (desc == null) "بلا descriptor" else "بلا chain"
+                } else {
+                    // 403 هنا غالبًا حدُّ معدّل لا حكمٌ على الوصفة: {error:forbidden}
+                    lastWhy = "HTTP ${res.code}"
                 }
-                // 403 هنا غالبًا حدُّ معدّل لا حكمٌ على الوصفة: {error:forbidden}
-                lastWhy = "HTTP ${res.code}"
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
@@ -898,8 +957,18 @@ class DramaTipProvider(private val prefs: SharedPreferences? = null) : MainAPI()
             // ونتّكئ على معطيات السلسلة المحفوظة (من `load`) لسؤال الـAPI عن
             // هذه الحلقة بعينها، ووصفةُ الصفحة تبقى مكمّلًا إن حضرت.
             val f = episodeFlight(url)
-            val meta = f?.let { metaOf(it) } ?: seriesMeta[bareSlug(slug)]
-            val source = f?.let { sourceName(it) } ?: meta?.source ?: name
+            // ★ 2026-10-16. ليس `f != null` بل `f` يحمل `sourceFirst`: الحِمل
+            // غير الفارغ قد يكون صفحة 404 (بلا bookId)، وكان وجوده **يحجب**
+            // الكاش المكتوب في `load()` فيُطفئ الـAPI ويسقط الرابط. فصار
+            // الاختيار حقلًا لا كائنًا: خُذ metaOf من الحِمل الصالح وحده.
+            val fMeta = if (hasSourceFirst(f)) metaOf(f!!) else null
+            val cached = seriesMeta[bareSlug(slug)]
+            // الكاش لا يُستعمل إلا إذا كان **قابلًا للاستعمال** (يحمل bookId أو
+            // مصدرًا): فمعطى ناقص (حِملٌ سابق بلا bookId) لا ينفع وضارٌّ وحده.
+            val meta = fMeta?.takeIf { it.bookId != null || it.source != null }
+                ?: cached?.takeIf { it.bookId != null || it.source != null }
+            val source = meta?.source
+                ?: (if (hasSourceFirst(f)) sourceName(f!!) else name)
 
             // ★ إعادة الجلب: وصفة الصفحة مُخبَّأة وقد تحمل رموزًا منتهية (انظر TIP_API).
             // الـAPI يُسأل عن الحلقة نفسها من كتابها ورقمها التسلسلي، وتُدمج الوصفتان:
@@ -910,6 +979,13 @@ class DramaTipProvider(private val prefs: SharedPreferences? = null) : MainAPI()
             val bookId = meta?.bookId
             val apiDesc = if (bookId != null) apiLinks(bookId, ep + firstSerial - 1) else null
             if (apiDesc != null) logD("DramaTip: episode-source OK book=$bookId ser=${ep + firstSerial - 1}")
+            // ★ سطرٌ تشخيصيٌّ واحد يكفي لتفسير «لم يعثر على روابط» من سجلّات
+            // المستخدم بلا تخمين: أيّ الثلاثة سقط — الكاش، أم الحِمل، أم الـAPI.
+            if (apiDesc == null || !hasSourceFirst(f)) {
+                logE("DramaTip.loadLinks ep=$ep diag: bookId=$bookId cached=${cached != null} " +
+                    "flight=${if (f == null) "ساقط" else if (hasSourceFirst(f)) "صالح" else "بلا sourceFirst"} " +
+                    "api=${if (apiDesc != null) "حيّ" else "فشل"} slug=${bareSlug(slug)}")
+            }
 
             val collected = mutableListOf<ExtractorLink>()
             // ما اجتاز الفحص، وما تعذّر الحكم عليه (انقطاع عابر لا يُسقط رابطًا) — يُبثّ
