@@ -26,6 +26,12 @@ private const val ANDROID_UA = "Mozilla/5.0 (Linux; Android 10)"
 // سقف قراءة جسم الفحص: قائمة تشغيل HLS كاملة تقع دونه بمراتب، ويمنع تنزيل VOD ضخم.
 private const val READ_CAP = 524_288
 
+// ★ 2026-10-17. أدنى طابعٍ زمنيًّا يُقبل وقتًا لانتهاء رمز (٢٠٢٣-١١-١٤).
+// الآن صار للعمر سلطة إسقاط الرابط (بوّابة الرمز المنتهي في loadLinks)،
+// فحقلٌ اسمه `t` على منصّةٍ أخرى قد يحمل هاشًا لا وقتًا — فيُحسب سالبًا
+// ويُسقط رابطًا حيًّا. الطابع الحقيقيّ لا يسبق هذا الحدّ بسنوات.
+private const val MIN_TOKEN_EPOCH = 1_700_000_000L
+
 // منصّات الموقع من /ar/sources (slug → الاسم كما يعرضه الموقع). ٢٣ منصة.
 // ثابت على مستوى الملف كي تشاركه الإعدادات (مفتاح إظهار/إخفاء لكل منصّة).
 internal val DRAMA_TIP_PLATFORMS: List<Pair<String, String>> = listOf(
@@ -143,8 +149,13 @@ class DramaTipProvider(private val prefs: SharedPreferences? = null) : MainAPI()
      * فبه نعرف العمر الباقي بلا ساعةٍ إضافية على الشبكة.
      */
     private fun tokenExpiryEpoch(url: String): Long? {
-        val h = Regex("""[?&]t=([0-9a-fA-F]+)""").find(url)?.groupValues?.get(1) ?: return null
-        return h.toLongOrNull(16)
+        val h = Regex("""[?&]t=([0-9a-fA-F]{8,})""").find(url)?.groupValues?.get(1) ?: return null
+        // ★ 2026-10-17. حدُّ المعقوليّة ضروريّ الآن لأنّ العمر صار يُسقط الرابط
+        // (بوّابة الرمز المنتهي): حقلٌ اسمه `t` قد يحمل قيمةً ليست طابعًا زمنيًّا
+        // على منصّةٍ أخرى (هاشًا قصيرًا)، فيُحسب عمره سالبًا ويُسقط رابطًا حيًّا.
+        // فالطابع الموقّع لا يسبق ٢٠٢٣ (‎1_700_000_000‎) — وما دونه ليس وقتًا.
+        val v = h.toLongOrNull(16) ?: return null
+        return v.takeIf { it >= MIN_TOKEN_EPOCH }
     }
 
     /**
@@ -162,9 +173,8 @@ class DramaTipProvider(private val prefs: SharedPreferences? = null) : MainAPI()
     private fun tokenRemainingSeconds(url: String): Long? {
         val now = System.currentTimeMillis() / 1000
         tokenExpiryEpoch(url)?.let { return it - now }
-        Regex("""[?&]verify=(\d{9,})""").find(url)?.groupValues?.get(1)?.toLongOrNull()?.let {
-            return it - now
-        }
+        Regex("""[?&]verify=(\d{9,})""").find(url)?.groupValues?.get(1)?.toLongOrNull()
+            ?.takeIf { it >= MIN_TOKEN_EPOCH }?.let { return it - now }
         return null
     }
 
@@ -189,6 +199,32 @@ class DramaTipProvider(private val prefs: SharedPreferences? = null) : MainAPI()
             .toList()
         if (vals.isEmpty()) return null
         return nowSec - (vals.max())
+    }
+
+    /**
+     * ★ 2026-10-17. عمر أفضل رمزٍ في الوصفة — يُقرأ **محليًّا** بلا شبكة.
+     *
+     * بوّابة `refreshAfter` أعلاه لا تكفي: قِيس اليوم على MoboReels (كتاب
+     * 13100415) أنّ الوصفة تُخبَّأ **بلا `refreshAfter` إطلاقًا** (`None`)
+     * بينما رمزها منتهٍ فعلًا (‎-700ث‎ فحصًا مباشرًا)، وأنّ الطلب نفسه
+     * بـ`refresh=1` يعود برمزٍ صالح (~3500ث) **14/14**. فالرمز هو الحقيقة
+     * التي لا تغيب: نقرؤه من الرابط المفكوك، ونردّ الوصفة بائتة إن انتهى.
+     *
+     * ويُؤخذ **أطول** عمرٍ في السلسلة، فالأفضل هو ما يُبثّ أولًا.
+     * وnull حين لا يحمل أيُّ مرشّحٍ رمزًا زمنيًّا (فلا حكم).
+     */
+    private fun descBestLife(descJson: String): Long? {
+        var best: Long? = null
+        for (re in listOf(encRe, qualRe)) {
+            for (m in re.findAll(descJson)) {
+                val u = decryptOrSkip(m.groupValues[1]) ?: continue
+                if (!u.startsWith("http") || u.contains("subtitle", ignoreCase = true)) continue
+                val life = tokenRemainingSeconds(u) ?: continue
+                val b = best
+                if (b == null || life > b) best = life
+            }
+        }
+        return best
     }
 
 
@@ -675,21 +711,41 @@ class DramaTipProvider(private val prefs: SharedPreferences? = null) : MainAPI()
                         // قبولها خيرٌ من null: خطّ نجاة البثّ يبقيها، واللاعب قد
                         // يجلب القائمة فيجدّدها بنفسه.
                         val staleness = descStaleness(desc.toString())
-                        if (staleness != null && staleness < -1) {
-                            lastWhy = "وصفة بائتة (تأخّرت ${-staleness}ث)"
-                            android.util.Log.e("DramaTip", "episode-source stale ${-staleness}s book=$bookId ser=$serial")
+                        // ★ 2026-10-17. الحكم الثاني — وهو الحاسم: **عمر الرمز
+                        // نفسه**. `refreshAfter` قد يغيب تمامًا (قِيس اليوم
+                        // `None` على الوصفة المخبّأة لكتابٍ رمزُه منتهٍ)، فلا
+                        // تُكتشف البلى بالحقل بل بالرمز. وحين ينتهي الرمز يكون
+                        // بثّه خطأ 2004 (BAD_HTTP_STATUS) حتمًا: القائمة تفتح
+                        // ثم يرفض الحافّة قطعةَ الفيديو بـ403.
+                        val bestLife = descBestLife(desc.toString())
+                        val staleByField = staleness != null && staleness < -1
+                        val staleByToken = bestLife != null && bestLife <= 0
+                        if (staleByField || staleByToken) {
+                            lastWhy = if (staleByToken)
+                                "رمزٌ منتهٍ (عمر ${bestLife}ث)"
+                            else "وصفة بائتة (تأخّرت ${-staleness!!}ث)"
+                            android.util.Log.e(
+                                "DramaTip",
+                                "episode-source stale book=$bookId ser=$serial" +
+                                    " field=${staleness ?: "?"}s token=${bestLife ?: "?"}s"
+                            )
                             if (attempt < 3) {
                                 delay(120L)
                                 continue
                             }
+                            // استُنفدت المحاولات والأصل مُصرّ على نسخةٍ منتهية.
+                            // هذه هي الحالة الوحيدة التي يُقبل فيها الميت —
+                            // ليقرّرها loadLinks: تُسقَط صراحةً خيرٌ من بثّها
+                            // فيرى المستخدم خطأ 2004 على محتوى شغّال.
                             return plainFromDescriptor(desc.toString())
                         }
-                        // ★ رصدٌ للتقاط: كم تأخّرت الوصفة عن موعد بلاها؟ الرقم
-                        // هذا هو الفرق بين «بائتة» و«طازجة» في سجلّ الجهاز،
-                        // ويُقطع الشكّ في أنّ الطلب نفسه كان خاطئًا.
+                        // ★ رصدٌ للتقاط: كم تأخّرت الوصفة عن موعد بلاها، وكم
+                        // يتبقّى لرمزها؟ الرقمان هما الفرق بين «بائتة» و«طازجة»
+                        // في سجلّ الجهاز، ويُقطع الشكّ في أنّ الطلب كان خاطئًا.
                         android.util.Log.d(
                             "DramaTip",
-                            "episode-source ok book=$bookId ser=$serial bust=$bust stale=${staleness ?: "?"}s"
+                            "episode-source ok book=$bookId ser=$serial bust=$bust" +
+                                " stale=${staleness ?: "?"}s token=${bestLife ?: "?"}s"
                         )
                         return plainFromDescriptor(desc.toString())
                     }
@@ -1188,10 +1244,30 @@ class DramaTipProvider(private val prefs: SharedPreferences? = null) : MainAPI()
             }
             val fakePlaylist = { v: Verdict? -> v != null && v.why.startsWith("not a playlist:") }
 
-            // وحين تنتهي إعادة الإنتاج، نُرخي الحكم على الرموز **المنتهية
-            // وحدها** ونبثّها: بدء التشغيل قد يعيد جلب القائمة بنفسه فينجح،
-            // ولا شيءَ أسوأ من «لم يعثر على روابط» على محتوى يعمل في الموقع.
-            // أمّا الحكم بالبثّ الناقص (403) فلا نُرخيه — يبقى موتًا صريحًا.
+            // ★ 2026-10-17. الجذر الحقيقيّ لخطأ **2004**.
+            //
+            // الالتقاط أثبت أنّ اللاعب يردّ 2004 (`ERROR_CODE_IO_BAD_HTTP_STATUS`)
+            // على رابطين: قائمةُ البثّ تُفتح ثم تردّ قطعةُ الفيديو ٤٠٣. وقِيس اليوم
+            // أنّ الحافّة تُعلن السبب بصيغتين مختلفتين: `need sign info` للتوقيع
+            // الناقص، و**`t info expired` للرمز المنتهي**. وكان `wrongToken`
+            // يشترط الصيغة الأولى وحدها، فمرّ المنتهي بلا حكم — وأخطرُ من ذلك
+            // أنّ خطّ النجاة (`lenient`) كان يُرخي الحكم على **كلّ** ما لم
+            // يُصنَّف، فبُثّ المنتهي فعلًا (‎-7533s‎ في السجلّ) وظهر 2004.
+            //
+            // فصار الرمز المنتهي صنفًا مستقلًّا: يستحقّ إعادة الإنتاج (كالناقص)،
+            // و**لا يُرخى أبدًا** في خطّ النجاة — لأنّ بثّه خطأ 2004 حتمًا.
+            // ولا يُعاد تصنيف مضيفٍ حيّ إلى ميت: البوّابة تقرأ العمر محليًّا
+            // أيضًا، فلا يبقى في القائمة رمزٌ ميت أصلًا.
+            val tokenExpired = { u: String, v: Verdict? ->
+                (tokenRemainingSeconds(u)?.let { it <= 0 } == true) ||
+                    (v != null && v.why.startsWith("HTTP 403") &&
+                        (v.body?.contains("t info expired", ignoreCase = true) == true))
+            }
+
+            // وحين تنتهي إعادة الإنتاج، نُرخي الحكم على ما **تعذّر الحكم عليه
+            // وحدَه** (مهلة أو انقطاع) — أمّا الحكم القاطع فلا يُرخى: ٤٠٣
+            // التوقيع الناقص والرمزُ المنتهي والقائمةُ المزيفة تبقى موتًا صريحًا،
+            // فبثّها يعني خطأ 2004 أو 3002 على محتوى يعمل في الموقع.
             var lenient = false
 
             suspend fun uniqOf(fc: List<Cand>): List<Cand> {
@@ -1255,9 +1331,14 @@ class DramaTipProvider(private val prefs: SharedPreferences? = null) : MainAPI()
                 val baseSerial = meta.firstSerial
                 val ser = ep + baseSerial - 1
 
-                // سببان يستحقّان إعادة الإنتاج: رمزٌ بائت (٤٠٣ `need sign info`)
-                // أو قائمةٌ مزيفة (HTML بزيّ m3u8 → «خطأ 3002» عند اللاعب).
-                val badIdx = uniq.indices.filter { wrongToken(verdicts[it]) || fakePlaylist(verdicts[it]) }
+                // ثلاثة أسباب تستحقّ إعادة الإنتاج: رمزٌ ناقص (٤٠٣
+                // `need sign info`)، ورمزٌ **منتهٍ** (٤٠٣ `t info expired` أو
+                // عمرٌ سالب في الرابط — وهو مصدر خطأ 2004)، وقائمةٌ مزيفة
+                // (HTML بزيّ m3u8 → «خطأ 3002» عند اللاعب).
+                val badIdx = uniq.indices.filter {
+                    wrongToken(verdicts[it]) || fakePlaylist(verdicts[it]) ||
+                        tokenExpired(uniq[it].url, verdicts[it])
+                }
                 val rem = uniq.getOrNull(badIdx.firstOrNull() ?: 0)?.let { tokenRemainingSeconds(it.url) }
                 logE("DramaTip: bad-token count=${badIdx.size}/${uniq.size}" +
                     (rem?.let { " (عمر الباقي ${it}s)" } ?: "") + " book=$bookId ser=$ser")
@@ -1286,13 +1367,16 @@ class DramaTipProvider(private val prefs: SharedPreferences? = null) : MainAPI()
                     logD("DramaTip: re-minted cands=${uniq.size} best=${uniq.firstOrNull()?.let { tokenRemainingSeconds(it.url) }}s")
                 }
 
-                // بعد استنفاد الإنتاج: يُرخى الحكم على **المنتهي وحده** فيُبثّ
-                // «خط نجاة» — بدء التشغيل قد يجلب القائمة فيجدّد بنفسه (قِيس أنّ
-                // الجهاز يجلب الرموز الطازجة بـ200 من الشبكة نفسها). ويبقى ٤٠٣
-                // التوقيع الناقص والقائمةُ المزيفة موتًا صريحًا لا يُرخى.
+                // بعد استنفاد الإنتاج: يُرخى الحكم على ما **تعذّر الحكم عليه**
+                // وحدَه (مهلة أو انقطاع اتصال — لا يُثبتان موتًا). وأمّا الحكم
+                // القاطع فلا يُرخى أبدًا: ٤٠٣ التوقيع الناقص، والرمزُ المنتهي،
+                // والقائمةُ المزيفة — بثُّها خطأ 2004/3002 حتمًا، وقد قِيس أنّ
+                // إرخاءها هو **مصدر خطأ 2004** الذي رآه المستخدم (بُثّ رمزٌ
+                // عمره ‎-7533s‎ لأنّ جسم الحافّة قال `t info expired` لا
+                // `need sign info`). وقائمةٌ فارغةٌ أصدق من رابطٍ يفتح بخطأ.
                 if (!verdicts.any { it?.alive == true }) {
                     lenient = true
-                    logE("DramaTip: lenient=true (نبثّ المنتهي البديل) book=$bookId ser=$ser")
+                    logE("DramaTip: lenient=true (المنتهي لا يُرخى — إرخاءٌ لما تعذّر حكمه) book=$bookId ser=$ser")
                 }
             }
 
@@ -1301,16 +1385,32 @@ class DramaTipProvider(private val prefs: SharedPreferences? = null) : MainAPI()
             val variants = mutableListOf<Var>()
             for ((i, c) in uniq.withIndex()) {
                 val raw = verdicts[i]
+                // ★ 2026-10-17. **بوّابة الرمز المنتهي — الجذر المباشر لخطأ 2004.**
+                //
+                // عمر الرمز معلومٌ محلّيًّا من الرابط نفسه (`t=` و`verify=` وقتا
+                // انتهاء)، فلا حاجة إلى شبكةٍ للحكم به. وكان الرابط المنتهي
+                // ينجو من الإسقاط كلّه حين **تنتهي مهلة** فحصه: فيُصنَّف «تعذّر
+                // الحكم» ويُبثّ في الآخر (deferred)، فيفتح اللاعب القائمة ثم
+                // تردّ قطعةُ الفيديو ٤٠٣ فيظهر 2004. والالتقاط يشهد: رابطٌ
+                // `f0.mp4?t=6ad24b02` عمره ‎-7894s‎ بُثّ بعد فحصه
+                // (`cannot-tell … SocketTimeoutException`) فظهر 2004.
+                //
+                // فالحكم المحلّيّ يسبق كلّ شيء: رمزٌ مضى أجله لا يُبثّ أبدًا،
+                // ولو قال الفحص إنّه مات، ولو تعذّر الفحص.
+                if (tokenExpired(c.url, raw)) {
+                    logD("DramaTip: drop expired ${c.label} ${c.url.take(70)}" +
+                        " عمر=${tokenRemainingSeconds(c.url)}s why=${raw?.why ?: "-"}")
+                    continue
+                }
                 // الإسقاط للرابط المُثبت موته فقط (كود حالةٍ أو علامةٌ في جسم البروكسي أو
                 // شهادة TLS مرفوضة أو مضيفٌ لا يُحلّ بعد إعادة محاولةٍ صريحة). أمّا
                 // تعذّر الاتصال (مهلة أو انقطاع) فلا يُسقط الرابط — يُبثّ في الآخر.
-                // ★ وفي إرخاء خطّ النجاة (lenient=true) يُبثّ **المنتهي وحدَه**:
-                // رمزٌ مضى أجله قد يجدّده اللاعب بجلب القائمة (كما أظهر الاستقصاء)،
-                // ولا شيء أسوأ من «لم يعثر على روابط» على محتوى يعمل في الموقع.
-                // ويبقى ٤٠٣ التوقيع الناقص (`need sign info`) والقائمة المزيفة
-                // موتًا صريحًا لا يُرخى.
+                // ★ وفي إرخاء خطّ النجاة (lenient=true) يُبثّ ما **تعذّر الحكم
+                // عليه وحدَه**: رمزٌ محكومٌ بموته (منتهٍ أو ناقص التوقيع أو قائمةٌ
+                // مزيفة) يبقى ميتًا فلا يُبثّ، لأنّ بثّه يظهر للمستخدم خطأ 2004
+                // (BAD_HTTP_STATUS) أو 3002 — وهي الأخطاء التي جاء الإصلاح لأجلها.
                 val v = if (lenient && raw != null && !raw.alive && raw.certain &&
-                    !wrongToken(raw) && !fakePlaylist(raw)
+                    !wrongToken(raw) && !fakePlaylist(raw) && !tokenExpired(c.url, raw)
                 ) raw.copy(alive = true) else raw
                 if (v != null && !v.alive && v.certain) {
                     logD("DramaTip: drop dead ${c.label} ${c.url.take(70)} why=${v.why}")
