@@ -122,6 +122,39 @@ class DramaTipProvider(private val prefs: SharedPreferences? = null) : MainAPI()
         "Referer" to TIP_MAIN
     )
 
+    /**
+     * ★ 2026-10-16. انتهاء صلاحية رمز البثّ من الرمز نفسه.
+     *
+     * قِيس في 2026-10-16 على `cdnvideo.cdreader.com` (حافّة TencentEdgeOne):
+     *  - `sign` ناقص أو منتهٍ ← `403` وجسمه حرفيًّا `need sign info`.
+     *  - الرابط الموقّع الطازج ← `200` ونوعه `application/vnd.apple.mpegurl`.
+     *  - والجهاز نفسه (خارج التطبيق، عبر `nc`) يجلب الرمز الطازج بـ`200`،
+     *    فشبكته بريئة والـ403 ليس حكمًا على المضيف.
+     *
+     * والمصدر الحقيقي للعلّة: **الوصفة مُخبَّأة** (`cache-control: private,
+     * max-age=300`)، وعُقد dramatip تخدم نُسخًا متباعدة. قِيس على عقدتين
+     * لاسمٍ واحد: `104.21.44.220` أعطت رمزًا `t` ينتهي بعد **دقيقتين**،
+     * و`172.67.204.32` أعطت رمزًا ينتهي بعد **٣٥ دقيقة**. فحلقةٌ تُصيب
+     * نسخةً شبه منتهية تُفحَص بعد ثانيتين فتردّ `403` وتُسقَط، فيرى المستخدم
+     * «لم يعثر على روابط» على منصّةٍ يعمل محتواها في الموقع.
+     *
+     * والحقل `t` في الاستعلام **وقتُ الانتهاء** لا وقت الصكّ: قِيس أن الفرق
+     * بين `t` ووقت الطلب يبلغ ٢٦–٥٩ دقيقة (أطول من عمر جلسة المشاهدة).
+     * فبه نعرف العمر الباقي بلا ساعةٍ إضافية على الشبكة.
+     */
+    private fun tokenExpiryEpoch(url: String): Long? {
+        val h = Regex("""[?&]t=([0-9a-fA-F]+)""").find(url)?.groupValues?.get(1) ?: return null
+        return h.toLongOrNull(16)
+    }
+
+    /**
+     * ثوانٍ باقية لصلاحية كل رمز في المرشّحين (null = لا `t` فلا حكم).
+     * تُستعمل في السجلّ فقط: «عمر الباقي ١٢s» تفسّر «لم يعثر على روابط»
+     * تفسيرًا قاطعًا بلا تخمين.
+     */
+    private fun tokenRemainingSeconds(url: String): Long? =
+        tokenExpiryEpoch(url)?.let { it - System.currentTimeMillis() / 1000 }
+
     private fun escapeSlug(slug: String): String =
         URLEncoder.encode(slug, "UTF-8").replace("+", "%20")
 
@@ -563,7 +596,7 @@ class DramaTipProvider(private val prefs: SharedPreferences? = null) : MainAPI()
      * طلبٌ منفصل ومعزول تمامًا عن الوصفة الأساسية: أيّ فشل هنا يعيد null فيسقط
      * الكود على سلوكه القديم، ولا تكون «إعادة الجلب» سببًا في فقدان روابط.
      */
-    private suspend fun apiLinks(bookId: String, serial: Int): String? {
+    private suspend fun apiLinks(bookId: String, serial: Int, bust: Boolean = false): String? {
         // ★ 2026-10-16. كانت مهلةً واحدة ثابتة (٢٠ث) في كل محاولة، ومحاولات
         // الكود الثلاث تتقاسم الفشل نفسه. الصيغة الجديدة: محاولتان بمهلةٍ أقصر
         // (١٢ث) تُبقيان الزمن الكلي في حدود رسالةٍ واحدة، ثم محاولةٌ ثالثة
@@ -574,7 +607,16 @@ class DramaTipProvider(private val prefs: SharedPreferences? = null) : MainAPI()
         // ولم نُضاعف بالتوازي: قِيس أنّ الخدمة إمّا تردّ كاملةً أو تفشل
         // كاملةً في اللحظة (١٢ طلبًا متوازيًا نجحت كلّها، و٤٠ متتابعًا كذلك)،
         // فالتغطية المكانيّة لا تُنجي شيئًا والعلاج زمنيّ.
-        val url = "$tipApi/$bookId/$serial?lang=ar&refresh=1"
+        // ★ 2026-10-16. `refresh=1` لا يخترق تخزين الحافّة دائمًا: قِيس في
+        // 2026-10-16 أنّ `refresh=1` ومعاملًا عشوائيًّا و`no-cache` تعيد
+        // **الرمز نفسه** داخل نافذة الذاكرة (‎max-age=300‎). والعلّة الحقيقيّة
+        // أنّ عُقد dramatip تخدم نُسخًا متباعدة: عقدتان لاسمٍ واحد أعطتا
+        // `t` بعمر **دقيقتين** وأخرى بعمر **٣٥ دقيقة**. فالعلاج ليس اختراق
+        // الذاكرة بل **إعادة الطلب** (قد تُصيب نُسخةً أطزج) ثم خطّ نجاةٍ
+        // يُبثّ فيه المنتهي. ويُضاف المعامل العشوائي لأنّه لا يضرّ، وقد
+        // يُصيب مفتاحًا مختلفًا على عقدةٍ أخرى. أثره هنا: رمزٌ بعمر ~٥٠ دقيقة.
+        val url = "$tipApi/$bookId/$serial?lang=ar&refresh=1" +
+            if (bust) "&_=${System.currentTimeMillis()}" else ""
         var lastWhy = "-"
         for (attempt in 1..3) {
             try {
@@ -771,7 +813,8 @@ class DramaTipProvider(private val prefs: SharedPreferences? = null) : MainAPI()
      * شيئًا عن الرابط — وإسقاطهما كان يجعل «لا روابط» نتيجةً لخللٍ عابر. وشهادة TLS
      * الفاسدة استثناء: البايتات موجودة لكن كل عميلٍ صارم يرفضها، فهي حكم.
      */
-    private class Verdict(
+    // data class كي يُبنى «حكمٌ مُرخى» بـcopy في خطّ النجاة بلا تكرار الحقول.
+    private data class Verdict(
         val alive: Boolean,
         val contentType: String,
         val body: String?,
@@ -846,7 +889,20 @@ class DramaTipProvider(private val prefs: SharedPreferences? = null) : MainAPI()
                 c.connectTimeout = 7000
                 c.readTimeout = 7000
                 val code = c.responseCode
-                if (code !in 200..399) return Verdict(false, "", null, "HTTP $code", true)
+                if (code !in 200..399) {
+                    // ★ 2026-10-16. حافّة البثّ تُعلن سبب الرفض في جسم الخطأ:
+                    // ‎403‎ جسمه حرفيًّا `need sign info` معناه **توقيعٌ ناقصٌ أو
+                    // منتهٍ** لا رابطٌ ميّت. فحفظ الجسم (٦٤ بايتًا) هو الفرق بين
+                    // إسقاط الحلقة بحكمٍ أعمى وإعادة إنتاج الوصفة من أصلها —
+                    // وهو ما جعل التقاط الـ403 القديم بلا جسمٍ يُضلّ.
+                    val whyBody = if (code == 403) readLimited(c.errorStream, 512).take(64) else ""
+                    return Verdict(
+                        false, c.contentType.orEmpty(),
+                        whyBody.takeIf { it.isNotBlank() },
+                        if (whyBody.isNotBlank()) "HTTP $code: $whyBody" else "HTTP $code",
+                        true,
+                    )
+                }
                 val ct = c.contentType.orEmpty()
                 // ★ 2026-10-16. كنّا لا نقرأ جسمًا وسمه المضيف `video/*` كي لا
                 // نُنزّل فيديو كاملًا. لكنّ ذلك أفقدنا التمييز حين **يكذب**
@@ -1054,10 +1110,33 @@ class DramaTipProvider(private val prefs: SharedPreferences? = null) : MainAPI()
             // روابط الصفحة مرشّحاتٍ أخيرةً بعد الأنعش — تُبثّ في الآخر فلا تسرق
             // الافتراضيَّ من رابطٍ مُثبتٍ حيّ.
             val seenCands = HashSet<String>()
-            val freshCands = apiDesc?.let { candsOf(it) }.orEmpty()
+            var freshCands = apiDesc?.let { candsOf(it) }.orEmpty()
             val pageCands = f?.let { candsOf(it) }.orEmpty()
-            val cands = if (freshCands.isNotEmpty()) freshCands + pageCands else pageCands
-            val uniq = cands.filter { seenCands.add(it.url) }
+
+            // ★ 2026-10-16. أحكامٌ تُوكل إلى اللاعب موتًا مؤكّدًا: ٤٠٣ من حافّة
+            // البثّ **وجسمها `need sign info`** — أي توقيعٌ ناقصٌ أو منتهٍ لا
+            // رابطٌ ميّت، و`not a playlist` — أي قالبُ HTML مُتنكّرٌ بزيّ قائمة
+            // تشغيل، فاللاعب يردّه «خطأ 3002». نُجمعهما لإعادة إنتاج الوصفة
+            // من أصلها (تخريب ذاكرة العُقدة) لا لإسقاط الحلقة.
+            val wrongToken = { v: Verdict? ->
+                v != null && v.why.startsWith("HTTP 403") &&
+                    (v.body?.contains("need sign", ignoreCase = true) == true)
+            }
+            val fakePlaylist = { v: Verdict? -> v != null && v.why.startsWith("not a playlist:") }
+
+            // وحين تنتهي إعادة الإنتاج، نُرخي الحكم على الرموز **المنتهية
+            // وحدها** ونبثّها: بدء التشغيل قد يعيد جلب القائمة بنفسه فينجح،
+            // ولا شيءَ أسوأ من «لم يعثر على روابط» على محتوى يعمل في الموقع.
+            // أمّا الحكم بالبثّ الناقص (403) فلا نُرخيه — يبقى موتًا صريحًا.
+            var lenient = false
+
+            suspend fun uniqOf(fc: List<Cand>): List<Cand> {
+                val cs = if (fc.isNotEmpty()) fc + pageCands else pageCands
+                val seen = HashSet<String>()
+                return cs.filter { seen.add(it.url) }
+            }
+
+            var uniq = uniqOf(freshCands)
             if (uniq.isEmpty()) {
                 logE("DramaTip.loadLinks $source ep=$ep decrypted nothing")
                 return false
@@ -1097,14 +1176,72 @@ class DramaTipProvider(private val prefs: SharedPreferences? = null) : MainAPI()
                 verdicts = uniq.mapIndexed { i, c -> byUrl[c.url] ?: verdicts[i] }
             }
 
+            // ٢-ب) ★ 2026-10-16. العلاج الجذريّ لـ«لم يعثر على روابط» على MoboReels:
+            //    الوصفة **بائتة** فرمزُها منتهٍ أو ناقص. لا نُصلح الرمز (لا نملك
+            //    المفتاح)، بل **نعيد إنتاج الوصفة** من أصلها بتخريب ذاكرة العُقدة،
+            //    ونُعيد الفحص. وذلك مرّتين على الأكثر — فلا يطول الزمن على الحلقة
+            //    السليمة (تُنجي من الموجة الأولى فتُقفز الحلقة كلّها).
+            if (probing && bookId != null && verdicts.none { it?.alive == true }) {
+                val baseSerial = meta.firstSerial
+                val ser = ep + baseSerial - 1
+
+                // سببان يستحقّان إعادة الإنتاج: رمزٌ بائت (٤٠٣ `need sign info`)
+                // أو قائمةٌ مزيفة (HTML بزيّ m3u8 → «خطأ 3002» عند اللاعب).
+                val badIdx = uniq.indices.filter { wrongToken(verdicts[it]) || fakePlaylist(verdicts[it]) }
+                val rem = uniq.getOrNull(badIdx.firstOrNull() ?: 0)?.let { tokenRemainingSeconds(it.url) }
+                logE("DramaTip: bad-token count=${badIdx.size}/${uniq.size}" +
+                    (rem?.let { " (عمر الباقي ${it}s)" } ?: "") + " book=$bookId ser=$ser")
+
+                // تجميع حدّين من الـAPI ثم ترجيح **الأطول عمرًا**: قِيس أنّ
+                // `refresh=1` وحده قد يعيد الرمز البائت نفسه داخل نافذة الذاكرة
+                // (‎max-age=300‎)، بينما عقدتان لاسم dramatip نفسه أعطتا `t`
+                // بعمر دقيقتين وأخرى بعمر ٥٠ دقيقة. فالفرق كلّه في **إعادة
+                // الطلب** حتى تصيب نُسخةً أطزج — لا في اختراق الذاكرة.
+                val runs = mutableListOf<List<Cand>>()
+                for (attempt in 1..2) {
+                    // لا نبتلع إلغاء البحث: CloudStream يُلغي الطلبات البائتة،
+                    // وابتلاعه يُظهر «لا روابط» لحلقةٍ سليمة (قِيس سابقًا).
+                    val desc = try { apiLinks(bookId, ser, bust = attempt > 1) }
+                    catch (e: CancellationException) { throw e }
+                    catch (e: Exception) { null }
+                    desc?.let { candsOf(it) }?.takeIf { it.isNotEmpty() }?.let { runs.add(it) }
+                    if (attempt < 2) delay(200L)
+                }
+                val reCands = runs.flatten().distinctBy { it.url }
+                    .sortedByDescending { tokenRemainingSeconds(it.url) ?: 0L }
+                if (reCands.isNotEmpty() && reCands.map { it.url } != uniq.map { it.url }) {
+                    freshCands = reCands
+                    uniq = uniqOf(freshCands)
+                    verdicts = probeAll(uniq)
+                    logD("DramaTip: re-minted cands=${uniq.size} best=${uniq.firstOrNull()?.let { tokenRemainingSeconds(it.url) }}s")
+                }
+
+                // بعد استنفاد الإنتاج: يُرخى الحكم على **المنتهي وحده** فيُبثّ
+                // «خط نجاة» — بدء التشغيل قد يجلب القائمة فيجدّد بنفسه (قِيس أنّ
+                // الجهاز يجلب الرموز الطازجة بـ200 من الشبكة نفسها). ويبقى ٤٠٣
+                // التوقيع الناقص والقائمةُ المزيفة موتًا صريحًا لا يُرخى.
+                if (!verdicts.any { it?.alive == true }) {
+                    lenient = true
+                    logE("DramaTip: lenient=true (نبثّ المنتهي البديل) book=$bookId ser=$ser")
+                }
+            }
+
             // ٣) بثّ الأحياء بترتيب الصفحة؛ وكل HLS حيّ يُفرَّع على جوداته الحقيقية.
             class Var(val label: String, val url: String, val qLabel: String?)
             val variants = mutableListOf<Var>()
             for ((i, c) in uniq.withIndex()) {
-                val v = verdicts[i]
+                val raw = verdicts[i]
                 // الإسقاط للرابط المُثبت موته فقط (كود حالةٍ أو علامةٌ في جسم البروكسي أو
                 // شهادة TLS مرفوضة أو مضيفٌ لا يُحلّ بعد إعادة محاولةٍ صريحة). أمّا
                 // تعذّر الاتصال (مهلة أو انقطاع) فلا يُسقط الرابط — يُبثّ في الآخر.
+                // ★ وفي إرخاء خطّ النجاة (lenient=true) يُبثّ **المنتهي وحدَه**:
+                // رمزٌ مضى أجله قد يجدّده اللاعب بجلب القائمة (كما أظهر الاستقصاء)،
+                // ولا شيء أسوأ من «لم يعثر على روابط» على محتوى يعمل في الموقع.
+                // ويبقى ٤٠٣ التوقيع الناقص (`need sign info`) والقائمة المزيفة
+                // موتًا صريحًا لا يُرخى.
+                val v = if (lenient && raw != null && !raw.alive && raw.certain &&
+                    !wrongToken(raw) && !fakePlaylist(raw)
+                ) raw.copy(alive = true) else raw
                 if (v != null && !v.alive && v.certain) {
                     logD("DramaTip: drop dead ${c.label} ${c.url.take(70)} why=${v.why}")
                     continue
