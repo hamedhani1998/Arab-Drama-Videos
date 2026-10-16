@@ -1,4 +1,4 @@
-version = 9
+version = 10
 
 cloudstream {
     description = "DramaTip - دراما قصيرة من أكثر من ٢٠ منصة"

@@ -130,6 +130,74 @@ class DramaTipProvider(private val prefs: SharedPreferences? = null) : MainAPI()
     } catch (e: Exception) { logE("fetch $url: ${e.message}"); null }
 
     /**
+     * ما تحمله صفحة السلسلة من معطياتٍ **لا تتعلّق بحلقةٍ بعينها**: الكتاب
+     * (`bookId`) وأوّل رقم تسلسلي واسم المصدر. هذه فقط تُخبَّأ.
+     *
+     * ★ ولماذا لا يُخبَّأ الحِمل كلّه؟ قِيس على FlickReels أنّ صفحة السلسلة
+     * تحمل سلسلة الحلقة **الأولى** (`…hls_78186…`) بينما صفحة episode-7 تحمل
+     * `…hls_84268…` — فالرموز تختلف بالحلقة. فلو خُبّئ الحِمل كلّه لخدمنا
+     * حلقةً أخرى رابطَ الحلقة الأولى: يفتح المستخدم الحلقة ٧ فيرى الحلقة ١
+     * — وهو أسوأ من «لم يعثر على روابط». أمّا `bookId`/`firstSerial` فواحدٌ
+     * للسلسلة كلّها (قِيس على المنصّات السبع)، والـAPI يُسأل بهما عن الحلقة
+     * الصحيحة (`serial = ep + firstSerial - 1`).
+     *
+     * والفائدة المقصودة: إن سقطت صفحة الحلقة سقوطًا عابرًا، لم نَعُد نعيد
+     * `false` فورًا؛ بل نمضي إلى مسار الـAPI الذي لا يحتاج تلك الصفحة أصلًا.
+     */
+    private class SeriesMeta(val bookId: String?, val firstSerial: Int, val source: String?)
+
+    private val seriesMeta = java.util.concurrent.ConcurrentHashMap<String, SeriesMeta>()
+
+    // سقفٌ صغير: مفاتيح خفيفة، والغرض ألّا تسقط سلسلةُ الجلسة الواحدة.
+    private fun putSeriesMeta(key: String, m: SeriesMeta) {
+        if (key.isBlank()) return
+        if (seriesMeta.size > 64) seriesMeta.clear()
+        seriesMeta[key] = m
+    }
+
+    /**
+     * سلَغٌ واحد من رابط السلسلة ومن `Episode.data` — ليتطابق مفتاح الخِبأ فيهما.
+     *
+     * وقد يأتي سلَغ الصفحة صريحاً (`قصة-انتصار`) أو مُرمَّزاً
+     * (`%D9%82%D8%B5%D8%A9…`) حسب الطريق الذي فتح بها المستخدم الحلقة،
+     * فنفكّ الترميز ليجتمع المفتاحان على حالٍ واحدة. وإلّا لذهب الخِبأ
+     * سُدىً وهو جوهر هذا الإصلاح.
+     */
+    private fun bareSlug(s: String): String {
+        val raw = s.substringAfterLast('/').substringBefore('?').trim()
+        if ('%' !in raw) return raw
+        return try {
+            java.net.URLDecoder.decode(raw, "UTF-8").trim()
+        } catch (e: Exception) { raw }
+    }
+
+    /**
+     * يجلب حِمل صفحة الحلقة، ويكرّر الفشل **العابر** حتّى ثلاث مرّات.
+     *
+     * لماذا: هذا الجلب هو **قنّاص «لم يعثر على روابط»**. قِيس على FlickReels
+     * أنّ `curl` يفشل مرّةً كلّ بضع محاولات (‎000 — انتهاء مهلة الاتصال،
+     * والنجاح قد يستغرق ‎9.8s‎ وهو دون مهلة التطبيق)؛ وكان `loadLinks` يجلب
+     * الصفحة **مرّةً واحدة بلا إعادة** ثم يعيد `false` فورًا — *قبل* أن يسأل
+     * الـAPI أصلًا. فيرى المستخدم «لم يعثر على روابط» ورابطُ الـAPI الحيّ لم
+     * يُسأل عنه بعد. والتكرار لا يضرّ: السلسلة مهلةٌ والطلب واحد.
+     *
+     * ولا نكرّر على المسارات المتوازية (البحث يجلب ~٢٠ صفحة معًا) — التكرار
+     * هناك يضاعف الحمل على خادمٍ هشّ. هذا الجلب وحيدٌ في مساره.
+     */
+    private suspend fun episodeFlight(url: String): String? {
+        for (attempt in 1..3) {
+            val html = fetchText(url)
+            if (html != null) {
+                val f = extractFlight(html)
+                if (f != null) return f
+            }
+            logE("DramaTip: episode flight attempt=$attempt/3 url=$url")
+            if (attempt < 3) delay(700L * attempt)
+        }
+        return null
+    }
+
+    /**
      * يجلب **نصّ** ملفّ الترجمة من رابطها. لا يُعاد المحاولة ولا يُطلق استثناءً:
      * ترجمةٌ تعذّرت لا يجوز أن تُفقد الحلقة روابطها.
      *
@@ -255,6 +323,10 @@ class DramaTipProvider(private val prefs: SharedPreferences? = null) : MainAPI()
     override suspend fun load(url: String): LoadResponse? {
         return try {
             val h = fetchText(url) ?: return null
+            // نحفظ معطيات السلسلة (الكتاب وأوّلٌ تسلسلي واسم المصدر) الآن:
+            // فيها يُسأل الـAPI عن روابط أيّ حلقة، ولا تتغيّر بحلقةٍ بعينها
+            // (بخلاف الرموز المشفّرة في `chain` — انظر SeriesMeta).
+            extractFlight(h)?.let { putSeriesMeta(bareSlug(url), metaOf(it)) }
             val tvs = tvsNode(h) ?: return null
             val title = tvs.optString("name").replace(Regex("""\s+"""), " ").trim()
                 .takeIf { it.isNotBlank() } ?: return null
@@ -552,10 +624,21 @@ class DramaTipProvider(private val prefs: SharedPreferences? = null) : MainAPI()
         return out
     }
 
-    private fun sourceName(f: String): String {
-        val obj = objectAfterKey(f, "\"sourceFirst\"") ?: return name
-        val m = Regex(""""source":\s*"([^"]*)"""").find(obj)
-        return m?.groupValues?.get(1)?.takeIf { it.isNotBlank() } ?: name
+    private fun sourceName(f: String): String = metaOf(f).source ?: name
+
+    /**
+     * يقرأ من الحِمل ما لا يتعلّق بحلقةٍ بعينها: الكتاب وأوّلٌ تسلسلي والمصدر.
+     * (واسم المصدر يُقرأ من كائن `sourceFirst` — وهو الموضع الذي تقرأ منه
+     * `sourceName` أيضًا، فلا يتفرّق المصدران.)
+     */
+    private fun metaOf(f: String): SeriesMeta {
+        val bookId = Regex(""""bookId"\s*:\s*"([^"]+)"""").find(f)?.groupValues?.get(1)
+        val firstSerial = Regex(""""firstSerial"\s*:\s*(-?\d+)""").find(f)
+            ?.groupValues?.get(1)?.toIntOrNull() ?: 1
+        val obj = objectAfterKey(f, "\"sourceFirst\"")
+        val src = obj?.let { Regex(""""source":\s*"([^"]*)"""").find(it) }
+            ?.groupValues?.get(1)?.takeIf { it.isNotBlank() }
+        return SeriesMeta(bookId, firstSerial, src)
     }
 
     /**
@@ -678,8 +761,20 @@ class DramaTipProvider(private val prefs: SharedPreferences? = null) : MainAPI()
                 val code = c.responseCode
                 if (code !in 200..399) return Verdict(false, "", null, "HTTP $code", true)
                 val ct = c.contentType.orEmpty()
-                val readBody = proxy || !ct.lowercase().contains("video/")
-                val body = if (readBody) readLimited(c.inputStream, READ_CAP) else null
+                // ★ 2026-10-16. كنّا لا نقرأ جسمًا وسمه المضيف `video/*` كي لا
+                // نُنزّل فيديو كاملًا. لكنّ ذلك أفقدنا التمييز حين **يكذب**
+                // الوسم: مدخل DramaBox الرئيس يعلن `type:hls` ويشير إلى
+                // `…/v1/dramabox/…m3u8` يردّ HTML — وحكمه قائمٌ على قراءة
+                // جسمه. فصار الفحص يقرأ رأسًا محدودًا (٣٢KB) من كل جسم،
+                // وحينها إن بدأ الجسم بترويسة ISO-BMFF (`ftyp`) فهو وسائط
+                // حقيقيّة فالوسم صادق؛ وإن كان `<` أو `{` فهو صفحة مُتنكّرة
+                // ⇒ ليس HLS مهما أعلن. وهو ما يعني: لا تنزيل فيديو كامل (يبقى
+                // سقفُ `readLimited` بالبايت)، ولا حكمَ على وسمٍ وحده.
+                // وإن وسم المُضيف الجسم `video/*` فحسبُنا رأسٌ صغير (٦٤KB):
+                // ترويسة `ftyp` تظهر في أوّل بايتات، فلا داعي لقراءة ملفٍّ
+                // ضخمٍ من شبكةٍ قد تتباطأ فنُطيل موجة الفحص بلا فائدة.
+                val head = if (ct.lowercase().contains("video/")) 64_000 else READ_CAP
+                val body = readLimited(c.inputStream, head)
                 if (proxy) {
                     val b = body.orEmpty()
                     if (b.contains("link expired") || b.contains("invalid token") || b.contains("invalid or expired")) {
@@ -753,7 +848,23 @@ class DramaTipProvider(private val prefs: SharedPreferences? = null) : MainAPI()
             val q = byUrl[main]
             out.add(Triple(if (q != null) "$source · ${q}p" else source, main, e.type))
         }
-        for ((qu, q) in byUrl) out.add(Triple("$source · ${q}p", qu, e.type))
+        // ★ 2026-10-16. الجودات تُعلن بنوع المدخل نفسه — بخلاف الواقع على DramaBox:
+        // مدخلُه الرئيس `type:"hls"` يقود إلى `…/v1/dramabox/…m3u8` (قالب HTML
+        // مُتنكّر ⇒ يُسقطه الفحص)، بينما جوداته 720/1080 روابط **mp4** حيّة على
+        // `dramaboxdb.com`. فكان يُصنَّف mp4 بـM3U8 بالنوع الموروث، وفحصُه لا
+        // يقرأ جسمه (يرى `video/mp4` فيكفّ) فيبقى M3U8 ⇒ حكمُه موكولٌ للاعب
+        // فيفشل بـ3002. والامتداد هو الدليل الأقوى: إن كان للجودة امتدادٌ مخالف
+        // لنوع مدخلها خلَفه هو — وإلاّ بقي النوع الموروث (فلا يتغيّر سلوك
+        // المنصّات التي جوداتها HLS مجزّأةً فعلًا، مثل JoyReels).
+        for ((qu, q) in byUrl) {
+            val vq = (
+                if (qu.substringBefore('?').substringAfterLast('/').contains('.', ignoreCase = false)) {
+                    qu.substringBefore('?').substringAfterLast('/').substringAfterLast('.', "")
+                } else ""
+                ).lowercase()
+            val ty = if (vq == "mp4" || vq == "m4v" || vq == "webm") "mp4" else e.type
+            out.add(Triple("$source · ${q}p", qu, ty))
+        }
         return out
     }
 
@@ -780,18 +891,23 @@ class DramaTipProvider(private val prefs: SharedPreferences? = null) : MainAPI()
             val slug = slugPart.substringAfterLast('/').takeIf { it.isNotBlank() } ?: return false
 
             val url = "$TIP_MAIN/series/${escapeSlug(slug)}/episode-$ep"
-            val html = fetchText(url) ?: return false
-            val f = extractFlight(html) ?: return false
-            val source = sourceName(f)
+            // ★ قد يفشل الحِمل سقوطًا عابرًا (قِيس: صفحات dramatip تسقط مرّةً كلّ
+            // بضع محاولات، وبعضها استغرق ٩٫٨ث — لكلّ طلبٍ مستقلٍّ). وكان الكود
+            // يعيد `false` فورًا فيرى المستخدم «لم يعثر على روابط» — *قبل* أن
+            // يسأل الـAPI الحيّ أصلًا. فلا نُسقط الحلقة بسبب الحِمل: نستمرّ
+            // ونتّكئ على معطيات السلسلة المحفوظة (من `load`) لسؤال الـAPI عن
+            // هذه الحلقة بعينها، ووصفةُ الصفحة تبقى مكمّلًا إن حضرت.
+            val f = episodeFlight(url)
+            val meta = f?.let { metaOf(it) } ?: seriesMeta[bareSlug(slug)]
+            val source = f?.let { sourceName(it) } ?: meta?.source ?: name
 
             // ★ إعادة الجلب: وصفة الصفحة مُخبَّأة وقد تحمل رموزًا منتهية (انظر TIP_API).
             // الـAPI يُسأل عن الحلقة نفسها من كتابها ورقمها التسلسلي، وتُدمج الوصفتان:
             // الوصفة المُنعشة أولًا لأنها الأحدث، ثم وصفة الصفحة. كل رابط يُبثّ مرّة
             // واحدة (emitted أدناه)، فالتكرار بين الوصفتين لا يُضاعف السيرفرات.
             // bookId قد يكون أبجديًا رقميًا مع شرطات (bilitv: "asrr-lzwj-lkhfy-at")
-            val bookId = Regex(""""bookId"\s*:\s*"([^"]+)"""").find(f)?.groupValues?.get(1)
-            val firstSerial = Regex(""""firstSerial"\s*:\s*(-?\d+)""").find(f)
-                ?.groupValues?.get(1)?.toIntOrNull() ?: 1
+            val firstSerial = meta?.firstSerial ?: 1
+            val bookId = meta?.bookId
             val apiDesc = if (bookId != null) apiLinks(bookId, ep + firstSerial - 1) else null
             if (apiDesc != null) logD("DramaTip: episode-source OK book=$bookId ser=${ep + firstSerial - 1}")
 
@@ -835,7 +951,7 @@ class DramaTipProvider(private val prefs: SharedPreferences? = null) : MainAPI()
             // الافتراضيَّ من رابطٍ مُثبتٍ حيّ.
             val seenCands = HashSet<String>()
             val freshCands = apiDesc?.let { candsOf(it) }.orEmpty()
-            val pageCands = candsOf(f)
+            val pageCands = f?.let { candsOf(it) }.orEmpty()
             val cands = if (freshCands.isNotEmpty()) freshCands + pageCands else pageCands
             val uniq = cands.filter { seenCands.add(it.url) }
             if (uniq.isEmpty()) {
@@ -939,7 +1055,7 @@ class DramaTipProvider(private val prefs: SharedPreferences? = null) : MainAPI()
                 // نفسها، فالدمج بالرابط يمنع جلبتين متطابقتين، والدمج بالنصّ
                 // يمنع ظهور مسارٍ واحد مرّتين في قائمة المشغّل.
                 val subSources = LinkedHashMap<String, String>()
-                for (desc in listOfNotNull(apiDesc, f)) {
+                for (desc in listOfNotNull(apiDesc, f)) {   // f قد تكون null إن سقط الجلب — والترجمة تأتي من الـAPI وحدها حينها
                     for (sobj in subtitleObjects(desc)) {
                         val enc = encRe.find(sobj)?.groupValues?.get(1) ?: continue
                         val value = decryptOrSkip(enc)?.trim()?.takeIf { it.isNotBlank() } ?: continue
