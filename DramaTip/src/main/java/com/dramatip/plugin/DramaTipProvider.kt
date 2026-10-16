@@ -376,12 +376,40 @@ class DramaTipProvider(private val prefs: SharedPreferences? = null) : MainAPI()
             val total = tvs.optInt("numberOfEpisodes").takeIf { it > 0 } ?: 1
 
             // روابط الحلقات الصريحة (الموقع يكتب /ar/series/<slug>/episode-N في HTML).
-            val hrefs = Regex("""/ar/series/([^"/\s]+)/episode-(\d+)""").findAll(h).toList()
-            val pairs = if (hrefs.isNotEmpty()) {
-                hrefs.mapNotNull { m ->
-                    val n = m.groupValues[2].toIntOrNull() ?: return@mapNotNull null
-                    n to m.groupValues[1]
-                }.distinctBy { it.first }.sortedBy { it.first }
+            //
+            // ★ 2026-10-16. زرّ «الحلقة التالية/السابقة» يحمل هو أيضًا hrefًّا
+            // لـepisode-N، وقِيس على سلسلةٍ بحلقةٍ واحدة أنّ قائمتها تعرض
+            // episode-1 وحدها بينما يشير الزرّ إلى episode-2 **وهي صفحة 404**،
+            // فتُبنى في التطبيق حلقةٌ شبحية أخيرة لا يعملها الموقع أصلًا — وهذا
+            // هو «الحلقة تظهر ولا تعمل» بالضبط. الرقم المذكور في زرّ التنقّل
+            // وحده ليس دليلًا على وجود الحلقة؛ وما يُذكر في قائمة الحلقات يبقى
+            // صالحًا مهما قال الزرّ (ففي السلاسل الطويلة يشير الزرّ إلى حلقةٍ
+            // قائمة أصلًا). نستبعد الأرقام التنقّلية الوحيدة ونبقى الباقي كما هو.
+            val epHref = Regex("""/ar/series/([^"/\s]+)/episode-(\d+)""")
+            val navTail = Regex("""الحلقة\s*(التالية|السابقة|القادمة|الأخيرة|الماضية)""")
+            val hrefs = epHref.findAll(h).toList()
+            val fromList = HashSet<Int>()
+            val fromNav = HashSet<Int>()
+            for (m in hrefs) {
+                val n = m.groupValues[2].toIntOrNull() ?: continue
+                // ما بعد الرابط حتى `</a>`: زرّ التنقّل يعلّق اسمه هناك فورًا.
+                val seg = h.substring(m.range.last + 1)
+                val stop = seg.indexOf("</a>").takeIf { it in 0..240 }
+                    ?: minOf(240, seg.length)
+                if (navTail.containsMatchIn(seg.substring(0, stop))) fromNav.add(n)
+                else fromList.add(n)
+            }
+            val phantom = fromNav.filter { it !in fromList }.toSet()
+            if (phantom.isNotEmpty()) {
+                logD("DramaTip: load() حلقات شبحية من زرّ التنقّل مستبعدة: $phantom slug=${bareSlug(url)}")
+            }
+            val listed = hrefs.mapNotNull { m ->
+                val n = m.groupValues[2].toIntOrNull() ?: return@mapNotNull null
+                if (n in phantom) return@mapNotNull null
+                n to m.groupValues[1]
+            }
+            val pairs = if (listed.isNotEmpty()) {
+                listed.distinctBy { it.first }.sortedBy { it.first }
             } else {
                 (1..total).map { it to url.substringAfterLast('/') }
             }
