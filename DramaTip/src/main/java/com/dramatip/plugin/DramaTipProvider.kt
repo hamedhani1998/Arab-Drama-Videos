@@ -148,12 +148,49 @@ class DramaTipProvider(private val prefs: SharedPreferences? = null) : MainAPI()
     }
 
     /**
-     * ثوانٍ باقية لصلاحية كل رمز في المرشّحين (null = لا `t` فلا حكم).
-     * تُستعمل في السجلّ فقط: «عمر الباقي ١٢s» تفسّر «لم يعثر على روابط»
-     * تفسيرًا قاطعًا بلا تخمين.
+     * ثوانٍ باقية لصلاحية كل رمز في المرشّحين (null = لا رمزَ زمنيّ فلا حكم).
+     *
+     * والنوعان المقيسان رمزان ينتهيان بوقت **مطلق**:
+     *  - `?t=<hex>` على MoboReels/منصّات `cdreader.com` و`adp.10.m3u8`.
+     *  - `?verify=<ثوانٍ>` على Playlet (`zshipricf.farsunpteltd.net`): الالتقاط
+     *    أظهر `verify=1792166498` يفشل بـ403 وهو **ماضٍ بساعتين**، وآخر
+     *    `verify=1792174203` فشل وهو ماضٍ بـ٤ دقائق — فالاثنان وقتُ انتهاء.
+     *
+     * وتُعرض القيمة السالبة كما هي: «عمر الباقي -7533s» في السجلّ تعني رمزًا
+     * ميتًا بُثّ، وهي الدليل القاطع في التقاط المستخدم.
      */
-    private fun tokenRemainingSeconds(url: String): Long? =
-        tokenExpiryEpoch(url)?.let { it - System.currentTimeMillis() / 1000 }
+    private fun tokenRemainingSeconds(url: String): Long? {
+        val now = System.currentTimeMillis() / 1000
+        tokenExpiryEpoch(url)?.let { return it - now }
+        Regex("""[?&]verify=(\d{9,})""").find(url)?.groupValues?.get(1)?.toLongOrNull()?.let {
+            return it - now
+        }
+        return null
+    }
+
+    /**
+     * ★ 2026-10-16. كم **تأخّرت** الوصفة عن موعد بلاها المعلن؟
+     *
+     * تُعلن الوصفة بنفسها: `"refresh":true` و`"refreshAfter":<طابع>.` —
+     * وبعده صار الرابط بائتًا ووجب إعادة الجلب. قِيس على كتابٍ عالق أنّ
+     * `refreshAfter` كان ماضيًا بـ**٨٤٥٦ ثانية** (= ٢٫٣ ساعة) ورمزُه منتهٍ
+     * كذلك، بينما الطلب نفسه بـ`refresh=1` يعود برمزٍ طازج (‎+٤٤ دقيقة‎)
+     * ١٢/١٢. فالحقل هو إعلانُ البلى الذي كان الكود يتجاهله.
+     *
+     * ويُعاد **أكبر** تأخّر بين عناصر السلسلة (أسوأ مرشّح هو ما يحكم البثّ)،
+     * أو null حين لا يُعلن الموقع موعدًا (منصّاتٌ بلا `refreshAfter`).
+     */
+    private fun descStaleness(descJson: String): Long? {
+        val nowSec = System.currentTimeMillis() / 1000
+        val vals = Regex(""""refreshAfter"\s*:\s*(\d{6,})""")
+            .findAll(descJson)
+            .map { it.groupValues[1].toLongOrNull() }
+            .filterNotNull()
+            .toList()
+        if (vals.isEmpty()) return null
+        return nowSec - (vals.max())
+    }
+
 
     private fun escapeSlug(slug: String): String =
         URLEncoder.encode(slug, "UTF-8").replace("+", "%20")
@@ -627,6 +664,33 @@ class DramaTipProvider(private val prefs: SharedPreferences? = null) : MainAPI()
                     // وصفةٌ بلا chain لا تُغني (قد تكون استجابةً جزئيّة): تُعامَل
                     // فشلًا فتُعاد، ولا تُبتلع صامتةً فيرى المستخدم «لا روابط».
                     if (desc != null && desc.optJSONArray("chain") != null) {
+                        // ★ 2026-10-16. بوّابة الطزاجة. الالتقاط أثبت أنّ الرمز قد
+                        // يصل **منتهيًا** فعلًا (‎Source error‎ ٤٠٣ في اللاعب على
+                        // `cdnvideo.cdreader.com`)، والوصفة نفسها تُعلن موعد
+                        // البلى: `refreshAfter` طابعٌ زمنيّ، وبعده `refresh=true`.
+                        // قِيس على كتابٍ عالق: بلا `refresh=1` يتبقّى **-٢٫٣ ساعة**،
+                        // ومعه **+٤٤ دقيقة**، ١٢/١٢. فالوصفة التي `refreshAfter`
+                        // فيها ماضٍ لا تُقبل — يُعاد طلبها بمفتاحٍ متغيّر فورًا
+                        // بدل انتظار مهلةٍ كاملة. وإن أصرّ الأصل على نسخةٍ بائتة،
+                        // قبولها خيرٌ من null: خطّ نجاة البثّ يبقيها، واللاعب قد
+                        // يجلب القائمة فيجدّدها بنفسه.
+                        val staleness = descStaleness(desc.toString())
+                        if (staleness != null && staleness < -1) {
+                            lastWhy = "وصفة بائتة (تأخّرت ${-staleness}ث)"
+                            android.util.Log.e("DramaTip", "episode-source stale ${-staleness}s book=$bookId ser=$serial")
+                            if (attempt < 3) {
+                                delay(120L)
+                                continue
+                            }
+                            return plainFromDescriptor(desc.toString())
+                        }
+                        // ★ رصدٌ للتقاط: كم تأخّرت الوصفة عن موعد بلاها؟ الرقم
+                        // هذا هو الفرق بين «بائتة» و«طازجة» في سجلّ الجهاز،
+                        // ويُقطع الشكّ في أنّ الطلب نفسه كان خاطئًا.
+                        android.util.Log.d(
+                            "DramaTip",
+                            "episode-source ok book=$bookId ser=$serial bust=$bust stale=${staleness ?: "?"}s"
+                        )
                         return plainFromDescriptor(desc.toString())
                     }
                     lastWhy = if (desc == null) "بلا descriptor" else "بلا chain"
@@ -1133,7 +1197,13 @@ class DramaTipProvider(private val prefs: SharedPreferences? = null) : MainAPI()
             suspend fun uniqOf(fc: List<Cand>): List<Cand> {
                 val cs = if (fc.isNotEmpty()) fc + pageCands else pageCands
                 val seen = HashSet<String>()
+                // ★ 2026-10-16. الأطزج أوّلًا عند التكافؤ: الوصفة الواحدة قد
+                // تحمل أكثر من عنصرٍ لسلسلةٍ (MoboReels، HappyShort)، وعنصرٌ
+                // `refreshAfter` فيه ماضٍ بائتٌ بائتٌ. والترتيب الافتراضيّ كان
+                // ترتيب الموقع، فيسبق البائتُ الحيَّ فيختاره اللاعب فيفشل بـ403.
+                // و`distinctBy` بعد الترتيب تُبقي الأطزج عند تطابق الرابط.
                 return cs.filter { seen.add(it.url) }
+                    .sortedByDescending { tokenRemainingSeconds(it.url) ?: Long.MIN_VALUE }
             }
 
             var uniq = uniqOf(freshCands)
@@ -1333,7 +1403,13 @@ class DramaTipProvider(private val prefs: SharedPreferences? = null) : MainAPI()
 
             if (ordered.isNotEmpty()) {
                 ordered.forEach { callback(it) }
-                logD("DramaTip.loadLinks $source ep=$ep video=${ordered.size} sub=$sentSub")
+                // ★ رصدٌ لعمر أول رابط مُبثّ: هذا الرقم هو ما يفسّر «Source error»
+                // بعد الإسقاط. قيمته السالبة (مثل ‎-7533s‎) قاطعة بأن رمزًا ميتًا
+                // بُثّ فعلًا رغم كل الفحص — وهي أهمّ ما يُقرأ في التقاط المستخدم.
+                val firstLife = ordered.firstOrNull { it.url.startsWith("http") }
+                    ?.let { tokenRemainingSeconds(it.url) }
+                logD("DramaTip.loadLinks $source ep=$ep video=${ordered.size} sub=$sentSub" +
+                    (firstLife?.let { " توكن=${it}s" } ?: ""))
                 return true
             }
             logE("DramaTip.loadLinks $source ep=$ep nothing survived probes")
