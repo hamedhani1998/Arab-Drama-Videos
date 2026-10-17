@@ -1659,9 +1659,11 @@ class DramaTipProvider(private val prefs: SharedPreferences? = null) : MainAPI()
                 "desc" -> collected.sortedByDescending { it.quality }
                 else -> collected
             }
-            // ★ DramaBox: أفضل جودة أولًا
+            // ★ DramaBox: متعدد الجودات أولاً، ثم أفضل جودة أولًا
             if (source.equals("DramaBox", ignoreCase = true) || source.contains("DramaBox", ignoreCase = true)) {
-                ordered = ordered.sortedByDescending { it.quality }
+                ordered = ordered.sortedWith(compareByDescending<ExtractorLink> {
+                    it.name.contains("متعدد الجودات")
+                }.thenByDescending { it.quality })
             }
 
             if (ordered.isNotEmpty()) {
