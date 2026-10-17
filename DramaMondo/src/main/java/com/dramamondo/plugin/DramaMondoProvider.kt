@@ -102,14 +102,14 @@ class DramaMondoProvider(private val prefs: SharedPreferences?) : MainAPI() {
         if (episodes.isEmpty()) {
             val parts = obj["parts"]
             if (parts != null && parts.isArray && parts.size() > 0) {
-                val servers = parts[0]["servers"]
-                if (servers != null && servers.isArray) {
-                    servers.forEachIndexed { idx, s ->
-                        val surl = s["url"]?.asText() ?: ""
+                parts.forEachIndexed { pidx, part ->
+                    val servers = part["servers"]
+                    if (servers != null && servers.isArray && servers.size() > 0) {
+                        val surl = servers[0]["url"]?.asText() ?: ""
                         if (surl.isNotEmpty()) {
                             episodes.add(newEpisode(surl) {
-                                this.name = "الحلقة ${idx + 1}"
-                                this.episode = idx + 1
+                                this.name = "الحلقة ${pidx + 1}"
+                                this.episode = pidx + 1
                             })
                         }
                     }
