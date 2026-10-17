@@ -1225,6 +1225,10 @@ class DramaTipProvider(private val prefs: SharedPreferences? = null) : MainAPI()
             // ما اجتاز الفحص، وما تعذّر الحكم عليه (انقطاع عابر لا يُسقط رابطًا) — يُبثّ
             // هذا بعد ذاك، فيبقى اختيار اللاعب الافتراضي على رابطٍ مُثبتٍ حيّ.
             val deferred = mutableListOf<ExtractorLink>()
+            // ★ 2026-10-17. خطّ نجاة في **الآخر تمامًا**: أبناء القائمة المتكيّفة
+            // بجوداتهم الثابتة. تُبثّ أخيرًا (وأولويّتها منخفضة) فلا تسبق
+            // المتكيّفة ولا تسرق اختيار المشغّل الافتراضي إن كانت المتكيّفة حيّة.
+            val fallbacks = mutableListOf<ExtractorLink>()
             val emitted = LinkedHashSet<String>()
             val probe = Probe()
             val showSubs = prefs?.getBoolean(DramaTipSettingsBottomSheet.KEY_SHOW_SUBTITLES, true) ?: true
@@ -1475,7 +1479,44 @@ class DramaTipProvider(private val prefs: SharedPreferences? = null) : MainAPI()
                 if (cannotTell) logD("DramaTip: cannot-tell ${c.label} ${c.url.take(70)} why=$why")
                 val (kind, declared) = classify(c.url, c.type, v?.contentType.orEmpty(), v?.body)
                 if (!emitted.add(c.url)) continue
-                addLink(if (cannotTell) deferred else collected, c.label, c.url, c.qLabel, kind, declared)
+                // ★ 2026-10-17. **القائمة المتعدّدة الجودات تُقدَّم أوّلًا.**
+                //
+                // القائمة التي تحمل `#EXT-X-STREAM-INF` هي القائمة `master`
+                // المتكيّفة: يختار المشغّل منها الجودة بنفسه حسب الشبكة لحظةً
+                // بلحظة. ورابط الجودة الثابتة لا يتكيّف، فإن دخل شبكةً أضعف من
+                // جوْدته تقطّعَ — وهذا أصل التقطّع. فتقديم المتكيّفة يجعله
+                // الاختيار الافتراضي فيسلك المشغّل مسار التكيّف.
+                //
+                // والترتيب في التطبيق **نزوليّ بالأولويّة**، والأولويّة تُبنى في
+                // `QualityDataHelper.getLinkPriority` على الجودة ثم المصدر. وجميع
+                // روابطنا مصدرُها واحد (فتُلغى حصّة المصدر)، فالجودة وحدها تحكم.
+                // وقُرئت الأولويّات من enum `Qualities` في عبوة التطبيق (الوسيط
+                // الرابع للمُنشئ): ‎P144=0، P240=2، P360=3، P480=4، P720=5،
+                // P1080=6، P1440=7، P2160=8‎، أمّا `Unknown` فـ**٤** — أي طبقة
+                // ‎480p‎. فالوصم صريحًا هو ما يحكم، لا غيابه.
+                // ومن هنا كان الخلل: القائمة المتكيّفة كانت تُوسم بجودةٍ من سلسلة
+                // الوصفة (‎· 720p‎) فتنزل إلى أولويّة ٥، فيسبقها ثابتٌ بجودة 1080
+                // (٦) أو 2160 (٨) فيتصدّر الثابتُ **الذي لا يتكيّف** — فيظهر
+                // التقطّع. فالآن تُوسم المتكيّفة بأقصى دقّةٍ تُعلنها (فتصل إلى
+                // الطبقة العليا)، وتُبثّ **أولًا**، فيفوز تساوي الأولويّة بترتيب
+                // الإضافة؛ والأبناء يلحقون بها بأجوادهم الحقيقية كخطّ نجاة.
+                val hasStreamInf = v?.body?.contains("#EXT-X-STREAM-INF", ignoreCase = true) == true
+                val adaptive = kind == ExtractorLinkType.M3U8 && !cannotTell && hasStreamInf
+                // أقصى دقّة في القائمة المتكيّفة — تُوسم بها كي تصل إلى طبقة
+                // الأولويّة العليا فتتصدّر (المتكيّفة **تستطيع** أن تُسلّم هذه
+                // الدقّة، فالوسم صادق)، والأبناء يحملون دقّاتهم الحقيقية تحتها.
+                val maxRes = if (adaptive) {
+                    Regex("""RESOLUTION=(\d{3,4})x(\d{3,4})""").findAll(v!!.body.orEmpty())
+                        .map { minOf(it.groupValues[1].toIntOrNull() ?: 0, it.groupValues[2].toIntOrNull() ?: 0) }
+                        .filter { it > 0 }.maxOrNull()
+                } else null
+                addLink(
+                    if (cannotTell) deferred else collected,
+                    if (adaptive) "$source · متعدد الجودات" else c.label,
+                    c.url,
+                    if (adaptive) maxRes?.let { "${it}p" } else c.qLabel,
+                    kind, declared
+                )
                 if (cannotTell || kind != ExtractorLinkType.M3U8) continue
                 val body = v?.body ?: continue
                 val base = c.url.substringBeforeLast('/', c.url)
@@ -1494,12 +1535,19 @@ class DramaTipProvider(private val prefs: SharedPreferences? = null) : MainAPI()
             }
 
             // ٤) صيغ الـmaster: موجة ثانية بالتوازي أيضًا، ثم بثّها.
+            //
+            // ★ 2026-10-17. **ترتيب: المتكيّفة أوّلًا ثم الأبناء الثوابت.**
+            // الأبناء ثوابت الجودة لا تتكيّف، فإن دخلت شبكةً أضعف تقطّعت — فيجب
+            // أن تأتي **بعد** المتكيّفة لا قبلها، مع بقائها خطّ نجاةً إن ماتت
+            // الأولى. والترتيب في التطبيق نزوليّ بالأولويّة (انظر التعليق في
+            // دورة البثّ): فالأبناء يحملون جودةً حقيقية (٢–٨) فتقع تحت المتكيّفة
+            // التي لا جودة لها (400).
             if (variants.isNotEmpty()) {
                 val ok = coroutineScope {
                     variants.map { v -> async(Dispatchers.IO) { probe.alive(v.url) } }.awaitAll()
                 }
                 for ((i, v) in variants.withIndex()) {
-                    if (ok[i] && emitted.add(v.url)) addLink(collected, v.label, v.url, v.qLabel, ExtractorLinkType.M3U8, null)
+                    if (ok[i] && emitted.add(v.url)) addLink(fallbacks, v.label, v.url, v.qLabel, ExtractorLinkType.M3U8, null)
                 }
             }
 
@@ -1548,6 +1596,7 @@ class DramaTipProvider(private val prefs: SharedPreferences? = null) : MainAPI()
             // الترتيب حسب إعدادات المستخدم (افتراضي = ترتيب الصفحة كما هو).
             // غير المُحكوم يلحق بالمُثبت فيبقى الأول اختيارَ اللاعب الافتراضي.
             collected.addAll(deferred)
+            collected.addAll(fallbacks)
             val order = prefs?.getString(DramaTipSettingsBottomSheet.KEY_QUALITY_ORDER, "default")
             val ordered = when (order) {
                 "asc" -> collected.sortedBy { it.quality }
