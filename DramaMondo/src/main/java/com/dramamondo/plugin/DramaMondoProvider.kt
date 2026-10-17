@@ -83,32 +83,35 @@ class DramaMondoProvider(private val prefs: SharedPreferences?) : MainAPI() {
         val poster = obj["poster"]?.asText() ?: ""
         val synopsis = obj["synopsis"]?.asText() ?: obj["description"]?.asText() ?: ""
         val episodes = mutableListOf<Episode>()
-        val parts = obj["parts"]
-        if (parts != null && parts.isArray && parts.size() > 0) {
-            val servers = parts[0]["servers"]
-            if (servers != null && servers.isArray) {
-                servers.forEachIndexed { idx, s ->
-                    val surl = s["url"]?.asText() ?: ""
-                    if (surl.isNotEmpty()) {
-                        episodes.add(newEpisode(surl) {
-                            this.name = "الحلقة ${idx + 1}"
-                            this.episode = idx + 1
-                        })
-                    }
-                }
-            }
-        }
         val epsList = obj["episodesList"]
-        if (epsList != null && epsList.isArray && episodes.isEmpty()) {
+        if (epsList != null && epsList.isArray && epsList.size() > 0) {
             epsList.forEachIndexed { idx, e ->
                 val servers = e["servers"]
                 if (servers != null && servers.isArray && servers.size() > 0) {
                     val surl = servers[0]["url"]?.asText() ?: ""
                     if (surl.isNotEmpty()) {
+                        val epNum = (e["number"]?.asInt() ?: (idx + 1))
                         episodes.add(newEpisode(surl) {
-                            this.name = "الحلقة ${idx + 1}"
-                            this.episode = idx + 1
+                            this.name = "الحلقة $epNum"
+                            this.episode = epNum
                         })
+                    }
+                }
+            }
+        }
+        if (episodes.isEmpty()) {
+            val parts = obj["parts"]
+            if (parts != null && parts.isArray && parts.size() > 0) {
+                val servers = parts[0]["servers"]
+                if (servers != null && servers.isArray) {
+                    servers.forEachIndexed { idx, s ->
+                        val surl = s["url"]?.asText() ?: ""
+                        if (surl.isNotEmpty()) {
+                            episodes.add(newEpisode(surl) {
+                                this.name = "الحلقة ${idx + 1}"
+                                this.episode = idx + 1
+                            })
+                        }
                     }
                 }
             }
@@ -156,6 +159,23 @@ class DramaMondoProvider(private val prefs: SharedPreferences?) : MainAPI() {
                 rawUrl.contains("rumble.com") -> "Rumble"
                 rawUrl.contains("voe.sx") -> "Voe"
                 rawUrl.contains("vidara.") -> "Vidara"
+                rawUrl.contains("netshort") -> "NetShort"
+                rawUrl.contains("dramabox") -> "Dramabox"
+                rawUrl.contains("dramawave") -> "DramaWave"
+                rawUrl.contains("reelshort") -> "ReelShort"
+                rawUrl.contains("shorttv") -> "ShortTV"
+                rawUrl.contains("flextv") -> "FlexTV"
+                rawUrl.contains("shortmax") -> "ShortMax"
+                rawUrl.contains("flickreels") -> "FlickReels"
+                rawUrl.contains("moboreels") -> "MoboReels"
+                rawUrl.contains("shortwave") -> "ShortWave"
+                rawUrl.contains("stardust") -> "StarDust"
+                rawUrl.contains("petadrama") -> "PetaDrama"
+                rawUrl.contains("storyreel") -> "StoryReel"
+                rawUrl.contains("kalostv") -> "KalosTV"
+                rawUrl.contains("joyreels") -> "JoyReels"
+                rawUrl.contains("goodshort") -> "GoodShort"
+                rawUrl.contains("moreshort") -> "MoreShort"
                 else -> "DramaMondo"
             }
             callback.invoke(
