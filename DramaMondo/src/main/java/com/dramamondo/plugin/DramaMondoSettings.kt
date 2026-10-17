@@ -97,6 +97,16 @@ class DramaMondoSettingsBottomSheet(private val prefs: SharedPreferences) : Bott
             }
             platCat.addPreference(showPlatformsPref)
 
+            // مفتاح مستقل لكل منصّة من platforms.html — يُخفى صفّها في الواجهة الرئيسية
+            DM_PLATFORMS.forEach { (slug, label) ->
+                platCat.addPreference(SwitchPreferenceCompat(ctx).apply {
+                    key = platformKey(slug)
+                    title = label
+                    summary = "إخفاء/إظهار صفّ $label"
+                    setDefaultValue(true)
+                })
+            }
+
             val rowLimitPref = ListPreference(ctx).apply {
                 key = KEY_ROW_LIMIT
                 title = "عدد صفوف المنصات المعروضة"
@@ -123,6 +133,7 @@ class DramaMondoSettingsBottomSheet(private val prefs: SharedPreferences) : Bott
                         remove(KEY_SHOW_PLATFORMS)
                         remove(KEY_ROW_LIMIT)
                         remove(KEY_SUB_LANGS)
+                        DM_PLATFORMS.forEach { (slug, _) -> remove(platformKey(slug)) }
                     }.apply()
                     Toast.makeText(ctx, "تمت إعادة الضبط", Toast.LENGTH_SHORT).show()
                     true

@@ -86,29 +86,46 @@ class FullDramaSettingsBottomSheet(private val prefs: SharedPreferences) : Botto
             playbackCategory.addPreference(subLangsPref)
 
             val platCat = PreferenceCategory(ctx)
-            platCat.title = "أقسام المنصات في الواجهة الرئيسية"
+            platCat.title = "أقسام التصنيفات في الواجهة الرئيسية"
             preferenceScreen.addPreference(platCat)
 
             val showPlatformsPref = SwitchPreferenceCompat(ctx).apply {
                 key = KEY_SHOW_PLATFORMS
-                title = "المنصات كلها"
-                summary = "ألغِ وسمها لإخفاء صفوف كل المنصات دفعةً واحدة"
+                title = "التصنيفات كلها"
+                summary = "ألغِ وسمها لإخفاء صفوف كل التصنيفات دفعةً واحدة"
                 setDefaultValue(true)
             }
             platCat.addPreference(showPlatformsPref)
 
+            // مفتاح مستقل لكل تصنيف — يُخفى صفّه في الواجهة الرئيسية
+            listOf(
+                "romance" to "رومانسي", "ceo-boss" to "مدير تنفيذي", "family" to "عائلي",
+                "revenge" to "انتقام", "historical" to "تاريخي", "sci-fi" to "خيال علمي",
+                "action" to "أكشن", "time-travel" to "السفر بالزمن", "underdog" to "انتصار المستضعف",
+                "mystery" to "غموض", "medical" to "طبي", "school" to "مدرسة",
+                "thriller" to "إثارة", "business" to "أعمال", "marriage" to "زواج",
+                "vampire" to "مستذئب", "pregnancy" to "حمل",
+            ).forEach { (slug, label) ->
+                platCat.addPreference(SwitchPreferenceCompat(ctx).apply {
+                    key = platformKey(slug)
+                    title = label
+                    summary = "إخفاء/إظهار صفّ $label"
+                    setDefaultValue(true)
+                })
+            }
+
             val rowLimitPref = ListPreference(ctx).apply {
                 key = KEY_ROW_LIMIT
-                title = "عدد صفوف المنصات المعروضة"
+                title = "عدد صفوف التصنيفات المعروضة"
                 summary = "أقل صفوف = ظهور أسرع للواجهة الرئيسية"
                 summaryProvider = ListPreference.SimpleSummaryProvider.getInstance()
                 entryValues = arrayOf("all", "8", "6", "4", "2")
                 entries = arrayOf(
-                    "كل المنصات (افتراضي)",
-                    "أول 8 منصات",
-                    "أول 6 منصات",
-                    "أول 4 منصات",
-                    "أول منصّتين"
+                    "كل التصنيفات (افتراضي)",
+                    "أول 8 تصنيفات",
+                    "أول 6 تصنيفات",
+                    "أول 4 تصنيفات",
+                    "أول تصنيفين"
                 )
                 setDefaultValue("all")
             }
@@ -123,6 +140,11 @@ class FullDramaSettingsBottomSheet(private val prefs: SharedPreferences) : Botto
                         remove(KEY_SHOW_PLATFORMS)
                         remove(KEY_ROW_LIMIT)
                         remove(KEY_SUB_LANGS)
+                        listOf(
+                            "romance", "ceo-boss", "family", "revenge", "historical", "sci-fi",
+                            "action", "time-travel", "underdog", "mystery", "medical", "school",
+                            "thriller", "business", "marriage", "vampire", "pregnancy",
+                        ).forEach { remove(platformKey(it)) }
                     }.apply()
                     Toast.makeText(ctx, "تمت إعادة الضبط", Toast.LENGTH_SHORT).show()
                     true
