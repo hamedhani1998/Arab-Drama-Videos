@@ -26,6 +26,13 @@ private const val ANDROID_UA = "Mozilla/5.0 (Linux; Android 10)"
 // سقف قراءة جسم الفحص: قائمة تشغيل HLS كاملة تقع دونه بمراتب، ويمنع تنزيل VOD ضخم.
 private const val READ_CAP = 524_288
 
+// ★ 2026-10-17. مهلة الفحص الواحد. كانت ‎7ث‎، وهي على مضيفات التشغيل الآسيويّة
+// (tiktokcdn وcdreader وfarsunpteltd وidrama) تُنهى قبل أن تردّ الشبكات البطيئة،
+// فيُصنَّف الرابط «تعذّر الحكم» ويُسقَط حين يقترن برمزٍ منتهٍ — وهذه هي علّة
+// «لم يعثر على روابط» على FlickReels وiDrama وMoboReels، ودورانُ 2002 على
+// PineDrama. ‎10ث‎ سقفٌ لا انتظار: الناجح يعود فورًا.
+private const val PROBE_TIMEOUT_MS = 10_000
+
 // ★ 2026-10-17. أدنى طابعٍ زمنيًّا يُقبل وقتًا لانتهاء رمز (٢٠٢٣-١١-١٤).
 // الآن صار للعمر سلطة إسقاط الرابط (بوّابة الرمز المنتهي في loadLinks)،
 // فحقلٌ اسمه `t` على منصّةٍ أخرى قد يحمل هاشًا لا وقتًا — فيُحسب سالبًا
@@ -368,11 +375,44 @@ class DramaTipProvider(private val prefs: SharedPreferences? = null) : MainAPI()
 
     private val seriesMeta = java.util.concurrent.ConcurrentHashMap<String, SeriesMeta>()
 
+    // ★ 2026-10-17. **لماذا تُثبَّت معطيات السلسلة لا تُخبَّأ في الذاكرة فحسب؟**
+    //
+    // `seriesMeta` كانت خريطةً في الذاكرة وحدها، تُمحى كلّها حين تتجاوز ٦٤
+    // مفتاحًا. وقِيس على الجهاز أنّ صفحة الحلقة تحمّل **~٤٥٠ كيلوبايت**، وأنّ
+    // جلبها يسقط سقوطًا عابرًا على الشبكات البطيئة (ثلاث محاولاتٍ كلٌّ منها
+    // مهلةٌ كاملة). وحين تسقط ولم يبقَ في الذاكرة bookId، صار `apiLinks`
+    // **لا يُستدعى أصلًا** — فتبقى وصفة الصفحة المخبّأة وحدها، ورموزها منتهية
+    // مقيسةً على FlickReels وiDrama وMoboReels، فتُسقَط كلُّها وتظهر
+    // «لم يعثر على روابط». فالحفظ الدائم هو ما يقطع تلك السلسلة كلّها:
+    // `bookId`/`firstSerial` ثابتان للسلسلة كلّها، فلا ضررَ في بقائهما.
+    private val META_PREFIX = "meta:"
+
     // سقفٌ صغير: مفاتيح خفيفة، والغرض ألّا تسقط سلسلةُ الجلسة الواحدة.
     private fun putSeriesMeta(key: String, m: SeriesMeta) {
         if (key.isBlank()) return
         if (seriesMeta.size > 64) seriesMeta.clear()
         seriesMeta[key] = m
+        // التثبيت يبقى بعد إغلاق التطبيق وإعادة تشغيله: مسح الخريطة لا يُسقطه.
+        try {
+            prefs?.edit()?.putString(
+                META_PREFIX + key,
+                listOf(m.bookId ?: "", m.firstSerial.toString(), m.source ?: "").joinToString("|"),
+            )?.apply()
+        } catch (_: Exception) { /* التثبيت زائدٌ لا أساسٌ — الفشل هنا لا يُبطل الحلقة */ }
+    }
+
+    /** قراءة ما ثُبِّت سابقًا، أو `null` إن لم يكن هناك ما يصلح لسؤال الـAPI. */
+    private fun persistedMeta(key: String): SeriesMeta? {
+        if (key.isBlank()) return null
+        seriesMeta[key]?.let { return it }
+        val raw = try { prefs?.getString(META_PREFIX + key, null) } catch (_: Exception) { null }
+        if (raw.isNullOrBlank()) return null
+        val p = raw.split("|")
+        val book = p.getOrNull(0)?.takeIf { it.isNotBlank() }
+        val source = p.getOrNull(2)?.takeIf { it.isNotBlank() }
+        val first = p.getOrNull(1)?.toIntOrNull() ?: 1
+        if (book == null && source == null) return null
+        return SeriesMeta(book, first, source).also { seriesMeta[key] = it }
     }
 
     /**
@@ -441,7 +481,7 @@ class DramaTipProvider(private val prefs: SharedPreferences? = null) : MainAPI()
             } else {
                 logE("DramaTip: episode flight attempt=$attempt/3 url=$url")
             }
-            if (attempt < 3) delay(700L * attempt)
+            if (attempt < 3) delay(900L * attempt)
         }
         return null
     }
@@ -902,7 +942,7 @@ class DramaTipProvider(private val prefs: SharedPreferences? = null) : MainAPI()
                 lastWhy = e.javaClass.simpleName
             }
             android.util.Log.e("DramaTip", "episode-source attempt=$attempt/3 ($lastWhy) book=$bookId ser=$serial")
-            if (attempt < 3) delay(700L * attempt)
+            if (attempt < 3) delay(900L * attempt)
         }
         android.util.Log.e("DramaTip", "episode-source gave up ($lastWhy) book=$bookId ser=$serial")
         return null
@@ -1088,12 +1128,20 @@ class DramaTipProvider(private val prefs: SharedPreferences? = null) : MainAPI()
      * الفاسدة استثناء: البايتات موجودة لكن كل عميلٍ صارم يرفضها، فهي حكم.
      */
     // data class كي يُبنى «حكمٌ مُرخى» بـcopy في خطّ النجاة بلا تكرار الحقول.
+    //
+    // ★ 2026-10-17. `finalUrl`: الرابط الذي انتهى عنده التحويل إن كان مختلفًا عن
+    // الأصل. قِيس على JoyReels أنّ رمزَها **ماضٍ** في الوصفة، والمضيف **يجدّده
+    // بنفسه** بتحويل ‎302‎ إلى رابطٍ طازج صالح (‎auth_key=1947835727‎ مقابل
+    // ‎1787439293‎). وكان الرابط المُنعش يُبثَّ **بلازمته المنتهيَة** فيحتاج
+    // اللاعب إلى متابعة التحويل؛ وقِيس على الشبكات البطيئة أنّ ذلك يسقط فيظهر
+    // «لم يعثر على روابط» على محتوىٍ يعمل. فصار الطازج هو ما يُبثَّ.
     private data class Verdict(
         val alive: Boolean,
         val contentType: String,
         val body: String?,
         val why: String,
         val certain: Boolean,
+        val finalUrl: String? = null,
     )
 
     /**
@@ -1136,7 +1184,7 @@ class DramaTipProvider(private val prefs: SharedPreferences? = null) : MainAPI()
                 val fresh = withContext(Dispatchers.IO) { one(u) }
                 if (fresh.alive) { cache[u] = fresh; return fresh }
                 if (fresh.certain) best = fresh
-                if (attempt < 3) delay(500L * attempt)
+                if (attempt < 3) delay(600L * attempt)
             }
             val result = best
             if (result != null) cache[u] = result
@@ -1160,9 +1208,12 @@ class DramaTipProvider(private val prefs: SharedPreferences? = null) : MainAPI()
                 // Range على البروكسي فقط (لبثّ جسمٍ صغيرٍ محدود لبضعٍ من الكيلوبايتات).
                 if (proxy) c.setRequestProperty("Range", "bytes=0-65535")
                 c.instanceFollowRedirects = true
-                c.connectTimeout = 7000
-                c.readTimeout = 7000
+                c.connectTimeout = PROBE_TIMEOUT_MS
+                c.readTimeout = PROBE_TIMEOUT_MS
                 val code = c.responseCode
+                val landed = c.url?.toString()?.takeIf { it.isNotBlank() && it != u }
+                // ★ 2026-10-17. **الرابط الذي انتهى عنده التحويل.** `HttpURLConnection`
+                // يُحدِّث حقلَ `url` حين يتابع، فيصير هو وجهة التحويل الأخيرة.
                 if (code !in 200..399) {
                     // ★ 2026-10-16. حافّة البثّ تُعلن سبب الرفض في جسم الخطأ:
                     // ‎403‎ جسمه حرفيًّا `need sign info` معناه **توقيعٌ ناقصٌ أو
@@ -1175,6 +1226,7 @@ class DramaTipProvider(private val prefs: SharedPreferences? = null) : MainAPI()
                         whyBody.takeIf { it.isNotBlank() },
                         if (whyBody.isNotBlank()) "HTTP $code: $whyBody" else "HTTP $code",
                         true,
+                        landed,
                     )
                 }
                 val ct = c.contentType.orEmpty()
@@ -1195,7 +1247,7 @@ class DramaTipProvider(private val prefs: SharedPreferences? = null) : MainAPI()
                 if (proxy) {
                     val b = body.orEmpty()
                     if (b.contains("link expired") || b.contains("invalid token") || b.contains("invalid or expired")) {
-                        return Verdict(false, ct, null, "proxy body: ${b.take(48)}", true)
+                        return Verdict(false, ct, null, "proxy body: ${b.take(48)}", true, landed)
                     }
                 }
                 // ★ 2026-10-16. رابطٌ يدّعي HLS (امتداد ‎.m3u8‎ أو نوع محتوى mpegurl)
@@ -1205,9 +1257,40 @@ class DramaTipProvider(private val prefs: SharedPreferences? = null) : MainAPI()
                 // اللاعب «خطأ 3002» (بايتات ليست وسائط). الحكم هنا يمنعه من الأصل.
                 val claimsHls = u.contains(".m3u8") || ct.lowercase().contains("mpegurl")
                 if (claimsHls && !body.isNullOrEmpty() && !body.contains("#EXTM3U")) {
-                    return Verdict(false, ct, body, "not a playlist: ${body.take(48)}", true)
+                    return Verdict(false, ct, body, "not a playlist: ${body.take(48)}", true, landed)
                 }
-                Verdict(true, ct, body, "", true)
+                // ★ 2026-10-17. **جذر خطأ 2004: القائمة تُفتح ثم يُرفض الجزء.**
+                //
+                // ‎2004‎ = `ERROR_CODE_IO_BAD_HTTP_STATUS`: اللاعب يفتح قائمة البثّ
+                // بنجاح ثم تردّ **قطعة الفيديو** 4xx. وقِيس اليوم على BibiShort أنّ
+                // قائمتها تردّ ‎200 application/vnd.apple.mpegurl‎، بينما **كلّ جزءٍ
+                // يحمل امتداد `?s=` خاصًّا به** (‎segment-0.ts?s=fca24…‎ مقابل
+                // ‎segment-1.ts?s=bdaf1…‎) — أي أنّ التوقيع مُسبقٌ لكلّ جزءٍ على
+                // حِدة، فينتهي والقائمة تبقى حيّة الشكل. فحصُ القائمة وحده لا يرى
+                // ذلك أصلًا، ويُبثَّ الرابط فيظهر ‎2004‎.
+                //
+                // والفحص هنا يقرأ **أوّل أجزاء** القائمة (بحدود ‎Range: 0-1023‎
+                // فتبقى الرحلة كيلوبايتٍ واحد بدل 751KB مقيسةً) ولا يُسقط إلا على
+                // **رفضٍ قطعيّ** (‎4xx‎) في قائمة VOD مُعلَنة ‎#EXT-X-ENDLIST‎ —
+                // فلا تُقتل البثوث الحيّة ولا تُسقط حلقةً بسبب مهلةٍ أو انقطاع.
+                // وحين يُرفض يُعاد الفحص بمُرجِع اللاعب ومُتصفّحه أيضًا: قِيس أنّ
+                // بعض الحوافّ تفرّق بين المرجِعين، فلا يُسقط رابطٌ يقبله اللاعب.
+                if (claimsHls && body.contains("#EXT-X-ENDLIST")) {
+                    val child = firstChildOf(c.url?.toString() ?: u, body)
+                    if (child != null) {
+                        val segCode = segStatus(child, platformReferer(child), ANDROID_UA)
+                        val agreed = if (segCode in 400..499) {
+                            val byPlayer = segStatus(child, TIP_MAIN, TIP_UA)
+                            if (byPlayer in 400..499) byPlayer else segCode
+                        } else segCode
+                        if (agreed in 400..499) {
+                            return Verdict(
+                                false, ct, body, "segment HTTP $agreed", true, landed,
+                            )
+                        }
+                    }
+                }
+                Verdict(true, ct, body, "", true, landed)
             } catch (e: Exception) {
                 // شهادة TLS مرفوضة حكمٌ: البايتات موجودة لكنّ كلّ عميلٍ صارم يرفضها.
                 // ★ 2026-10-16. ومضيفٌ لا يُحلّ اسمه أصلًا حكمٌ كذلك: لا عميلَ يبلغه.
@@ -1246,6 +1329,49 @@ class DramaTipProvider(private val prefs: SharedPreferences? = null) : MainAPI()
                 sb.toString()
             }
         } catch (e: Exception) { "" }
+
+        /**
+         * أوّل مسارٍ حقيقيّ في قائمة التشغيل (أول سطرٍ ليس تعليقًا)، مُحلًّا على
+         * مُنسِق قائمة الأب. ‎null‎ إن لم تُعثر قائمة أوّلًا.
+         *
+         * حلُّ المسار ضروريّ: قِيس على BibiShort أنّ أبناءها نسبيّون
+         * (‎segment-0.ts?s=…‎)، وعلى iDrama أنّ أبناءها **مُطلَقون على الأصل**
+         * (‎/d110e…/71d5….ts‎) — والاثنان يجب أن يُحلّا على مُضيف القائمة لا على
+         * مجلّدها (وهو ما أصلحه حلّ HLS في v22).
+         */
+        private fun firstChildOf(playlistUrl: String, body: String): String? {
+            val line = body.lineSequence()
+                .map { it.trim() }
+                .firstOrNull { it.isNotEmpty() && !it.startsWith("#") }
+                ?: return null
+            return try { URL(URL(playlistUrl), line).toString() } catch (e: Exception) { null }
+        }
+
+        /**
+         * كود حالة جزءٍ واحد. ‎-1‎ عند أيّ فشلٍ في الاتصال (مهلة أو DNS أو TLS):
+         * الفشل لا يُثبت رفضًا، فلا يُسقط به رابطٌ (قاعدة «الحكم مقابل لا نعرف»).
+         */
+        private fun segStatus(segUrl: String, referer: String, ua: String): Int {
+            var conn: HttpURLConnection? = null
+            return try {
+                val c = URL(segUrl).openConnection() as HttpURLConnection
+                conn = c
+                c.requestMethod = "GET"
+                c.setRequestProperty("Referer", referer)
+                c.setRequestProperty("User-Agent", ua)
+                // ‎Range‎ يُبقي الرحلة كيلوبايتٍ واحد (الجزء 751KB مقيسةً على BibiShort)،
+                // والمُضيف الذي لا يدعمه يتجاهل الرأس فلا يتغيّر كود الحالة.
+                c.setRequestProperty("Range", "bytes=0-1023")
+                c.instanceFollowRedirects = true
+                c.connectTimeout = PROBE_TIMEOUT_MS
+                c.readTimeout = PROBE_TIMEOUT_MS
+                val code = c.responseCode
+                runCatching { c.inputStream?.close() }
+                code
+            } catch (e: Exception) { -1 } finally {
+                runCatching { conn?.disconnect() }
+            }
+        }
     }
 
     /**
@@ -1353,7 +1479,7 @@ class DramaTipProvider(private val prefs: SharedPreferences? = null) : MainAPI()
             // الكاش المكتوب في `load()` فيُطفئ الـAPI ويسقط الرابط. فصار
             // الاختيار حقلًا لا كائنًا: خُذ metaOf من الحِمل الصالح وحده.
             val fMeta = if (hasSourceFirst(f)) metaOf(f!!) else null
-            val cached = seriesMeta[bareSlug(slug)]
+            val cached = persistedMeta(bareSlug(slug))
             // الكاش لا يُستعمل إلا إذا كان **قابلًا للاستعمال** (يحمل bookId أو
             // مصدرًا): فمعطى ناقص (حِملٌ سابق بلا bookId) لا ينفع وضارٌّ وحده.
             val meta = fMeta?.takeIf { it.bookId != null || it.source != null }
@@ -1624,6 +1750,14 @@ class DramaTipProvider(private val prefs: SharedPreferences? = null) : MainAPI()
             }
 
             // ٣) بثّ الأحياء بترتيب الصفحة؛ وكل HLS حيّ يُفرَّع على جوداته الحقيقية.
+            //
+            // ★ 2026-10-17. **هل بقي حيٌّ أصلًا؟** هذا الرقم هو ما يحوّل بوّابة
+            // «الرمز المنتهي» من إسقاطٍ مطلق إلى إسقاطٍ مشروط. قِيس على JoyReels
+            // أنّ وصفتها كلّها رموزٌ **ماضية** والمضيف يجدّدها بتحويل 302؛ فإذا
+            // تعذّر الفحص على شبكةٍ بطيئة لم يبقَ حيٌّ، وكان الإسقاط المطلق
+            // ينتهي بـ«لم يعثر على روابط» على محتوىٍ يعمل. والقاعدة الآن: لا
+            // يُسقط المنتهي إلا بموتٍ **مُثبت** أو مع وجود بديلٍ حيّ.
+            val anyAlive = verdicts.any { it?.alive == true }
             class Var(val label: String, val url: String, val qLabel: String?)
             val variants = mutableListOf<Var>()
             for ((i, c) in uniq.withIndex()) {
@@ -1652,9 +1786,26 @@ class DramaTipProvider(private val prefs: SharedPreferences? = null) : MainAPI()
                 // عند غياب الحكم (cannot-tell) أو موتٍ قطعيّ نُبقي حساب العمر
                 // كما كان (فهو ما يمنع بثّ المنتهي حين تعذّر الفحص).
                 if (tokenExpired(c.url, raw) && raw?.alive != true) {
-                    logD("DramaTip: drop expired ${c.label} ${c.url.take(70)}" +
-                        " عمر=${tokenRemainingSeconds(c.url)}s why=${raw?.why ?: "-"}")
-                    continue
+                    // ★ 2026-10-17. **بوّابة مشروطة لا مطلقة.**
+                    //
+                    // المطلقة كانت تسقط كلّ رمزٍ مضى أجله لم يُثبت المسبار حيّته —
+                    // وهذا هو جذر «لم يعثر على روابط» على JoyReels: وصفتها كلّها
+                    // رموزٌ ماضية والمضيف يجدّدها بتحويل ‎302‎، فحين تنتهي مهلة
+                    // الفحص على شبكةٍ بطيئة تسقط الحلقة كلّها بلا رابطٍ واحد.
+                    // والشرط الآن: يُسقط المنتهي بموتٍ **مُثبت** (`certain`)، أو
+                    // مع **بديلٍ حيّ** في المرشّحين (فلا داعي لبثّ ميت). أمّا
+                    // حين لا حيَّ أصلًا، فبثُّه آخرُ خطّ نجاة: اللاعب يتبع
+                    // التحويل بنفسه وقد يجدّده — وهو خيرٌ من «لا روابط» حتمًا.
+                    val provenDead = raw?.certain == true
+                    if (provenDead || anyAlive) {
+                        logD("DramaTip: drop expired ${c.label} ${c.url.take(70)}" +
+                            " عمر=${tokenRemainingSeconds(c.url)}s why=${raw?.why ?: "-"}" +
+                            (if (provenDead) " (موتٌ مُثبت)" else " (بديلٌ حيّ موجود)"))
+                        continue
+                    }
+                    logD("DramaTip: last-resort expired ${c.label} ${c.url.take(70)}" +
+                        " عمر=${tokenRemainingSeconds(c.url)}s why=${raw?.why ?: "-"}" +
+                        " (لا حيَّ أصلًا — بثُّه خيرٌ من «لا روابط»)")
                 }
                 if (tokenExpired(c.url, raw) && raw?.alive == true) {
                     logD("DramaTip: keep re-minted ${c.label} عمر=${tokenRemainingSeconds(c.url)}s" +
@@ -1677,8 +1828,22 @@ class DramaTipProvider(private val prefs: SharedPreferences? = null) : MainAPI()
                 val cannotTell = v != null && !v.alive
                 val why = v?.why
                 if (cannotTell) logD("DramaTip: cannot-tell ${c.label} ${c.url.take(70)} why=$why")
-                val (kind, declared) = classify(c.url, c.type, v?.contentType.orEmpty(), v?.body)
-                if (!emitted.add(c.url)) continue
+                // ★ 2026-10-17. **ما يُبثَّ هو وجهة التحويل إن وُجدت، لا الأصل.**
+                //
+                // المسبار يتبع التحويل ويقرأ جسم الوجهة، فحكمه «حيّ» يخصّها. وكان
+                // الأصل المنتهي هو ما يُبثَّ (الوجهة مكشوفة في `Content-Location`
+                // لا في الرابط)، فيُطلب من اللاعب أن يعيد متابعة التحويل على
+                // شبكته — وقِيس على الشبكات البطيئة أنّ ذلك يسقط فتظهر «لا روابط»
+                // على محتوىٍ يعمل (JoyReels بالتحديد: 302 → رمزٌ طازج). فبثُّ
+                // الطازج مباشرةً يقطع تلك المرحلة كلّها، وحين لا يتحوّل لا يتغيّر
+                // شيء إطلاقًا (المنصّات السواها كلّها بلا تحويل).
+                val playUrl = v?.finalUrl?.takeIf { it.isNotBlank() } ?: c.url
+                if (playUrl != c.url) {
+                    logD("DramaTip: redirect-resolved ${c.label} → ${playUrl.take(90)}" +
+                        " (الأصل منتهٍ/يحتاج تحويلًا)")
+                }
+                val (kind, declared) = classify(playUrl, c.type, v?.contentType.orEmpty(), v?.body)
+                if (!emitted.add(playUrl)) continue
                 // ★ 2026-10-17. **القائمة المتعدّدة الجودات تُقدَّم أوّلًا.**
                 //
                 // القائمة التي تحمل `#EXT-X-STREAM-INF` هي القائمة `master`
@@ -1713,7 +1878,7 @@ class DramaTipProvider(private val prefs: SharedPreferences? = null) : MainAPI()
                 addLink(
                     if (cannotTell) deferred else collected,
                     if (adaptive) "$source · متعدد الجودات" else c.label,
-                    c.url,
+                    playUrl,
                     if (adaptive) maxRes?.let { "${it}p" } else c.qLabel,
                     kind, declared
                 )
@@ -1728,7 +1893,7 @@ class DramaTipProvider(private val prefs: SharedPreferences? = null) : MainAPI()
                         inf = l.removePrefix("#EXT-X-STREAM-INF:")
                     } else if (inf != null && l.isNotBlank() && !l.startsWith("#")) {
                         val q = resolutionLabel(inf)
-                        variants.add(Var(c.label + (q?.let { " · $it" } ?: ""), resolveHlsChild(c.url, l), q))
+                        variants.add(Var(c.label + (q?.let { " · $it" } ?: ""), resolveHlsChild(playUrl, l), q))
                         inf = null
                     }
                 }
