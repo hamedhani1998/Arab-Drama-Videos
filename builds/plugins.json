@@ -159,10 +159,10 @@
         "name": "DramaGlance"
     },
     {
-        "fileHash": "sha256-19010f201df4d7c00fd74cc7a4b9ea6da1d6b1333373e136df6e6c92a507ea46",
+        "fileHash": "sha256-cb3d80b59b46cb39c6e6737f222f34de2d3ef7ce7d48b70cf076e8a7bae767c2",
         "apiVersion": 1,
         "repositoryUrl": "https://github.com/hamedhani1998/Arab-Drama-Videos",
-        "fileSize": 96129,
+        "fileSize": 96454,
         "status": 1,
         "language": "ar",
         "authors": [
@@ -172,9 +172,9 @@
             "TvSeries",
             "Movie"
         ],
-        "version": 21,
+        "version": 22,
         "internalName": "DramaTip",
-        "description": "DramaTip - دراما قصيرة من أكثر من ٢٠ منصة",
+        "description": "DramaTip - دراما قصيرة من ٢٤ منصة",
         "url": "https://raw.githubusercontent.com/hamedhani1998/Arab-Drama-Videos/builds/DramaTip.cs3",
         "name": "DramaTip"
     },
