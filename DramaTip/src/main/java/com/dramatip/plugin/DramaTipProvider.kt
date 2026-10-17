@@ -32,7 +32,22 @@ private const val READ_CAP = 524_288
 // ويُسقط رابطًا حيًّا. الطابع الحقيقيّ لا يسبق هذا الحدّ بسنوات.
 private const val MIN_TOKEN_EPOCH = 1_700_000_000L
 
-// منصّات الموقع من /ar/sources (slug → الاسم كما يعرضه الموقع). ٢٣ منصة.
+// ★ 2026-10-17. وأعلى المعقوليّة كذلك. حقلٌ اسمه `auth_key` على JoyReels حمل
+// قيمتين: ‎`1787439293` (ماضٍ) و‎`1947835727` (‎+٤٫٩ سنة‎) في رابط التحويل. ولو
+// مُرّرت الثانية كعمرٍ حقيقيّ **لتصدّرت القائمة** (الترتيب نزولٌ بالعمر) فتُختار
+// افتراضيًّا على أختها الحيّة — والرقم الوهميّ قد لا يكون رمزًا على المضيف أصلًا.
+// والقيم المقيسة على منصّات dramatip بالساعات (‎~50 دقيقة‎) ولا تبلغ يومًا، فسقفُ
+// ٤٠٠ يوم يفصل الرمز عن الرقم الذي يشبه الرمز.
+private const val MAX_TOKEN_LIFE = 34_560_000L
+
+// منصّات الموقع من /ar/sources (slug → الاسم كما يعرضه الموقع). ٢٤ منصة.
+// ★ 2026-10-17. كانت ٢٣ وفُقِّد `freereels`: تُضاف هنا كلّ ما يظهر في
+// `/ar/sources` ولا يزيد (الفهرس يُقرأ من هناك كلّما استُدعي، والترتيب ترتيب
+// الموقع). وقيست FreeReels قبل الإضافة: ٢٤ نتيجةً في `/source/freereels`،
+// وصفحة الحلقة تحمل `sourceFirst` بكتابها، ورابطها يفتح ‎200‎ ونوعه
+// `audio/x-mpegurl` على `video-v6/video-v81.mydramawave.com`. والمنصّة كانت
+// **مفقودةٌ من الإعدادات أيضًا** — لا صفَّ لها في الرئيسية ولا مفتاحَ
+// إظهارٍ في لوح الإعدادات، فما كان يُرى بأصلٍ.
 // ثابت على مستوى الملف كي تشاركه الإعدادات (مفتاح إظهار/إخفاء لكل منصّة).
 internal val DRAMA_TIP_PLATFORMS: List<Pair<String, String>> = listOf(
     "bibishort" to "BibiShort",
@@ -41,6 +56,7 @@ internal val DRAMA_TIP_PLATFORMS: List<Pair<String, String>> = listOf(
     "dramabite" to "DramaBite",
     "dramabox" to "DramaBox",
     "flickreels" to "FlickReels",
+    "freereels" to "FreeReels",
     "goodshort" to "GoodShort",
     "happyshort" to "HappyShort",
     "idrama" to "iDrama",
@@ -93,7 +109,8 @@ class DramaTipProvider(private val prefs: SharedPreferences? = null) : MainAPI()
     private fun logD(msg: String) { try { android.util.Log.d("DramaTip", msg) } catch (_: Exception) {} }
     private fun logE(msg: String) { try { android.util.Log.e("DramaTip", msg) } catch (_: Exception) {} }
 
-    // منصّات الموقع من /ar/sources (slug → الاسم كما يعرضه الموقع). ٢٣ منصة.
+    // منصّات الموقع من /ar/sources (slug → الاسم كما يعرضه الموقع). ٢٤ منصة —
+    // انظر تعليق `DRAMA_TIP_PLATFORMS` أعلاه.
     // ملاحظة: الصف يعرض بطاقات تلك المنصّة فقط — لكن بعضها (KalosTV مثلًا) قد
     // يكون محتوياته مقفلة/قليلة في الموقع نفسه؛ لا أثر لذلك هنا.
     private val platformRows = DRAMA_TIP_PLATFORMS
@@ -172,9 +189,75 @@ class DramaTipProvider(private val prefs: SharedPreferences? = null) : MainAPI()
      */
     private fun tokenRemainingSeconds(url: String): Long? {
         val now = System.currentTimeMillis() / 1000
-        tokenExpiryEpoch(url)?.let { return it - now }
-        Regex("""[?&]verify=(\d{9,})""").find(url)?.groupValues?.get(1)?.toLongOrNull()
-            ?.takeIf { it >= MIN_TOKEN_EPOCH }?.let { return it - now }
+        val v = rawTokenEpoch(url) ?: return null
+        val rem = v - now
+        // ★ 2026-10-17. **سقفُ المعقوليّة الأعلى — ضرورته مقيسة.**
+        //
+        // حقلٌ اسمه `auth_key` على JoyReels يحمل قيمتين مختلفتين تمامًا:
+        // ‎`1787439293` (ماضٍ — 2026-08-22) في الرابط الأوّل، و‎`1947835727`
+        // (‎+٤٫٩ سنة‎) في رابط إعادة التوجيه. والثانية لو مرّت كعمرٍ حقيقيّ
+        // **لتصدّرت القائمة** (لأنّ الترتيب نزولٌ بالعمر) فتختارها القائمة
+        // الافتراضيّة على أختها الحيّة القصيرة العمر — والقيمة الوهميّة قد لا
+        // تكون رمزًا على المضيف أصلًا. والقيمة الحقيقيّة على منصّات dramatip
+        // كلّها مقيسةٌ بالساعات (‎~50 دقيقة‎) ولا تبلغ يومًا، فسقفُ ٤٠٠ يوم
+        // يفصل الرمز عن الرقم الذي يشبه الرمز. (وهذا نظيرُ `MIN_TOKEN_EPOCH`
+        // الأدنى، فالحقل المجهول لا يحكم على الرابط في أيّ اتّجاه.)
+        return rem.takeIf { it <= MAX_TOKEN_LIFE }
+    }
+
+    /**
+     * طابع انتهاء الرمز كرقمٍ مطلق من أيّ حقلٍ زمنيّ معروف، بلا حكمٍ على العمر.
+     *
+     * ★ 2026-10-17. **مسحُ المنصّات الـ٢٣ كلّها هو ما وسّع هذه القائمة.**
+     *
+     * القياس على المنصّات التي شكا المستخدم من خطأ 2004 عليها كشف أنّ الموقع
+     * يُوقّع روابطه بأسماء مختلفة لكلّ منصّة، وأنّ بوّابتينا (`t=` و`verify=`)
+     * لا ترى أيًّا منها ⇒ الرابط المنتهي يُبَثّ **بلا حكمٍ زمنيّ** فيردّ ‎403‎
+     * على أوّل طلب وسائط ⇒ 2004. والأسماء المقيسة (بمفاتيحها الفعليّة كما ظهرت
+     * في الرابط المفكوك) أربعة:
+     *  - `auth_key=` وهو **الأوسع**: قيس على JoyReels وDotDrama وStoryReel
+     *    وNetShort. وبشكلين: مجرّدًا `?auth_key=1787439293`، ومُركَّبًا
+     *    `?auth_key=1947835727-<hash>-0-<hash>` — والطابع هو ما قبل أوّل شرطة،
+     *    فالأنماط أدناه تتوقّف عند أوّل ما ليس رقمًا. ولم يُختر الصكّ افتراضًا:
+     *    قيس على `…-sd-encrypt-stream.m3u8` أنّ الطابع المجرّد **ماضٍ**، وأنّ
+     *    الطلب يردّ 302 إلى رابطٍ جديد صالح. فالحكم هنا **قاصرٌ على الترتيب**
+     *    ولا يُسقط شيئًا (انظر بوّابة البثّ: الرابط المُثبت حيًّا يُبثّ ولو انتهى
+     *    رمزه، لأنّ إعادة التوجيه تُجدّده فعلًا). وقيست سالبةً على StoryReel
+     *    (‎-1270س‎) بينما رابطها يُعرض للمستخدم — أي أنّ الحقل **قد يكون مُهمَلًا
+     *    على منصّةٍ ومُحترمًا على أخرى**، وهذا سببٌ إضافيّ لعدم الإسقاط به.
+     *  - `ts=<ثوانٍ>` على iDrama: قيس أن مسارًا حيًّا ‎`?ts=1792251558`‎ يردّ 200
+     *    والنوع `video/mp2t`، وأن المسار نفسه بمسارٍ مضاعف يردّ 403.
+     *  - `wsTime=<ثوانٍ>` على DramaBite (نمط أنظمة البثّ الصينيّة، مع `wsSecret`).
+     *  - `Expires=<ثوانٍ>` على HappyShort/NetShort/KalosTV (توقيع CloudFront،
+     *    مع `Signature` و`Key-Pair-Id`). وقيس KalosTV برمزٍ **مضى بـ٣٩٣ ساعة**
+     *    — أي رابطٌ ميتٌ كان يُبَثّ بلا حكم.
+     *
+     * و**لا يصحّ اختبارها بالاستبدال**: جُرِّب استبدال `ts=` و`wsTime=` بقيم
+     * قريبة من الآن فعادت **403 في كلّ الحالات** — فالطابع مقترنٌ بالتوقيع
+     * المجاور، فلا يُتحقَّق منه إلا بقراءة قيمته الحقيقيّة من الرابط. وهذا ما
+     * نفعله هنا: نقرأ ولا نُغيّر.
+     *
+     * وكلٌّ منها محروسٌ بـ[MIN_TOKEN_EPOCH] كي لا يُحسب هاشٌ قصير عمرًا سالبًا
+     * فيُسقط رابطًا حيًّا (وهو نفس الصنف الذي حُرس في `t=`).
+     *
+     * ★★ و**الأخذ بأصغر الطوابع لا بأوّل مطابقة**: قيس على NetShort أنّ الرابط
+     * يحمل `Expires` **و**`auth_key` معًا، وعلى KalosTV مثلهما — فرابطٌ يحمل
+     * حقلين يقصر عمره بأقربهما انتهاءً، وهذا هو ما يجعل «صغير» صحيحًا. (وأثر
+     * ذلك على الترتيب وحده؛ ولا إسقاط.)
+     */
+    private fun rawTokenEpoch(url: String): Long? {
+        val cands = mutableListOf<Long>()
+        tokenExpiryEpoch(url)?.let { cands.add(it) }
+        // الأنماط مرتّبة بحسب الشيوع المقيس، وكلٌّ منها يتوقّف عند أوّل ما ليس
+        // رقمًا فـ`1787439293-<hash>` تُقرأ `1787439293`.
+        for (re in listOf(
+            Regex("""[?&]verify=(\d{9,})"""),
+            Regex("""[?&]auth_key=(\d{9,})"""),
+            Regex("""[?&](?:ts|wsTime|Expires|expire|expires)=(\d{9,})"""),
+        )) {
+            re.find(url)?.groupValues?.get(1)?.toLongOrNull()
+                ?.takeIf { it >= MIN_TOKEN_EPOCH }?.let { cands.add(it) }
+        }
         // ★ 2026-10-17. **رموز البروكسي داخل الحمولة لا في الاستعلام.**
         //
         // الالتقاط أثبت الحالة: رابط BiliTV على `stream-e1.narto-drama.com/e/m/`
@@ -186,31 +269,16 @@ class DramaTipProvider(private val prefs: SharedPreferences? = null) : MainAPI()
         // ثالث. ومسار `src` داخل البروكسي هو الرابط الموقّع الحقيقي، فتاريخه هو
         // الحقيقة. (وهذا يوافق ما قِيس سابقًا على `narto-shared` في
         // [[narto-ok-true-but-source-refreshed-false]].)
-        proxyRemainingSeconds(url)?.let { return it }
-        return null
-    }
-
-    /**
-     * ★ 2026-10-17. عمر رمز **بروكسي نارتو** من حمولته: `…/e/m/<b64>.<sig>`.
-     *
-     * لا نتحقّق من التوقيع (غير لازمٍ للحكم الزمنيّ)، وتكفي مطابقة الشكل
-     * الصارمة كي لا تُقتطع سلاسل أخرى. والحمولة **حسّاسة لحالة الأحرف** فتُفكّ
-     * بترميز URL الآمن مع الحفاظ على الحالة. والحدّ الوحيد هنا **زمنيّ**: هل
-     * `exp` ماضٍ؟ (نسخة `narto-shared` تتحقّق منه أيضًا.)
-     * وتُرجع null إن لم تكن الحمولة JSON بحقل `exp` معقول فلا حكمَ بلا دليل.
-     */
-    private fun proxyRemainingSeconds(url: String): Long? {
-        val exp = proxyPayload(url)
+        proxyPayload(url)
             ?.let { Regex(""""exp"\s*:\s*(\d{9,})""").find(it)?.groupValues?.get(1)?.toLongOrNull() }
-            ?: return null
-        if (exp < MIN_TOKEN_EPOCH) return null
-        return exp - System.currentTimeMillis() / 1000
+            ?.takeIf { it >= MIN_TOKEN_EPOCH }?.let { cands.add(it) }
+        return cands.minOrNull()
     }
 
     /**
      * ★ 2026-10-17. حمولة بروكسي نارتو (`…/e/m/<b64>.<sig>`) مفكوكةً كنصّ JSON،
      * أو null إن لم تكن من ذلك الشكل. تفكيكٌ واحدٌ يخدم الحكمين: الزمن
-     * ([proxyRemainingSeconds]) والنوع ([classify]).
+     * ([rawTokenEpoch]: `exp` هو طابع الانتهاء) والنوع ([classify]).
      */
     private fun proxyPayload(url: String): String? {
         val m = Regex("""/e/[ms]/([A-Za-z0-9_-]+)""").find(url) ?: return null
@@ -1226,6 +1294,39 @@ class DramaTipProvider(private val prefs: SharedPreferences? = null) : MainAPI()
         return if (n > 0) "${n}p" else null
     }
 
+    /**
+     * ★ 2026-10-17. **حلّ روابط HLS الأبناء (variants والأجزاء) بلا قاعدةٍ خاطئة.**
+     *
+     * قِيس على **iDrama** (منصّة شكا المستخدم من 2004 عليها) أنّ قائمة الجودة
+     * تحمل المسارات **مطلقةً من الجذر** لا نسبةً لدليل القائمة:
+     * ‎`/d110e…/71d5….ts?ts=…&secret=…`‎. وكان الكود يبنيها بـ
+     * `c.url.substringBeforeLast('/') + "/" + seg` فينتج
+     * ‎`https://v-a.idrama.video/d110e…//d110e…/71d5….ts`‎ — أي مسارًا مضاعفًا
+     * ⇒ **403 text/html**، وهو خطأ 2004 بعينه. والمسار نفسه على
+     * ‎`https://v-a.idrama.video` + المسار المطلق ⇒ **200 video/mp2t**. فالعلّة
+     * كانت في التركيب لا في المصدر.
+     *
+     * وثلاثة أشكالٍ للحلّ كما ينصّ RFC 3986 (وهو ما يفعله أيُّ مشغّل HLS):
+     *  - `https://…` مطلقٌ كامل ⇒ كما هو.
+     *  - `//host/…` نسبةُ بروتوكولٍ ⇒ بروتوكول القائمة + الرابط.
+     *  - `/…` مطلقٌ من الجذر ⇒ **أصل** القائمة (المضيف لا دليله) + الرابط.
+     *  - وما عدا ذلك نسبيٌّ ⇒ دليل القائمة + الرابط.
+     *
+     * وكان الخلل غائبًا عن كلّ فحصٍ ساكن، لأنّ الكود «يعمل» ويعيد رابطًا صالحَ
+     * الشكل — لكنّه رابطٌ خاطئ يُسقِط البثّ في المشغّل وحده.
+     */
+    private fun resolveHlsChild(playlistUrl: String, child: String): String {
+        val c = child.trim()
+        if (c.startsWith("http://") || c.startsWith("https://")) return c
+        val u = java.net.URI(playlistUrl)
+        val origin = "${u.scheme}://${u.rawAuthority}"
+        return when {
+            c.startsWith("//") -> "${u.scheme}:$c"
+            c.startsWith("/") -> origin + c
+            else -> playlistUrl.substringBeforeLast('/', playlistUrl) + "/" + c
+        }
+    }
+
     override suspend fun loadLinks(
         data: String,
         isCasting: Boolean,
@@ -1356,8 +1457,10 @@ class DramaTipProvider(private val prefs: SharedPreferences? = null) : MainAPI()
 
             // وحين تنتهي إعادة الإنتاج، نُرخي الحكم على ما **تعذّر الحكم عليه
             // وحدَه** (مهلة أو انقطاع) — أمّا الحكم القاطع فلا يُرخى: ٤٠٣
-            // التوقيع الناقص والرمزُ المنتهي والقائمةُ المزيفة تبقى موتًا صريحًا،
-            // فبثّها يعني خطأ 2004 أو 3002 على محتوى يعمل في الموقع.
+            // التوقيع الناقص والقائمةُ المزيفة تبقى موتًا صريحًا، فبثّها يعني خطأ
+            // 2004 أو 3002 على محتوى يعمل في الموقع. **والرمز المنتهي خرج من
+            // هذا الصنف اليوم**: قِيس على JoyReels أنّ المضيف يجدّده بتحويل 302،
+            // فبثُّه ليس خطأً حتمًا (انظر بوّابة الإسقاط).
             var lenient = false
 
             suspend fun uniqOf(fc: List<Cand>): List<Cand> {
@@ -1368,8 +1471,26 @@ class DramaTipProvider(private val prefs: SharedPreferences? = null) : MainAPI()
                 // `refreshAfter` فيه ماضٍ بائتٌ بائتٌ. والترتيب الافتراضيّ كان
                 // ترتيب الموقع، فيسبق البائتُ الحيَّ فيختاره اللاعب فيفشل بـ403.
                 // و`distinctBy` بعد الترتيب تُبقي الأطزج عند تطابق الرابط.
-                return cs.filter { seen.add(it.url) }
-                    .sortedByDescending { tokenRemainingSeconds(it.url) ?: Long.MIN_VALUE }
+                //
+                // ★★ 2026-10-17. **ترتيبُ «الرموز قبل غيرها» يمتدّ إلى الشوطين.**
+                // `tokenExpired` وحدها لا تفرّق بين «منتهٍ» و«غير مُحكوم» (كلاهما
+                // يرجع عمرًا ≤ 0)، وهذه الفجوة بالذات هي التي كانت تجعل رابطًا
+                // منتهيًا **يسبق** رابطًا حيًّا إذا كان الثاني **بلا حقل زمنيّ
+                // معروف** — وهذا هو شِقّ علّة MoboReels المتبقّي: وصفةُ الصفحة
+                // تحمل رمزًا منتهيًا (‎-9064ث‎) والـAPI تحمل حيًّا (‎+3597ث‎)،
+                // فإذا سقط تصنيف `t=` لأيّ سببٍ صار الحيُّ «غير مُحكوم» ورجع
+                // ‎Long.MIN_VALUE‎ فسبقه الميت. والترتيب الصريح ثلاثيّ:
+                // حيٌّ (٢) ثم **مجعولٌ** أي أُعلن انتهاؤه صراحةً (١) ثم مجهول (٠).
+                return cs.filter { seen.add(it.url) }.sortedWith(
+                    compareByDescending<Cand> {
+                        val rem = tokenRemainingSeconds(it.url)
+                        when {
+                            rem == null -> 0L
+                            rem <= 0 -> 1L
+                            else -> 2L
+                        }
+                    }.thenByDescending { tokenRemainingSeconds(it.url) ?: Long.MIN_VALUE }
+                )
             }
 
             var uniq = uniqOf(freshCands)
@@ -1392,17 +1513,25 @@ class DramaTipProvider(private val prefs: SharedPreferences? = null) : MainAPI()
             // ★ 2026-10-17. **الجذر الثاني لدوران الفيديو.** كان الرمز المنتهي
             // يُفحَص أوّلًا (٧ث مهلةً للطلب، ثم حتى ٣ إعادات = ‎~٢٢ث‎) **ثم**
             // يُسقَط — فيدفع المستخدم ثمن رحلةٍ محكومٍ عليها سلفًا، ويراها دورانًا.
-            // والعمر معلومٌ محلّيًّا من الرابط نفسه، فلا يُصرف عليه فحصٌ أصلًا:
-            // حكمٌ صناعيّ «منتهٍ» بلا شبكة. وهذا يقصّر الطريق إلى الروابط
-            // الحيّة بقدر ما في القائمة من موتى — وقد كانت كلّها موتى في الالتقاط.
+            //
+            // ★★ و**صُحِّح اليوم تصحيحًا جوهريًّا**: كان الحكم المحلّيّ يُسقِط
+            // الرحلة كلّها فلا يُفحَص الرابط أبدًا. وقِيس على JoyReels أنّ ذلك
+            // **خطأ**: رابطٌ رمزُه **ماضٍ** (`auth_key=1787439293`، أي أغسطس ٢٠٢٦)
+            // يردّ على الطلب ‎**302**‎ إلى رابطٍ **طازج** صالح
+            // (`auth_key=1947835727-…`)، وتلك قائمته تُبَثّ 200 والنوع
+            // `application/vnd.apple.mpegurl`، وأجزاؤها 200 و`video/mp2t`. أي أنّ
+            // المضيف **يجدّد بنفسه** بالتحويل. فإسقاطه محلّيًّا = «لم يعثر على
+            // روابط» على محتوىٍ يعمل. فالقاعدة الصحيحة: **الرمز المنتهي يُرتَّب
+            // آخرًا ويُفحَص ولا يُحكم عليه من الرابط** — والحكم للشبكة.
+            // أمّا منع صرف المهلة على حكمٍ محكومٍ سلفًا فقد صار في موضعين أدقّ:
+            // ترتيب `uniqOf` (الأطزج أوّلًا) وبوّابة الإسقاط عند البثّ.
+            // ★ 2026-10-17. **الجذر الثاني لدوران الفيديو.** كان الرمز المنتهي
+            // يُفحَص أوّلًا (٧ث مهلةً للطلب، ثم حتى ٣ إعادات = ‎~٢٢ث‎) **ثم**
+            // يُسقَط — فيدفع المستخدم ثمن رحلةٍ محكومٍ عليها سلفًا، ويراها دورانًا.
             suspend fun probeAll(list: List<Cand>): List<Verdict?> = coroutineScope {
                 list.map { c ->
                     async(Dispatchers.IO) {
-                        when {
-                            !probing -> null
-                            tokenExpired(c.url, null) -> Verdict(false, "", null, "منتهٍ محلّيًّا", true)
-                            else -> probe.check(c.url)
-                        }
+                        if (probing) probe.check(c.url) else null
                     }
                 }.awaitAll()
             }
@@ -1511,10 +1640,25 @@ class DramaTipProvider(private val prefs: SharedPreferences? = null) : MainAPI()
                 //
                 // فالحكم المحلّيّ يسبق كلّ شيء: رمزٌ مضى أجله لا يُبثّ أبدًا،
                 // ولو قال الفحص إنّه مات، ولو تعذّر الفحص.
-                if (tokenExpired(c.url, raw)) {
+                //
+                // ★★ 2026-10-17. **إلا إذا أثبت الفحص نفسه أنّ الرابط حيّ.**
+                // هذا الاستثناء صنعته قياسات JoyReels: الرمز الماضي (`auth_key`
+                // = ‎أغسطس ٢٠٢٦‎) لا يعني رابطًا ميتًا هناك، بل يعني أن المضيف
+                // سيحوّل ‎302‎ إلى رابطٍ جدّده بنفسه — والمسبار يتبع التحويل
+                // (`instanceFollowRedirects=true`) فيقرأ قائمةً حيّة. وكانت
+                // البوّابة تسبق حكم المسبار فتُسقط الرابط قبل أن ترى نتيجته،
+                // فيظهر «لم يعثر على روابط» على محتوى يعمل. والقاعدة الآن:
+                // **حكمُ الشبكة الحيّ يتقدّم على حساب العمر من الرابط**، أمّا
+                // عند غياب الحكم (cannot-tell) أو موتٍ قطعيّ نُبقي حساب العمر
+                // كما كان (فهو ما يمنع بثّ المنتهي حين تعذّر الفحص).
+                if (tokenExpired(c.url, raw) && raw?.alive != true) {
                     logD("DramaTip: drop expired ${c.label} ${c.url.take(70)}" +
                         " عمر=${tokenRemainingSeconds(c.url)}s why=${raw?.why ?: "-"}")
                     continue
+                }
+                if (tokenExpired(c.url, raw) && raw?.alive == true) {
+                    logD("DramaTip: keep re-minted ${c.label} عمر=${tokenRemainingSeconds(c.url)}s" +
+                        " (المسبار أثبت الحياة بعد تحويل) ${c.url.take(70)}")
                 }
                 // الإسقاط للرابط المُثبت موته فقط (كود حالةٍ أو علامةٌ في جسم البروكسي أو
                 // شهادة TLS مرفوضة أو مضيفٌ لا يُحلّ بعد إعادة محاولةٍ صريحة). أمّا
@@ -1575,7 +1719,8 @@ class DramaTipProvider(private val prefs: SharedPreferences? = null) : MainAPI()
                 )
                 if (cannotTell || kind != ExtractorLinkType.M3U8) continue
                 val body = v?.body ?: continue
-                val base = c.url.substringBeforeLast('/', c.url)
+                // ★ والقاعدة كما ينصّ RFC 3986 لا `base + "/" + l` — التفصيل
+                // في تعليق [resolveHlsChild] (خلل iDrama: مسارٌ مضاعف ⇒ 403).
                 var inf: String? = null
                 for (raw in body.replace("\u0000", "").split('\n')) {
                     val l = raw.trim()
@@ -1583,8 +1728,7 @@ class DramaTipProvider(private val prefs: SharedPreferences? = null) : MainAPI()
                         inf = l.removePrefix("#EXT-X-STREAM-INF:")
                     } else if (inf != null && l.isNotBlank() && !l.startsWith("#")) {
                         val q = resolutionLabel(inf)
-                        val vu = if (l.startsWith("http")) l else "$base/$l"
-                        variants.add(Var(c.label + (q?.let { " · $it" } ?: ""), vu, q))
+                        variants.add(Var(c.label + (q?.let { " · $it" } ?: ""), resolveHlsChild(c.url, l), q))
                         inf = null
                     }
                 }
