@@ -7,6 +7,7 @@ import com.fasterxml.jackson.databind.ObjectMapper
 import com.fasterxml.jackson.module.kotlin.registerKotlinModule
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
+import java.net.URLEncoder
 
 private val mapper = ObjectMapper().registerKotlinModule()
     .configure(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES, false)
@@ -88,13 +89,15 @@ class DramaMondoProvider(private val prefs: SharedPreferences?) : MainAPI() {
             epsList.forEachIndexed { idx, e ->
                 val servers = e["servers"]
                 if (servers != null && servers.isArray && servers.size() > 0) {
-                    val surl = servers[0]["url"]?.asText() ?: ""
-                    if (surl.isNotEmpty()) {
-                        val epNum = (e["number"]?.asInt() ?: (idx + 1))
-                        episodes.add(newEpisode(surl) {
-                            this.name = "الحلقة $epNum"
-                            this.episode = epNum
-                        })
+                    servers.forEach { s ->
+                        val surl = s["url"]?.asText() ?: ""
+                        if (surl.isNotEmpty()) {
+                            val epNum = (e["number"]?.asInt() ?: (idx + 1))
+                            episodes.add(newEpisode(surl) {
+                                this.name = "الحلقة $epNum"
+                                this.episode = epNum
+                            })
+                        }
                     }
                 }
             }
@@ -105,12 +108,14 @@ class DramaMondoProvider(private val prefs: SharedPreferences?) : MainAPI() {
                 parts.forEachIndexed { pidx, part ->
                     val servers = part["servers"]
                     if (servers != null && servers.isArray && servers.size() > 0) {
-                        val surl = servers[0]["url"]?.asText() ?: ""
-                        if (surl.isNotEmpty()) {
-                            episodes.add(newEpisode(surl) {
-                                this.name = "الحلقة ${pidx + 1}"
-                                this.episode = pidx + 1
-                            })
+                        servers.forEach { s ->
+                            val surl = s["url"]?.asText() ?: ""
+                            if (surl.isNotEmpty()) {
+                                episodes.add(newEpisode(surl) {
+                                    this.name = "الحلقة ${pidx + 1}"
+                                    this.episode = pidx + 1
+                                })
+                            }
                         }
                     }
                 }
