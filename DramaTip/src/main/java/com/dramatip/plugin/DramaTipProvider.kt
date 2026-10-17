@@ -175,7 +175,51 @@ class DramaTipProvider(private val prefs: SharedPreferences? = null) : MainAPI()
         tokenExpiryEpoch(url)?.let { return it - now }
         Regex("""[?&]verify=(\d{9,})""").find(url)?.groupValues?.get(1)?.toLongOrNull()
             ?.takeIf { it >= MIN_TOKEN_EPOCH }?.let { return it - now }
+        // ★ 2026-10-17. **رموز البروكسي داخل الحمولة لا في الاستعلام.**
+        //
+        // الالتقاط أثبت الحالة: رابط BiliTV على `stream-e1.narto-drama.com/e/m/`
+        // فردّ 403 وجسمه حرفيًّا `invalid or expired token` ⇒ خطأ 2004. والحمولة
+        // ‎base64url(JSON)‎: `{"v":1,"t":"prov","src":"…m3u8","prov":"bilitv",
+        // "exp":1792195200}` — و`exp` **ماضٍ بـ٧٫٣ ساعة**. لكنّه ليس في الاستعلام،
+        // فلا تراه بوّابتا `t=` ولا `verify=`، ويُبَثّ الرابط المنتهي فيظهر 2004
+        // — وهو نفس صنف علّة [[dramatip-2004-expired-token-leak]] لكن في حقلٍ
+        // ثالث. ومسار `src` داخل البروكسي هو الرابط الموقّع الحقيقي، فتاريخه هو
+        // الحقيقة. (وهذا يوافق ما قِيس سابقًا على `narto-shared` في
+        // [[narto-ok-true-but-source-refreshed-false]].)
+        proxyRemainingSeconds(url)?.let { return it }
         return null
+    }
+
+    /**
+     * ★ 2026-10-17. عمر رمز **بروكسي نارتو** من حمولته: `…/e/m/<b64>.<sig>`.
+     *
+     * لا نتحقّق من التوقيع (غير لازمٍ للحكم الزمنيّ)، وتكفي مطابقة الشكل
+     * الصارمة كي لا تُقتطع سلاسل أخرى. والحمولة **حسّاسة لحالة الأحرف** فتُفكّ
+     * بترميز URL الآمن مع الحفاظ على الحالة. والحدّ الوحيد هنا **زمنيّ**: هل
+     * `exp` ماضٍ؟ (نسخة `narto-shared` تتحقّق منه أيضًا.)
+     * وتُرجع null إن لم تكن الحمولة JSON بحقل `exp` معقول فلا حكمَ بلا دليل.
+     */
+    private fun proxyRemainingSeconds(url: String): Long? {
+        val exp = proxyPayload(url)
+            ?.let { Regex(""""exp"\s*:\s*(\d{9,})""").find(it)?.groupValues?.get(1)?.toLongOrNull() }
+            ?: return null
+        if (exp < MIN_TOKEN_EPOCH) return null
+        return exp - System.currentTimeMillis() / 1000
+    }
+
+    /**
+     * ★ 2026-10-17. حمولة بروكسي نارتو (`…/e/m/<b64>.<sig>`) مفكوكةً كنصّ JSON،
+     * أو null إن لم تكن من ذلك الشكل. تفكيكٌ واحدٌ يخدم الحكمين: الزمن
+     * ([proxyRemainingSeconds]) والنوع ([classify]).
+     */
+    private fun proxyPayload(url: String): String? {
+        val m = Regex("""/e/[ms]/([A-Za-z0-9_-]+)""").find(url) ?: return null
+        return try {
+            // نفس تفكيك DeepDrama (المقيس): ترقيع الحشو بعد صيغة URL الآمنة.
+            var s = m.groupValues[1].replace('-', '+').replace('_', '/')
+            while (s.length % 4 != 0) s += "="
+            String(android.util.Base64.decode(s, android.util.Base64.DEFAULT), Charsets.UTF_8)
+        } catch (e: Exception) { null }
     }
 
     /**
@@ -823,6 +867,18 @@ class DramaTipProvider(private val prefs: SharedPreferences? = null) : MainAPI()
         // قائمة تشغيل مقيسة — أقوى دليل، ويسبق كل إعلان.
         if (ct.contains("mpegurl") || body?.contains("#EXTM3U") == true) return ExtractorLinkType.M3U8 to null
         if (u.contains(".m3u8")) return ExtractorLinkType.M3U8 to null
+        // ★ 2026-10-17. **بروكسي نارتو: الرابط الحقيقي داخل الحمولة لا في المسار.**
+        // مسارُه `/e/m/<b64>` بلا امتداد، فكان يُصنَّف `VIDEO` (‎[VIDEO] في الالتقاط)
+        // بينما `src` داخله `…-video-hd.m3u8` — أي أنّ فحصًا تعذّر (مهلة) كان
+        // يُسلِّمه للمشغّل كمقطعٍ تدريجيّ فيفشل تفكيكه. والحمولة تحمل الامتداد
+        // الحقيقي، فهي الحُجّة عند غياب الجسم المقيس.
+        proxyPayload(url)?.let { p ->
+            val src = Regex(""""src"\s*:\s*"([^"]+)"""").find(p)?.groupValues?.get(1)
+            if (src != null) {
+                return if (src.contains(".m3u8", true)) ExtractorLinkType.M3U8 to null
+                else ExtractorLinkType.VIDEO to null
+            }
+        }
         // قُرئ جسمٌ فعليّ وليس قائمة تشغيل ⇒ ليس HLS مهما أعلن الموقع
         // (تفاديًا لبثّ mp4 بنوع M3U8 فيفشل اللاعب).
         if (!body.isNullOrEmpty()) return ExtractorLinkType.VIDEO to (if (t == "mp4") "MP4" else null)
