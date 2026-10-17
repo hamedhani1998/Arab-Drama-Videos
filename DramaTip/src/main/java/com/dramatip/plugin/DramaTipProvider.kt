@@ -179,16 +179,17 @@ class DramaTipProvider(private val prefs: SharedPreferences? = null) : MainAPI()
     }
 
     /**
-     * ★ 2026-10-16. كم **تأخّرت** الوصفة عن موعد بلاها المعلن؟
+     * ★ 2026-10-17. **كم بقي** حتى موعد بلا الوصفة المعلن (`refreshAfter`)؟
      *
-     * تُعلن الوصفة بنفسها: `"refresh":true` و`"refreshAfter":<طابع>.` —
-     * وبعده صار الرابط بائتًا ووجب إعادة الجلب. قِيس على كتابٍ عالق أنّ
-     * `refreshAfter` كان ماضيًا بـ**٨٤٥٦ ثانية** (= ٢٫٣ ساعة) ورمزُه منتهٍ
-     * كذلك، بينما الطلب نفسه بـ`refresh=1` يعود برمزٍ طازج (‎+٤٤ دقيقة‎)
-     * ١٢/١٢. فالحقل هو إعلانُ البلى الذي كان الكود يتجاهله.
-     *
-     * ويُعاد **أكبر** تأخّر بين عناصر السلسلة (أسوأ مرشّح هو ما يحكم البثّ)،
-     * أو null حين لا يُعلن الموقع موعدًا (منصّاتٌ بلا `refreshAfter`).
+     * ★ تصحيح إشارةٍ مهمّ: كان هذا الدالّة تُرجع `now - refreshAfter`، وكان
+     * الشرط `staleness < -1` — وهذا **معكوس**. قِيس اليوم على كتاب 13100415
+     * بالوصفتين مباشرةً (2026-10-17 06:11 UTC):
+     *  - وصفةٌ **مخبّأة** (`?lang=ar`): `refreshAfter = now + 617` أي **لم يحن
+     *    التجديد بعد** ⇒ هي الطازجة، والكود كان يرميها «بائتة».
+     *  - وصفةٌ **مُجدَّدة** (`?lang=ar&refresh=1`): `refreshAfter = now + 2927`
+     *    أي أطول عمرًا ⇒ والأولى أقصر منها فقط لأنّها وُلدت قبلها.
+     * فالحقل إعلانٌ بموعد التجديد، وصارت الدالّة تُرجع **المتبقّي** (سالبًا إذا
+     * فات الموعد)، والشرط صريحًا: `remaining < 0`.
      */
     private fun descStaleness(descJson: String): Long? {
         val nowSec = System.currentTimeMillis() / 1000
@@ -198,7 +199,8 @@ class DramaTipProvider(private val prefs: SharedPreferences? = null) : MainAPI()
             .filterNotNull()
             .toList()
         if (vals.isEmpty()) return null
-        return nowSec - (vals.max())
+        // أصغر متبقٍّ = أسوأ مرشّحٍ يحكم البثّ.
+        return (vals.min()) - nowSec
     }
 
     /**
@@ -688,10 +690,18 @@ class DramaTipProvider(private val prefs: SharedPreferences? = null) : MainAPI()
         // الذاكرة بل **إعادة الطلب** (قد تُصيب نُسخةً أطزج) ثم خطّ نجاةٍ
         // يُبثّ فيه المنتهي. ويُضاف المعامل العشوائي لأنّه لا يضرّ، وقد
         // يُصيب مفتاحًا مختلفًا على عقدةٍ أخرى. أثره هنا: رمزٌ بعمر ~٥٠ دقيقة.
-        val url = "$tipApi/$bookId/$serial?lang=ar&refresh=1" +
-            if (bust) "&_=${System.currentTimeMillis()}" else ""
+        val baseUrl = "$tipApi/$bookId/$serial?lang=ar&refresh=1"
         var lastWhy = "-"
         for (attempt in 1..3) {
+            // ★ 2026-10-17. مضادّ الذاكرة **فريدٌ لكلّ محاولة** لا لكلّ نداء.
+            // قِيس على الجهاز أنّ ثلاث محاولاتٍ بالرابط نفسه تعيد **الجسم
+            // البائت نفسه** (تسجيل: `field=-2837s` يتكرّر بالثانية نفسها)،
+            // فالمحاولات كانت عبثًا. وبمفتاحٍ متغيّرٍ قد تصيب نُسخةً أطزج على
+            // العقدة نفسها أو مفتاحًا على عقدةٍ أخرى — وهي العلّة المقيسة:
+            // عقدُ dramatip تخدم نُسخًا متباعدة (نسخةٌ عمرها ٥٢ ألف ثانية
+            // مقابل أختها الطازجة للكتاب نفسه).
+            val url = baseUrl +
+                if (bust || attempt > 1) "&_=${System.currentTimeMillis()}$attempt" else ""
             try {
                 val timeout = if (attempt >= 3) 25_000L else 12_000L
                 val res = app.get(url, referer = TIP_MAIN, headers = reqHeaders(), timeout = timeout)
@@ -718,12 +728,32 @@ class DramaTipProvider(private val prefs: SharedPreferences? = null) : MainAPI()
                         // بثّه خطأ 2004 (BAD_HTTP_STATUS) حتمًا: القائمة تفتح
                         // ثم يرفض الحافّة قطعةَ الفيديو بـ403.
                         val bestLife = descBestLife(desc.toString())
-                        val staleByField = staleness != null && staleness < -1
+                        // ★ 2026-10-17. الصيغة الصحيحة (`refreshAfter` = موعد
+                        // التجديد، والوصفة بائتةٌ إذا **فات**): انظر descStaleness.
+                        val staleByField = staleness != null && staleness < 0
                         val staleByToken = bestLife != null && bestLife <= 0
+                        // ★ 2026-10-17. إذا أعلن الحقل أنّ موعد التجديد **فات** لكنّ
+                        // الرمز المفكوك **ما زال حيًّا**، فلا تطعن في الرمز: عقدُ
+                        // dramatip تخدم نُسخًا متباعدة، فـ`refreshAfter` يخبّئه
+                        // حدودُ حافّةٍ أقدم بينما الرمز الذي بين أيدينا لم ينتهِ
+                        // بعد. قِيس على كتاب 3896: `refreshAfter` يسبق `verify`
+                        // بنحو ٦٠٠ث (كلاهما وقتُ انتهاء)، فالنسخة «بائتة الحقل»
+                        // قد تكون «حيّة الرمز» — وبثُّها سليمٌ ما لم ينتهِ الرمز.
+                        // كان الكود يُهدر ثلاث محاولات ثم يُعيد الجسم البائت
+                        // نفسه فيُسقط رابطًا صالحًا (‎token=+3002s‎ مقابل
+                        // ‎life=-52141s‎ في السجلّ). فالحقل يحكم فقط حين لا رمز.
+                        if (bestLife != null && bestLife > 0) {
+                            android.util.Log.d(
+                                "DramaTip",
+                                "episode-source accept (token حيّ $bestLife s يتقدّم على الحقل" +
+                                    " ${staleness ?: "?"}s) book=$bookId ser=$serial"
+                            )
+                            return plainFromDescriptor(desc.toString())
+                        }
                         if (staleByField || staleByToken) {
                             lastWhy = if (staleByToken)
                                 "رمزٌ منتهٍ (عمر ${bestLife}ث)"
-                            else "وصفة بائتة (تأخّرت ${-staleness!!}ث)"
+                            else "وصفة بائتة (فات موعدها بـ${-staleness!!}ث)"
                             android.util.Log.e(
                                 "DramaTip",
                                 "episode-source stale book=$bookId ser=$serial" +
