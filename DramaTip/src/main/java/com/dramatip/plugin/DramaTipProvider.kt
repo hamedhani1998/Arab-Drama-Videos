@@ -1654,10 +1654,14 @@ class DramaTipProvider(private val prefs: SharedPreferences? = null) : MainAPI()
             collected.addAll(deferred)
             collected.addAll(fallbacks)
             val order = prefs?.getString(DramaTipSettingsBottomSheet.KEY_QUALITY_ORDER, "default")
-            val ordered = when (order) {
+            var ordered = when (order) {
                 "asc" -> collected.sortedBy { it.quality }
                 "desc" -> collected.sortedByDescending { it.quality }
                 else -> collected
+            }
+            // ★ DramaBox: أفضل جودة أولًا
+            if (source.equals("DramaBox", ignoreCase = true) || source.contains("DramaBox", ignoreCase = true)) {
+                ordered = ordered.sortedByDescending { it.quality }
             }
 
             if (ordered.isNotEmpty()) {
