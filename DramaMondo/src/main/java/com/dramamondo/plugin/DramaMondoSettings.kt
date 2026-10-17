@@ -54,6 +54,8 @@ class DramaMondoSettingsBottomSheet(private val prefs: SharedPreferences) : Bott
         const val KEY_SHOW_PLATFORMS = "dm_show_platforms"
         const val KEY_ROW_LIMIT = "dm_row_limit"
         const val KEY_SUB_LANGS = "dm_sub_langs"
+        const val KEY_PROBE_LINKS = "dm_probe_links"
+        const val KEY_QUALITY_ORDER = "dm_quality_order"
 
         fun platformKey(slug: String) = "dm_platform_$slug"
 
@@ -84,6 +86,32 @@ class DramaMondoSettingsBottomSheet(private val prefs: SharedPreferences) : Bott
                 }
             }
             playbackCategory.addPreference(subLangsPref)
+
+            // فحص السيرفرات: هو ما يرتّب «الأكثر استجابة» أولًا ويُظهر الحجم
+            // والدقّة، وهو أيضًا ما يُسقط الروابط الميّتة قبل اختيار اللاعب
+            // (‎2004‎ = انتهى التوقيع أو الرابط). إطفاؤه = بدء أسرع بلا فحص.
+            val probePref = SwitchPreferenceCompat(ctx).apply {
+                key = KEY_PROBE_LINKS
+                title = "فحص السيرفرات قبل التشغيل"
+                summary = "يرتّب الأسرع أولًا ويُظهر الدقّة والحجم ويُسقط الميّت (يُبطئ البدء قليلًا)"
+                setDefaultValue(true)
+            }
+            playbackCategory.addPreference(probePref)
+
+            val orderPref = ListPreference(ctx).apply {
+                key = KEY_QUALITY_ORDER
+                title = "ترتيب الجودات"
+                summary = "الأكثر استجابة = ترتيب الروابط بزمن الاستجابة المقيس"
+                summaryProvider = ListPreference.SimpleSummaryProvider.getInstance()
+                entryValues = arrayOf("fastest", "desc", "asc")
+                entries = arrayOf(
+                    "الأكثر استجابة أولًا (افتراضي)",
+                    "الأعلى جودة أولًا",
+                    "الأدنى جودة أولًا"
+                )
+                setDefaultValue("fastest")
+            }
+            playbackCategory.addPreference(orderPref)
 
             val platCat = PreferenceCategory(ctx)
             platCat.title = "أقسام المنصات في الواجهة الرئيسية"
@@ -133,6 +161,8 @@ class DramaMondoSettingsBottomSheet(private val prefs: SharedPreferences) : Bott
                         remove(KEY_SHOW_PLATFORMS)
                         remove(KEY_ROW_LIMIT)
                         remove(KEY_SUB_LANGS)
+                        remove(KEY_PROBE_LINKS)
+                        remove(KEY_QUALITY_ORDER)
                         DM_PLATFORMS.forEach { (slug, _) -> remove(platformKey(slug)) }
                     }.apply()
                     Toast.makeText(ctx, "تمت إعادة الضبط", Toast.LENGTH_SHORT).show()

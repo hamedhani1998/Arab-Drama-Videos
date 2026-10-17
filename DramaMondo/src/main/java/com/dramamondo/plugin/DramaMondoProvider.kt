@@ -1,12 +1,17 @@
 package com.dramamondo.plugin
 
 import android.content.SharedPreferences
+import cloudstreamshared.MediaProbe
 import com.fasterxml.jackson.databind.DeserializationFeature
 import com.fasterxml.jackson.databind.JsonNode
 import com.fasterxml.jackson.databind.ObjectMapper
 import com.fasterxml.jackson.module.kotlin.registerKotlinModule
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
 import java.net.URLDecoder
 import java.net.URLEncoder
 
@@ -218,6 +223,137 @@ class DramaMondoProvider(private val prefs: SharedPreferences?) : MainAPI() {
         else -> "DramaMondo"
     }
 
+    /** مرشّح تشغيل واحد: ما يُعرض في القائمة قبل الفحص. */
+    private data class Cand(
+        val kind: String,      // المفتاح الداخلي: rumble / extract / direct
+        val server: String,    // الاسم المعروض
+        val label: String?,    // «720p» إن عُلمت
+        val bytes: Long?,      // حجم الملف إن أعلنه الخادم
+        val url: String,
+        val type: ExtractorLinkType,
+        val referer: String?,
+        val headers: Map<String, String> = emptyMap(),
+        val ttfb: Long = Long.MAX_VALUE,
+        val alive: Boolean = true,
+        val certain: Boolean = false,
+        val why: String = "",
+        val quality: Int = Qualities.Unknown.value,
+    ) {
+        /** ترتيب العرض: الحيٌّ أولًا، ثم الأسرع استجابةً، ثم الأعلى دقّة. */
+        fun rank(): Long {
+            val aliveKey = if (alive && certain) 0L else if (alive) 1L else 2L
+            return aliveKey * 1_000_000_000L + minOf(ttfb, 999_999_999L)
+        }
+    }
+
+    /**
+     * رامبل — لا مُستخرِج مدمج له (قِيس: لا صنف يطابق `rumble` في
+     * `cloudstream.jar`)، فتُقرأ صفحة التضمين نفسها.
+     *
+     * العقدة `m.f[…]` تحمل `ua` وفيه: `hls.auto.url` قائمة الأم، و`tar` جوداتٌ
+     * مفردةٌ مفتاحُها 240/360/480/720 و`meta` يحمل `size` (بالبايت) و`w`/`h`
+     * (الدقّة الحقيقية). تُقرأ **بموازنة الأقواس** لا بنمطٍ كسول لأنّ القيم
+     * تحمل أقواسًا داخلية، والأقواس داخل السلاسل لا تُعدّ.
+     *
+     * نُخرج قائمة الأم **و** الجودات المفردة: المستخدم يطلب صراحةً معرفة أنّ
+     * الجودة 720 أو 480 ومع حجمها، وقائمة الأم وحدها تخفيها خلف «تلقائي».
+     */
+    private suspend fun resolveRumble(
+        embedUrl: String,
+        seen: MutableSet<String>,
+        out: MutableList<Cand>
+    ) {
+        val html = try { app.get(embedUrl, referer = "$mainUrl/").text } catch (e: Exception) { return }
+        // نبدأ من `m.f[` كي لا يطابق `"u":{` شيئًا آخر في الصفحة.
+        val anchor = html.indexOf("m.f[")
+        val scope = if (anchor >= 0) html.substring(anchor) else html
+        val uaText = nodeText(scope, "ua") ?: nodeText(scope, "u") ?: return
+        val ua = try { mapper.readTree(unescape(uaText)) } catch (e: Exception) { return }
+        if (!ua.isObject) return
+
+        val hlsNode = ua.get("hls")
+        val master = hlsNode?.get("auto")?.get("url")?.asText()
+            ?: hlsNode?.get("url")?.asText()
+
+        val tar = ua.get("tar")
+        var topH = 0
+        if (tar != null && tar.isObject) {
+            val names = tar.fieldNames()
+            while (names.hasNext()) {
+                val k = names.next()
+                val node = tar.get(k) ?: continue
+                val u = node.get("url")?.asText()?.takeIf { it.isNotBlank() } ?: continue
+                val meta = node.get("meta")
+                val h = meta?.get("h")?.asInt() ?: k.toIntOrNull() ?: 0
+                val bytes = meta?.get("size")?.asLong()?.takeIf { it > 0 }
+                topH = maxOf(topH, h)
+                if (!seen.add(u)) continue
+                out.add(Cand(
+                    kind = "rumble",
+                    server = "Rumble",
+                    label = MediaProbe.qualityLabel(h),
+                    bytes = bytes,
+                    url = u,
+                    type = ExtractorLinkType.M3U8,
+                    referer = null,
+                    quality = MediaProbe.qualityLabel(h)?.let { getQualityFromName(it) }
+                        ?: Qualities.Unknown.value,
+                ))
+            }
+        }
+        if (!master.isNullOrBlank() && master.contains(".m3u8", true) && seen.add(master)) {
+            out.add(Cand(
+                kind = "rumble",
+                server = "Rumble",
+                label = "تلقائي",
+                bytes = null,
+                url = master,
+                type = ExtractorLinkType.M3U8,
+                referer = null,
+                quality = MediaProbe.qualityLabel(topH)?.let { getQualityFromName(it) }
+                    ?: Qualities.Unknown.value,
+            ))
+        }
+    }
+
+    /**
+     * العقدة JSON المعلَّقة بـ`"<key>":` — تُقرأ **بموازنة الأقواس** لا بنمطٍ
+     * كسول، فالقيم تحمل أقواسًا داخلية يبتلعها `.*`، والأقواس داخل السلاسل
+     * النصّية لا تُعدّ.
+     */
+    private fun nodeText(scope: String, key: String): String? {
+        val marker = "\"" + key + "\":"
+        val i = scope.indexOf(marker + "{")
+        if (i < 0) return null
+        val open = scope.indexOf('{', i)
+        var depth = 0
+        var inStr = false
+        var esc = false
+        for (k in open until scope.length) {
+            val c = scope[k]
+            if (inStr) {
+                when {
+                    esc -> esc = false
+                    c == '\\' -> esc = true
+                    c == '"' -> inStr = false
+                }
+            } else {
+                when (c) {
+                    '"' -> inStr = true
+                    '{' -> depth++
+                    '}' -> {
+                        depth--
+                        if (depth == 0) return scope.substring(open, k + 1)
+                    }
+                }
+            }
+        }
+        return null
+    }
+
+    /** فكّ ترميز JSON داخل حمولة رامبل: `\/` تصير `/`. */
+    private fun unescape(s: String): String = s.replace("\\/", "/")
+
     override suspend fun loadLinks(
         data: String,
         isCasting: Boolean,
@@ -225,7 +361,7 @@ class DramaMondoProvider(private val prefs: SharedPreferences?) : MainAPI() {
         callback: (ExtractorLink) -> Unit
     ): Boolean {
         // بيانات الحلقة = سيرفرات الجزء كلها، سطر لكل رابط. إن جاءت كصفحة تفاصيل
-        // (آخر ملاذ في load()) نعيد حلّ السيرفرات من الـ dump حتى لا ت dead-end.
+        // (آخر ملاذ في load()) نعيد حلّ السيرفرات من الـ dump حتى لا dead-end.
         var urls = data.split("\n").map { it.trim() }.filter { it.startsWith("http") }
         if (urls.isEmpty()) return false
         if (urls.size == 1 && urls[0].startsWith("$mainUrl/")) {
@@ -243,40 +379,134 @@ class DramaMondoProvider(private val prefs: SharedPreferences?) : MainAPI() {
             }
         }
 
-        var produced = 0
+        val seen = HashSet<String>()
+        val cands = ArrayList<Cand>()
+
         for (u in urls) {
             try {
-                loadExtractor(u, "$mainUrl/", subtitleCallback) { link ->
-                    produced++
-                    callback(link)
+                if (hostIs(u, "rumble.com")) {
+                    // جودات رامبل تُحلّ من الصفحة (وحجمها ودقّتها معلنة فيها)
+                    resolveRumble(u, seen, cands)
+                } else {
+                    val produced = ArrayList<ExtractorLink>()
+                    val ok = try {
+                        loadExtractor(u, "$mainUrl/", { subtitleCallback(it) }) { produced.add(it) }
+                    } catch (e: kotlinx.coroutines.CancellationException) {
+                        throw e
+                    } catch (e: Throwable) {
+                        false
+                    }
+                    for (l in produced) {
+                        if (!seen.add(l.url)) continue
+                        cands.add(Cand(
+                            kind = "extract",
+                            server = serverNameOf(u),
+                            label = null,
+                            bytes = null,
+                            url = l.url,
+                            type = l.type,
+                            referer = l.referer?.takeIf { it.isNotBlank() } ?: "$mainUrl/",
+                            headers = l.headers,
+                            quality = if (l.quality != Qualities.Unknown.value) l.quality
+                            else MediaProbe.qualityLabel(qualityHeightOf(l.name))?.let { getQualityFromName(it) }
+                                ?: l.quality,
+                        ))
+                    }
+                    // المُستخرج لم يعرف المضيف: نُبقي الرابط الأصلي مرشّحًا
+                    // فقط إن كان وسائط صريحة (mp4/m3u8) — صفحة تضمين كـVIDEO
+                    // تُعطي اللاعب «خطأ 3001» ولا تفيد.
+                    if (produced.isEmpty() && ok != true && isMedia(u)) {
+                        if (seen.add(u)) cands.add(Cand(
+                            kind = "direct",
+                            server = serverNameOf(u),
+                            label = null,
+                            bytes = null,
+                            url = u,
+                            type = if (u.contains(".m3u8", true)) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO,
+                            referer = "$mainUrl/",
+                        ))
+                    }
                 }
             } catch (e: kotlinx.coroutines.CancellationException) {
                 throw e
             } catch (e: Throwable) {
-                // المُستخرج لا يعرف هذا المضيف — نجرّب الرابط التالي
+                // سيرفر واحد لا يُسقط الحلقة كلها
             }
         }
-        if (produced > 0) return true
 
-        // فشل كل المُستخرجات: نُصدر رابطًا مباشرًا فقط إن كان الملف م media صريحًا
-        // (mp4/m3u8) — رابط صفحة تضمّن كـ VIDEO يعطي ExoPlayer 3001 ولا يفيد.
-        val direct = urls.filter {
-            val p = it.substringBefore("?").lowercase()
-            p.endsWith(".mp4") || p.endsWith(".m3u8") || p.contains(".m3u8")
+        if (cands.isEmpty()) return false
+
+        // ★ الفحص: طلبٌ واحد صغير لكل مرشّح (يبقى ‎206‎/‎200‎ والجسم بايتان)
+        //   يُثبت الحيوية ويقرأ الحجم الكامل من ‎Content-Range‎، ويرتّب
+        //   «الأكثر استجابة» أولًا. والفحص كلّه متوازٍ فلا يُطيل البدء.
+        val probeLinks = prefs?.getBoolean(DramaMondoSettings.KEY_PROBE_LINKS, true) != false
+        val probed: List<Cand> = if (!probeLinks) cands else coroutineScope {
+            cands.map { c ->
+                async(Dispatchers.IO) {
+                    val r = MediaProbe.probe(c.url, c.referer, c.headers)
+                    c.copy(
+                        bytes = c.bytes ?: r.totalBytes,
+                        ttfb = if (r.alive) r.ttfbMs else Long.MAX_VALUE - 1,
+                        alive = r.alive,
+                        certain = r.certain,
+                        why = r.why,
+                    )
+                }
+            }.awaitAll()
         }
-        for (u in direct) {
-            val name = serverNameOf(u)
-            callback.invoke(
-                ExtractorLink(
-                    source = name,
-                    name = name,
-                    url = u,
-                    referer = mainUrl,
-                    quality = Qualities.Unknown.value,
-                    type = ExtractorLinkType.VIDEO
-                )
-            )
+
+        // رابطٌ ميّت بحكمٍ قاطع (كود حالة أو جسم «منتهٍ») يُسقَط في القائمة
+        // لكنه يبقى في الاحتياط — فلا تُفقد حلقةٌ كلّ سيرفراتها ميتة.
+        val shown = probed.filter { it.alive || !it.certain }
+        val fallback = probed.filter { !it.alive && it.certain }
+        val pool = if (shown.isEmpty()) fallback else shown
+        // الترتيب: «الأكثر استجابة» افتراضيًّا — والحيٌّ يسبق الميّت، والأسرع
+        // يسبق الأبطأ، ثمّ الأعلى دقّة عند تقارب زمن الاستجابة.
+        val ordered = when (prefs?.getString(DramaMondoSettings.KEY_QUALITY_ORDER, "fastest")) {
+            "desc" -> pool.sortedWith(compareByDescending<Cand> { it.quality }.thenBy { it.rank() })
+            "asc" -> pool.sortedWith(compareBy<Cand> { it.quality }.thenBy { it.rank() })
+            else -> pool.sortedBy { it.rank() }
         }
-        return direct.isNotEmpty()
+
+        var emitted = 0
+        for (c in ordered) {
+            val label = MediaProbe.label(c.server, c.label, c.bytes, c.url, c.type)
+            callback(newExtractorLink(
+                source = name,
+                name = label,
+                url = c.url,
+                type = c.type
+            ) {
+                c.referer?.let { r -> this.referer = r }
+                this.headers = c.headers
+                this.quality = c.quality
+            })
+            emitted++
+        }
+        return emitted > 0
     }
+
+    /** مضيف الرابط بأحرف صغيرة؛ سلسلة فارغة إن تعذّر تحليله. */
+    private fun hostOf(u: String): String = try {
+        java.net.URI(u).host?.lowercase() ?: ""
+    } catch (e: Exception) { "" }
+
+    /** مطابقة بلاحقة المضيف الكاملة: `notrumble.com` لا يُعدّ `rumble.com`. */
+    private fun hostIs(u: String, domain: String): Boolean {
+        val h = hostOf(u)
+        return h == domain || h.endsWith(".$domain")
+    }
+
+    /** رابط وسائط صريح يمكن تمريره للاعب مباشرةً. */
+    private fun isMedia(u: String): Boolean {
+        val p = u.substringBefore("?").lowercase()
+        return p.endsWith(".mp4") || p.endsWith(".m3u8") || p.endsWith(".mpd") || p.endsWith(".ts")
+    }
+
+    /** ارتفاع مذكور في اسم المُستخرِج («1080p») — لتعبئة الدقّة حين لا يُعلنها. */
+    private fun qualityHeightOf(name: String?): Int {
+        val m = Regex("(\\d{3,4})p").find(name ?: "") ?: return 0
+        return m.groupValues[1].toIntOrNull() ?: 0
+    }
+
 }

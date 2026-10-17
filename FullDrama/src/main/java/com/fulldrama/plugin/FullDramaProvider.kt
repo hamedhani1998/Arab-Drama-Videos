@@ -4,6 +4,8 @@ import android.content.SharedPreferences
 import com.fasterxml.jackson.databind.DeserializationFeature
 import com.fasterxml.jackson.databind.ObjectMapper
 import com.fasterxml.jackson.module.kotlin.registerKotlinModule
+import cloudstreamshared.MediaProbe
+import cloudstreamshared.Mp4Head
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
 import java.net.URLEncoder
@@ -189,28 +191,105 @@ class FullDramaProvider(private val prefs: SharedPreferences?) : MainAPI() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
-        val html = try { app.get(data).text } catch (e: Exception) { return false }
-        // videoUrl داخل حمولة RSC: قد تأتي مهرَّبة بـ " أو \' و& مهرَّبة &
+        // الرابط الموقّع عمره محدود (`exp=<epoch>`)، والتوقيع المنتهي يردّ
+        // ‎403‎ بجسم ‎{"error":"link expired"} — وهو ما يراه المستخدم «خطأ
+        // 2004». فتُفحص الصفحة، وإن انتهى التوقيع تُعاد جلبتها مرّةً واحدة
+        // لأخذ توقيع طازج (الموقع يوقّع رابطًا جديدًا في كل تحميل صفحة).
+        var raw = extractVideoUrl(data) ?: return false
+        var payload: Long? = null
+        var info: Mp4Head.Info? = null
+        if (isProbing()) {
+            // فحص واحد يجمع الثلاثة: الحيوية والحجم ورأس الملفّ (الدقّة والترميز)
+            // — فلا طلب ثانٍ يضيع في زمن البدء. الجسم يُقرأ بسقفٍ صارم ثم يُقطع.
+            var v = MediaProbe.probe(raw, mainUrl, bodyCap = Mp4Head.HEAD_CAP)
+            if (!v.alive && v.certain && looksExpired(v.why)) {
+                val fresh = extractVideoUrl(data, force = true)
+                if (fresh != null && fresh != raw) {
+                    raw = fresh
+                    v = MediaProbe.probe(raw, mainUrl, bodyCap = Mp4Head.HEAD_CAP)
+                }
+            }
+            payload = v.totalBytes
+            if (!v.alive) {
+                // لا نُسقط الرابط: قد يكون حكمًا متشكّكًا من شبكة عابرة،
+                // والسياسة أن الإسقاط لا يقع إلا على حكمٍ قاطع (انظر MediaProbe).
+                logE("FullDrama: probe ${if (v.certain) "dead" else "unknown"} (${v.why}) ${raw.take(72)}")
+            } else {
+                // الدقّة من `stsd` لا من وعد الموقع: الشارة بجوار العمل «HD» فقط،
+                // والملفّ الحقيقي مقيسٌ 1080×1920 عموديًّا بـHEVC.
+                info = v.body?.let { Mp4Head.parse(it) }
+                if (info == null) logD("FullDrama: رأس mp4 غير مقروء في ${raw.take(72)}")
+            }
+        }
+        // الموقع لا ينشر إلا ملفًّا واحدًا لكل حلقة — لا قائمة جودات ولا خوادم
+        // بديلة؛ فالدقّة تُقرأ من رأس الملفّ نفسه ولا تُخترع.
+        val note = info?.let { i ->
+            listOfNotNull(i.videoCodec, i.audioCodec?.let { a -> if (i.audioChannels > 0) "$a ${i.audioChannels}ch" else a })
+                .takeIf { it.isNotEmpty() }
+                ?.joinToString("+")
+        }
+        callback.invoke(
+            ExtractorLink(
+                source = name,
+                name = MediaProbe.label("FullDrama", info?.quality(), payload, raw, ExtractorLinkType.VIDEO, note),
+                url = raw,
+                referer = mainUrl,
+                quality = info?.quality()?.let { getQualityFromName(it) } ?: Qualities.Unknown.value,
+                type = ExtractorLinkType.VIDEO
+            )
+        )
+        return true
+    }
+
+    // ذاكرة رابط الحلقة: الرابط الموقّع يبقى صالحًا دقائق، وإعادة الضغط على
+    // الحلقة نفسها لا يجب أن تجلب الصفحة مرّةً أخرى.
+    private val pageCache = java.util.concurrent.ConcurrentHashMap<String, Triple<Long, String, Long?>>()
+
+    /** رابط cdn الموقّع من صفحة الحلقة؛ [force] تتجاوز الذاكرة لأخذ توقيع طازج. */
+    private suspend fun extractVideoUrl(episodeUrl: String, force: Boolean = false): String? {
+        val now = System.currentTimeMillis()
+        if (!force) {
+            pageCache[episodeUrl]?.let { (ts, u, exp) ->
+                // لا يُستعمل رابط ينتهي قريبًا — الهامش 60 ثانية كي لا يصل
+                // للاعب منتهيًا بعد ثوانٍ من اختياره
+                if (now - ts < 60_000L && (exp == null || exp * 1000L - now > 60_000L)) return u
+            }
+        }
+        val html = try { app.get(episodeUrl).text } catch (e: Exception) { return null }
+        val raw = findVideo(html) ?: return null
+        val exp = Regex("exp=(\\d+)").find(raw)?.groupValues?.get(1)?.toLongOrNull()
+        pageCache[episodeUrl] = Triple(now, raw, exp)
+        return raw
+    }
+
+    /** حمولة RSC تُهرِّب `&` إلى `\\u0026` (وقد تصل خامّة) — الحالتان مدعومتان. */
+    private fun findVideo(html: String): String? {
         val patterns = listOf(
             Regex("https://cdn\\.full-drama\\.com/[A-Za-z0-9_\\-]+\\.mp4\\?exp=\\d+(?:\\\\u0026sig=[0-9a-f]+)?(?:\\\\u0026media_type=[a-z_0-9]+)?"),
             Regex("https://cdn\\.full-drama\\.com/[A-Za-z0-9_\\-]+\\.mp4\\?exp=\\d+(?:&sig=[0-9a-f]+)?(?:&media_type=[a-z_0-9]+)?"),
             Regex("https://cdn\\.full-drama\\.com/[A-Za-z0-9_\\-]+\\.mp4\\?[^\"'\\\\\\s]+"),
         )
         for (rx in patterns) {
-            val match = rx.find(html) ?: continue
-            val raw = match.value.replace("\\u0026", "&")
-            callback.invoke(
-                ExtractorLink(
-                    source = name,
-                    name = "MP4",
-                    url = raw,
-                    referer = mainUrl,
-                    quality = Qualities.Unknown.value,
-                    type = ExtractorLinkType.VIDEO
-                )
-            )
-            return true
+            val m = rx.find(html) ?: continue
+            // الخام أولًا ثم المهرَّب: `&` تصير `&`
+            return m.value.replace("\\u0026", "&")
         }
-        return false
+        return null
+    }
+
+    private fun looksExpired(why: String): Boolean =
+        why.contains("expired", true) || why.contains("HTTP 403") || why.contains("HTTP 410")
+
+    private fun isProbing(): Boolean =
+        prefs?.getBoolean(FullDramaSettings.KEY_PROBE_LINKS, true) != false
+
+    // سجلّ الأخطاء: يظهر في «سجلّ الأخطاء» داخل التطبيق — يُميّز بدء التشغيل
+    // الفاشل (رابط منتهٍ) من فشل الشبكة، والاستدعاء محروس كي لا يُسقط الإضافة.
+    private fun logE(msg: String) {
+        try { android.util.Log.e("FullDrama", msg) } catch (e: Exception) { }
+    }
+
+    private fun logD(msg: String) {
+        try { android.util.Log.d("FullDrama", msg) } catch (e: Exception) { }
     }
 }

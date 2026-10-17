@@ -54,6 +54,7 @@ class FullDramaSettingsBottomSheet(private val prefs: SharedPreferences) : Botto
         const val KEY_SHOW_PLATFORMS = "fd_show_platforms"
         const val KEY_ROW_LIMIT = "fd_row_limit"
         const val KEY_SUB_LANGS = "fd_sub_langs"
+        const val KEY_PROBE_LINKS = "fd_probe_links"
 
         fun platformKey(slug: String) = "fd_platform_$slug"
 
@@ -84,6 +85,16 @@ class FullDramaSettingsBottomSheet(private val prefs: SharedPreferences) : Botto
                 }
             }
             playbackCategory.addPreference(subLangsPref)
+
+            // فحص الرابط قبل التشغيل: يُظهر الحجم الفعلي للملفّ ويجلب توقيعًا
+            // طازجًا إن انتهى (`exp=`) — وهو سبب «خطأ 2004». إطفاؤه = بدء أسرع.
+            val probePref = SwitchPreferenceCompat(ctx).apply {
+                key = KEY_PROBE_LINKS
+                title = "فحص الرابط قبل التشغيل"
+                summary = "يُظهر حجم الفيديو ويجدّد التوقيع المنتهي (يُبطئ البدء قليلًا)"
+                setDefaultValue(true)
+            }
+            playbackCategory.addPreference(probePref)
 
             val platCat = PreferenceCategory(ctx)
             platCat.title = "أقسام التصنيفات في الواجهة الرئيسية"
@@ -140,6 +151,7 @@ class FullDramaSettingsBottomSheet(private val prefs: SharedPreferences) : Botto
                         remove(KEY_SHOW_PLATFORMS)
                         remove(KEY_ROW_LIMIT)
                         remove(KEY_SUB_LANGS)
+                        remove(KEY_PROBE_LINKS)
                         listOf(
                             "romance", "ceo-boss", "family", "revenge", "historical", "sci-fi",
                             "action", "time-travel", "underdog", "mystery", "medical", "school",
