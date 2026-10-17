@@ -1040,6 +1040,53 @@ class MosalsalyProvider(
         return out
     }
 
+    /**
+     * هل تُعلن قائمة الأم صوتاً **منفصلاً** عن فيديوهاتها؟
+     *
+     * ★ 2026-10-17. قِسنا على المنصات الأربع والعشرين: freereels وmydramawave
+     * وحدهما يُصدران قائمةً أمّاً تحمل ‎#EXT-X-MEDIA:TYPE=AUDIO,URI="….aac.m3u8"‎
+     * وكل ‎#EXT-X-STREAM-INF‎ فيها يحمل ‎AUDIO="default-audio-group"‎. ومتغيّراتها
+     * **فيديو خالص**: قِسنا جسد المتغيّر نفسه — لا ‎#EXT-X-MEDIA‎ فيه، ومقاطعه
+     * ‎….mp4‎ مقطوعات فيديو، والصوت مسارٌ منفصل ‎.aac.m3u8‎.
+     *
+     * فإخراج تلك المتغيّرات كروابط مستقلّة يعطي بالضبط شكوى المستخدم: **«في صيغ
+     * تظهر الفيديو دون الصوت»** — والسبب استخراج داخليّ أضفناه لاستيعاب جودات
+     * المسار الواحد. والأمّ نفسها تشتغل صحيحةً لأن اللاعب يدمج جدول الصوت مع
+     * الفيديو حين يقرأها قائمةً أمّة.
+     *
+     * وبقية الحالات (moboreels ٤ متغيّرات، playlet ٣، petadrama ٣) تحمل
+     * ‎#EXT-X-STREAM-INF‎ بلا ‎AUDIO=‎ ولا ‎#EXT-X-MEDIA‎، أي متغيّراتها مُدمجة
+     * وفيها الصوت — فإخراجها آمن ولا يُغيّر فيه شيء.
+     */
+    private fun hasSeparateAudio(body: String): Boolean {
+        if (body.contains("#EXT-X-MEDIA:TYPE=AUDIO", true)) return true
+        return body.lineSequence().any {
+            it.startsWith("#EXT-X-STREAM-INF", true) && it.contains("AUDIO=", true)
+        }
+    }
+
+    /**
+     * أطول ارتفاع مذكور داخل قائمة الأم (‎RESOLUTION=WxH‎) كنصّ جودة.
+     *
+     * ★ 2026-10-17. **اللاعب يفرز الروابط تنازليًّا بحقل `quality` لا بترتيب
+     * الإرسال** — ترتيب الإرسال يكسر التعادل فقط (فرز مستقر). وكانت قائمة الأمّ
+     * تُسمّى «تلقائي» بلا رقم ⇒ ‎quality=Unknown (4)‎ فتقع **تحت** جودة صلبة
+     * 1080p (7) رغم أنّها تحمل الـ1080 بداخلها — فلا تكن الخيار الأوّل قطّ.
+     *
+     * تسميتُها بأعلى جودة داخلها تجعلها تتعادل معها ثم **تسبقها بترتيب الإرسال**،
+     * وهي تسمية صادقة لا وهمية: الأمّ تصل فعلاً إلى تلك الجودة، واللاعب ينزل
+     * تلقائياً إلى ما تحتمله الشبكة. وهذا هو معنى «مسار التشغيل متعدد الجودات
+     * أوّلاً» الذي طلبه المستخدم.
+     */
+    private fun masterMaxHeight(body: String): String? {
+        var best: Int? = null
+        for (m in Regex("""RESOLUTION=\d+x(\d+)""", RegexOption.IGNORE_CASE).findAll(body)) {
+            val h = m.groupValues[1].toIntOrNull() ?: continue
+            if (best == null || h > best) best = h
+        }
+        return best?.toString()
+    }
+
     private suspend fun emitDescriptorLinks(
         descriptor: ObjectNode,
         platform: String,
@@ -1060,7 +1107,16 @@ class MosalsalyProvider(
             // جسد قائمة الأم المقروء في الفحص (إن كان) — يُغني عن طلب ثانٍ
             // لقراءة مسارات الصوت عند بناء الرابط.
             val masterBody: String? = null,
-        )
+        ) {
+            /**
+             * هل هذا الرابط قائمة أمّ متعددة الجودات؟
+             *
+             * يغطّي الحالتين معاً: «تلقائي» (enc الموسوم ‎default‎) والأساس الذي
+             * يحمل ‎#EXT-X-STREAM-INF‎ بنفسه (moboreels/playlet/mydramawave).
+             * الجودات الداخلية المستخرجة لا تحمل masterBody فلا تُعدّ أمّاً.
+             */
+            val isMaster: Boolean get() = masterBody?.contains("#EXT-X-STREAM-INF") == true
+        }
 
         val alive = ArrayList<CLink>()
         // الروابط التي نجحت في الفحص فعلاً — تُستثنى من سطر «تلقائي» فلا يُبثّ
@@ -1114,6 +1170,29 @@ class MosalsalyProvider(
             // («default») لا المفتاح، فيصل إلى probeMedia الرابط «default» لا قائمة
             // الأم. هذا ثاني نصف العلّة نفسها (الأوّل: البحث في المفاتيح لا القيم).
             val masterUrl = masterKey?.also { candidates.remove(it) }
+
+            // ★ روابط موقّعة منتهية الصلاحية تُسقط **محليًّا** قبل أي فحص شبكة.
+            //
+            // قِسنا KalosTV (طلب المستخدم: «kalpstv خطاء 2004»): عقدتان — قائمة أمّاً
+            // حيّة على pl.shortdizilab.com (‎206‎، ‎#EXT-ENDLIST‎، مقاطع على
+            // cdnts.kalostv.com)، ورابط CloudFront موقّع على cdnm3u8.kalostv.com
+            // بـ‎Expires=1790834725‎ أي **١٦ يوماً قبل اليوم** ويُردّ ‎403
+            // AccessDenied‎. و‎refreshAfter‎ فيه أيضاً في الماضي ⇒ ‎descriptorStale‎
+            // ⇒ كان الفحص يُتخطّى كلّياً و**يُبثّ الرابط الميت** ⇒ اللاعب يطلبه ⇒
+            // ‎403‎ على طلب الوسيلة ⇒ **خطأ 2004**.
+            //
+            // `isExplicitlyExpired` كان موجوداً لكنه يُستدعى داخل دوالّ الفحص وحدها،
+            // فلا يُرى أبداً حين يُتخطّى الفحص (stale أو «كل الروابط»). صار يُطبَّق
+            // على المرشّحين أنفسهم: فحصٌ على نصّ الرابط، بلا طلب ولا زمن، ويسقط
+            // الرابط قبل أن يصل إلى اللاعب أصلاً. ويبقى الرابط الحيّ وحده.
+            //
+            // ولا يمسّ netshort ولا غيره: روابطه ‎auth_key=‎ لا ‎Expires=‎، فلا
+            // يُطابق النمط شيئاً فيها (الحقل المجهول لا يحكم على الرابط).
+            for (u in candidates.keys.filter { isExplicitlyExpired(it) }) {
+                candidates.remove(u)
+                Log.w(TAG, "drop expired-sign $platform ${u.take(80)}")
+            }
+
             val autoEnc = ch.get("encAuto")?.asText()
             val autoUrl = if (autoEnc != null) cleanDecryptedUrl(decryptMosEnc(autoEnc)) else null
 
@@ -1197,6 +1276,18 @@ class MosalsalyProvider(
         // جودات ويحمل مساراً أمّاً في آنٍ واحد (petadrama) فلا تتعارض الحالتان.
         val hidden = LinkedHashMap<String, String>()  // url -> quality label
         for ((murl, mbody) in autoOnly) {
+            // ★ المتغيّرات الفيديوية الخالصة لا تُبثّ إطلاقاً.
+            //
+            // حين تُعلن الأمّ صوتاً منفصلاً (#EXT-X-MEDIA:TYPE=AUDIO + AUDIO= على كل
+            // متغيّر) تكون مقاطع المتغيّر فيديوً فقط، فإخراجها سطراً مستقلاً يعطي
+            // **فيديو بلا صوت** — وهي شكوى المستخدم الحرفية. الأمّ وحدها تشتغل
+            // صحيحةً لأن اللاعب يدمج جدول الصوت مع الفيديو. (قِسنا: freereels و
+            // mydramawave — الاثنتان تليان هذا المسار؛ وبقية المنصات مُدمجة فلا
+            // تتأثر.)
+            if (hasSeparateAudio(mbody)) {
+                Log.i(TAG, "master $platform declares separate audio — inner variants are video-only, not emitted")
+                continue
+            }
             for ((h, u) in masterVariantsOf(murl, mbody)) {
                 if (!aliveUrls.contains(u) && !seen.contains(u) && !hidden.containsKey(u)) hidden[u] = h
             }
@@ -1226,8 +1317,19 @@ class MosalsalyProvider(
             }
         }
 
-        // الروابط السطحية (mp4) أولًا (أسرع استجابة)، ثم m3u8
-        alive.sortBy { it.kind.ordinal != ExtractorLinkType.VIDEO.ordinal }
+        // ★ قائمة الأمّ متعددة الجودات **أوّلاً** — طلب المستخدم صريحاً: «اجعل مسار
+        // التشغيل المتعدد الجودات اول اختيار ثم الصيغ الاخرى».
+        //
+        // ترتيب الإرسال وحده لا يكفي: اللاعب يفرز الروابط تنازليًّا بحقل `quality`
+        // وترتيب الإرسال يكسر التعادل فقط (فرز مستقر). فالأمّ تأخذ جودة أعلى
+        // جودة داخلها (masterMaxHeight) فتتعادل مع الجودة الصلبة الأعلى ثم
+        // **تسبقها هنا**. ثم باقي الصيغ: mp4 أولاً (أسرع استجابة)، كما كانت.
+        alive.sortWith(
+            compareBy<CLink>(
+                { !it.isMaster },
+                { it.kind.ordinal != ExtractorLinkType.VIDEO.ordinal },
+            )
+        )
         // نجمع الروابط ثم نبثّها دفعة واحدة: «الافتراضي» يبثّها بنفس ترتيبها
         // تماماً كما كان، و«تصاعدي/تنازلي» يعيدان ترتيبها فقط
         // (فرز مستقر — المتساوية تحتفظ بترتيبها، ولا حذف ولا تكرار).
@@ -1236,11 +1338,25 @@ class MosalsalyProvider(
             val kindName = mediaKindName(lnk.url, lnk.kind)
             // قائمة أم بلا تسمية جودة (moboreels/playlet/mydramawave) كانت تمرّ سطر
             // «… · m3u8» بلا اسم — نسمّيها «تلقائي» كما صار المستخدم يعرفها.
-            val isMaster = lnk.masterBody?.contains("#EXT-X-STREAM-INF") == true
+            val isMaster = lnk.isMaster
             val qLabel = when {
                 lnk.q.isNotBlank() -> lnk.q
                 isMaster -> "تلقائي"
                 else -> ""
+            }
+            // ★ جودة الرابط التي يفرز بها اللاعب.
+            //
+            // الأمّ كانت تأخذ Unknown لأن تسميتها «تلقائي» بلا رقم، فتقع تحت
+            // الجودة الصلبة 1080p رغم أنّها تحملها بداخلها — فلا تكون الخيار
+            // الأوّل قطّ. نعطيها أعلى جودة داخلها فهي تتعادل معها ثم تسبقها
+            // بترتيب الإرسال. وبقية الروابط كما كانت تماماً.
+            val qualityValue = when {
+                isMaster && lnk.masterBody != null -> {
+                    val h = masterMaxHeight(lnk.masterBody)
+                    if (h != null) qualityOfLabel(h) else qualityOfLabel(lnk.q)
+                }
+                lnk.q.isNotBlank() -> qualityOfLabel(lnk.q)
+                else -> Qualities.Unknown.value
             }
             val label = buildString {
                 if (MosalsalySettings.rawLinks(prefs)) {
@@ -1265,7 +1381,11 @@ class MosalsalyProvider(
                 // encByQuality يرسل أرقاماً مجرّدة ("540" و"720" و"1080") في أكثر المنصات،
                 // و"720p" في غيرها. getQualityFromName يتوقّف على لاحقة p، فبلاها كانت كل
                 // الجودات quality=Unknown فتظهر في التطبيق باسم واحد بلا تمييز ولا ترتيب.
-                if (lnk.q.isNotBlank()) this.quality = qualityOfLabel(lnk.q)
+                // encByQuality يرسل أرقاماً مجرّدة ("540" و"720" و"1080") في أكثر المنصات،
+                // و"720p" في غيرها. getQualityFromName يتوقّف على لاحقة p، فبلاها كانت كل
+                // الجودات quality=Unknown فتظهر في التطبيق باسم واحد بلا تمييز ولا ترتيب.
+                // وقائمة الأمّ تأخذ أعلى جودة داخلها (qualityValue أعلاه) كي تتصدّر.
+                this.quality = qualityValue
                 // مسارات الصوت: قائمة الأم تحمّل EXT-X-MEDIA:TYPE=AUDIO بجوار جوداتها،
                 // فنقرأها ونمرّرها في audioTracks فيختارها المستخدم من قائمة الصوت
                 // داخل المشغّل. وبلاها كان الصوت مفقوداً في المنصات HLS.
