@@ -1,0 +1,335 @@
+package com.onshort.plugin
+
+import android.app.Dialog
+import android.content.SharedPreferences
+import android.os.Bundle
+import android.view.LayoutInflater
+import android.view.View
+import android.view.ViewGroup
+import android.widget.FrameLayout
+import android.widget.Toast
+import androidx.appcompat.app.AppCompatActivity
+import androidx.fragment.app.FragmentManager
+import androidx.preference.ListPreference
+import androidx.preference.EditTextPreference
+import androidx.preference.Preference
+import androidx.preference.PreferenceCategory
+import androidx.preference.PreferenceFragmentCompat
+import androidx.preference.SwitchPreferenceCompat
+import com.google.android.material.bottomsheet.BottomSheetBehavior
+import com.google.android.material.bottomsheet.BottomSheetDialog
+import com.google.android.material.bottomsheet.BottomSheetDialogFragment
+
+/**
+ * إعدادات مصدر «OnShort». تُعرض من زر الإعدادات في CloudStream.
+ *
+ * كل خيار يُخزَّن في ملف التفضيلات نفسه الذي يقرأه [OnShortProvider] مباشرة
+ * عند كل بث — بلا تخزين مركزي. الربط عبر `preferenceManager
+ * .setSharedPreferencesName(PREFS_NAME)` هو ما يضمن كتابة الاختيار في ذاك الملف
+ * بالذات (وإلا لذهب إلى ملف التفضيلات الافتراضي الذي لا يقرأه المصدر).
+ *
+ * الافتراضيات = سلوك اليوم تماماً: ترتيب «افتراضي (كما هو)» لا يعيد ترتيب
+ * شيئاً، وإظهار الرابط التلقائي مفعّل، وأقل جودة معروضة = «كل الجودات».
+ * فأي اختيار غير ممسوس يُبثّ نفس الروابط بنفس ترتيبها ونفس عددها.
+ */
+class OnShortSettingsBottomSheet(private val prefs: SharedPreferences) : BottomSheetDialogFragment() {
+
+    override fun onCreateDialog(savedInstanceState: Bundle?): Dialog {
+        val dialog = super.onCreateDialog(savedInstanceState) as BottomSheetDialog
+        dialog.setOnShowListener {
+            val sheet = dialog.findViewById<View>(com.google.android.material.R.id.design_bottom_sheet)
+            sheet?.let {
+                BottomSheetBehavior.from(it).apply {
+                    state = BottomSheetBehavior.STATE_EXPANDED
+                    skipCollapsed = true
+                }
+            }
+        }
+        return dialog
+    }
+
+    override fun onCreateView(inflater: LayoutInflater, container: ViewGroup?, savedInstanceState: Bundle?): View {
+        return FrameLayout(requireContext()).apply {
+            id = android.view.View.generateViewId()
+            layoutParams = ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT)
+        }
+    }
+
+    override fun onViewCreated(view: View, savedInstanceState: Bundle?) {
+        childFragmentManager.beginTransaction()
+            .replace(view.id, PrefsFragment(prefs))
+            .commit()
+    }
+
+    companion object {
+        // ★ اسم ملف التفضيلات — يجب أن يطابق ما يمرّره OnShortPlugin للمصدر،
+        //   وإلا ذهبت الاختيارات إلى ملف آخر لا يقرأه (سلوك صامت بلا أثر).
+        const val PREFS_NAME = "OnShort"
+
+        // مفاتيح هذه الوحدة (سلسلة نصية فريدة—no تعارض مع أي وحدة أخرى).
+        const val KEY_QUALITY_ORDER = "os_quality_order"    // "default" | "asc" | "desc"
+        const val KEY_SHOW_AUTO = "os_show_auto"           // Boolean — الافتراضي true
+        const val KEY_MIN_HEIGHT = "os_min_height"         // "all" | "480" | "360"
+        const val KEY_BRIDGE_ENABLED = "os_bridge_enabled"        // Boolean — مفتاح سيد لكل الجسور، الافتراضي true
+        const val KEY_CROSSPOST_ENABLED = "os_crosspost_enabled"  // Boolean — جسر إعادة البحث، الافتراضي true
+        const val KEY_MOSALSALY_ENABLED = "os_mosalsaly_enabled"  // Boolean — جسر Mosalsaly، الافتراضي true
+        const val KEY_SUB_LANGS = "os_sub_langs"        // String — "ar,en,fr" أو فارغ = الكل
+        // فحص حيوية الرابط قبل بثّه. الافتراضي true (الإصلاح مفعّل).
+        // إطفاؤه يوفّر رحلة شبكة واحدة لكل تشغيل لكنه يُعيد الرابط الميت للمشغّل.
+        const val KEY_PROBE_MAIN = "os_probe_main"      // Boolean — الافتراضي true
+
+        // إظهار/إخفاء صفوف المنصّات في الواجهة الرئيسية.
+        const val KEY_SHOW_PLATFORMS = "os_show_platforms"    // Boolean — المفتاح الرئيسي، الافتراضي true
+
+        // حدّ عدد صفوف المنصّات المعروضة. سبب وجوده: CloudStream لا يرسم الواجهة حتى
+        // ينتهي *آخر* صفّ، فكل صفّ يضيف زمنًا. "all" = كل المنصّات (الافتراضي).
+        const val KEY_ROW_LIMIT = "os_row_limit"              // String: "all" | "6" | "4" | "2"
+
+        // مفتاح إظهار/إخفاء منصّة بعينها: os_platform_<slug>.
+        fun platformKey(slug: String) = "os_platform_$slug"
+
+        // مفتاح الصفوف العامة (غير المنصّات): os_row_<slug>.
+        fun rowKey(slug: String) = "os_row_$slug"
+
+        // المنصّات كاملةً كما في المصدر: (slug، الاسم الذي يعرضه الموقع).
+        // يجب أن تطابق ترتيب OnShortProvider.platformRows.
+        val PLATFORMS: List<Pair<String, String>> = listOf(
+            "reelshort" to "ReelShort",
+            "dramabox" to "DramaBox",
+            "idrama" to "iDrama",
+            "dramawave" to "DramaWave",
+            "flextv" to "FlexTV",
+            "freereels" to "FreeReels",
+            "microdrama" to "MicroDrama",
+            "moborels" to "MoBorels",
+            "shortswave" to "ShortsWave",
+            "stardusttv" to "StardustTV",
+            "dotdrama" to "DotDrama",
+            "netshort" to "NetShort (عبر Mosalsaly)",
+            "shortmax" to "ShortMax (عبر Mosalsaly)",
+            "goodshort" to "GoodShort (عبر Mosalsaly)",
+            "dramabite" to "DramaBite (عبر Mosalsaly)",
+            "storyreel" to "StoryReel (عبر Mosalsaly)",
+            "vibeshort-goodbos" to "VibeShort (عبر Mosalsaly)",
+        )
+
+        // الصفوف العامة (صفحات الموقع نفسها، ليست منصّات): (slug، الاسم).
+        val GENERAL_ROWS: List<Pair<String, String>> = listOf(
+            "all-series" to "أحدث المسلسلات",
+            "dubbed" to "مسلسلات مدبلجة",
+        )
+
+        fun show(fm: FragmentManager, prefs: SharedPreferences) {
+            OnShortSettingsBottomSheet(prefs).show(fm, "os_settings")
+        }
+    }
+
+    class PrefsFragment(private val prefs: SharedPreferences) : PreferenceFragmentCompat() {
+
+        override fun onCreatePreferences(savedInstanceState: Bundle?, rootKey: String?) {
+            val ctx = requireContext()
+
+            // ★ الربط الحاسم: اجعل الورقة تكتب في نفس الملف الذي يقرأه المصدر
+            // (الاسم نفسه، والنمط الافتراضي MODE_PRIVATE يطابق ما يمرّره المكوّن).
+            // بدونه تُحفظ الاختيارات في الملف الافتراضي وتضيع بصمت.
+            preferenceManager.setSharedPreferencesName(PREFS_NAME)
+
+            preferenceScreen = preferenceManager.createPreferenceScreen(ctx)
+
+            val playbackCategory = PreferenceCategory(ctx)
+            playbackCategory.title = "خيارات التشغيل"
+            preferenceScreen.addPreference(playbackCategory)
+
+            // ترتيب الجودات عند البث — «افتراضي» يبثّ الروابط بنفس ترتيبها تماماً
+            // كما كان (بلا أي تغيير)، و«تصاعدي/تنازلي» يعيدان ترتيبها فقط (فرز مستقر:
+            // المتساوية تحتفظ بترتيبها، ولا حذف ولا تكرار).
+            val qualityOrderPref = ListPreference(ctx).apply {
+                key = KEY_QUALITY_ORDER
+                title = "ترتيب الجودات"
+                summary = "يعيد ترتيب روابط الجودات المعروضة — بلا حذف ولا تكرار"
+                summaryProvider = ListPreference.SimpleSummaryProvider.getInstance()
+                entryValues = arrayOf("default", "asc", "desc")
+                entries = arrayOf(
+                    "الافتراضي (كما هو)",
+                    "من الأقل إلى الأعلى",
+                    "من الأعلى إلى الأقل"
+                )
+                setDefaultValue("default")
+            }
+            playbackCategory.addPreference(qualityOrderPref)
+
+            // إظهار رابط «Auto · OnShort» (رابط الموقع الأساسي) — الافتراضي مفعّل،
+            // أي سلوك اليوم حرفياً. إطفاؤه يُخفيه فقط عندما يكون مفعّلاً؛ لا يمس
+            // روابط الجودات الصريحة ولا ناتج «أقل جودة معروضة» (Auto غير مشمول بها).
+            val showAutoPref = SwitchPreferenceCompat(ctx).apply {
+                key = KEY_SHOW_AUTO
+                title = "إظهار الرابط التلقائي (Auto)"
+                summary = "رابط الموقع الأساسي — يختفي عند اختيار عرض الجودات فقط"
+                setDefaultValue(true)
+            }
+            playbackCategory.addPreference(showAutoPref)
+
+            // أقل جودة معروضة — «كل الجودات» هو سلوك اليوم بلا تغيير. عند اختيار
+            // عتبة، تُخفى المرشحات الأقل منها فقط داخل حلقة المرشحين (.Auto يبقى
+            // معرفياً من هذا الفلتر لأن جودته مجهولة).
+            val minHeightPref = ListPreference(ctx).apply {
+                key = KEY_MIN_HEIGHT
+                title = "أقل جودة معروضة"
+                summary = "يخفي مرشّحات الجودة الأقل من العتبة المختارة"
+                summaryProvider = ListPreference.SimpleSummaryProvider.getInstance()
+                entryValues = arrayOf("all", "480", "360")
+                entries = arrayOf(
+                    "كل الجودات (افتراضي)",
+                    "من 480p وأعلى",
+                    "من 360p وأعلى"
+                )
+                setDefaultValue("all")
+            }
+            playbackCategory.addPreference(minHeightPref)
+
+            // جسور التشغيل: عند رفض سيرفر OnShort تشغيل منصة نهائيًا — أو فشل مؤقت —
+            // نجرّب جسرًا واحدًا أو أكثر بالترتيب: جسر «إعادة البحث» (منشور بديل على
+            // منصة قابلة للتشغيل ضمن OnShort نفسه) وجسر Mosalsaly (بحث العنوان).
+            // المفتاح الرئيسي أدناه يفعّل/يعطّل السلسلة كلها؛ والمفتاحان المستقلان يسمحان
+            // باختيار أي جسر يعمل (كلاهما افتراضي مفعّل).
+            val bridgePref = SwitchPreferenceCompat(ctx).apply {
+                key = KEY_BRIDGE_ENABLED
+                title = "جسور تشغيل بديلة"
+                summary = "عند فشل التشغيل تنتقل للجسور (إعادة البحث و/أو Mosalsaly)"
+                setDefaultValue(true)
+            }
+            playbackCategory.addPreference(bridgePref)
+
+            // جسر إعادة البحث (cross-post) — منشور بديل على منصة قابلة للتشغيل.
+            val crossPref = SwitchPreferenceCompat(ctx).apply {
+                key = KEY_CROSSPOST_ENABLED
+                title = "إعادة البحث (النشر المزدوج)"
+                summary = "يبحث عن نفس العنوان على منصة أخرى قابلة للتشغيل في OnShort"
+                setDefaultValue(true)
+            }
+            playbackCategory.addPreference(crossPref)
+
+            // جسر Mosalsaly — بحث العنوان في mosalsaly.com (الموقع الخارجي).
+            val mosPref = SwitchPreferenceCompat(ctx).apply {
+                key = KEY_MOSALSALY_ENABLED
+                title = "بحث Mosalsaly"
+                summary = "يبحث عن نفس العنوان في mosalsaly.com (بديل خارجي)"
+                setDefaultValue(true)
+            }
+            playbackCategory.addPreference(mosPref)
+
+            // فحص حيوية الرابط: قبل بثّ الرابط نطلبه طلبًا عاريًا (بنفس ما يفعله
+            // المشغّل)؛ فإن لم يُجب جرّبنا الجسور أعلاه بدل تمريره ميتًا. بعض المنصّات
+            // ترجع ok=true بينما مضيف الملف نفسه لم يعد موجودًا (dramaboxdb).
+            // إطفاؤه يوفّر رحلة واحدة لكل تشغيل — لكن الرابط الميت يصل المشغّل.
+            val probePref = SwitchPreferenceCompat(ctx).apply {
+                key = KEY_PROBE_MAIN
+                title = "فحص الرابط قبل التشغيل"
+                summary = "يجرّب الرابط أولًا، فإن كان ميتًا انتقل للجسور بدل تمريره للمشغّل"
+                setDefaultValue(true)
+            }
+            playbackCategory.addPreference(probePref)
+
+            // تصفية لغات الترجمة. قِسنا المنصّات: dramawave وfreereels تعيدان
+            // ٢٥ ترجمة لكل حلقة (pl, ja, ko, tr, ru, de, pt, es, hi, zh, vi…)،
+            // فقائمة المشغّل تطول بلا نهاية. هذا الحقل يعرض ما تكتبه فقط
+            // (مثل «ar,en» = العربية والإنجليزية)؛ فإذا تركته فارغاً عُرضت كل
+            // اللغات، وهو السلوك الافتراضي تماماً فلا يتغيّر شيء إن لم تلمسه.
+            val subLangsPref = EditTextPreference(ctx).apply {
+                key = KEY_SUB_LANGS
+                title = "لغات الترجمة المطلوبة"
+                summary = "مثال: ar,en — اتركه فارغاً لعرض كل اللغات"
+                setDefaultValue("")
+                dialogTitle = "لغات الترجمة المطلوبة"
+                setOnBindEditTextListener { et ->
+                    et.inputType = android.text.InputType.TYPE_CLASS_TEXT
+                }
+            }
+            playbackCategory.addPreference(subLangsPref)
+
+            // — الصفوف العامة في الواجهة الرئيسية (صفحات الموقع، ليست منصّات) —
+            // تظهر أولاً قبل صفوف المنصّات. إخفاء صفّ يمنع جلبه أصلاً (لا شبكة).
+            val rowsCategory = PreferenceCategory(ctx)
+            rowsCategory.title = "صفوف الواجهة الرئيسية (عامة)"
+            rowsCategory.summary = "أزل وسم أي صفّ لإخفائه من الواجهة الرئيسية"
+            preferenceScreen.addPreference(rowsCategory)
+
+            for ((slug, label) in GENERAL_ROWS) {
+                val p = SwitchPreferenceCompat(ctx).apply {
+                    key = rowKey(slug)
+                    title = label
+                    summary = "يعرض صفّ «$label» في الواجهة الرئيسية"
+                    setDefaultValue(true)
+                }
+                rowsCategory.addPreference(p)
+            }
+
+            // — المنصّات: مفتاح رئيسي لكل الصفوف، ثم حدّ العدد، ثم مفتاح لكل منصّة —
+            val platCat = PreferenceCategory(ctx)
+            platCat.title = "أقسام المنصّات في الواجهة الرئيسية"
+            preferenceScreen.addPreference(platCat)
+
+            val showPlatformsPref = SwitchPreferenceCompat(ctx).apply {
+                key = KEY_SHOW_PLATFORMS
+                title = "المنصّات كلها"
+                summary = "ألغِ وسمها لإخفاء صفوف كل المنصّات دفعةً واحدة"
+                setDefaultValue(true)
+            }
+            platCat.addPreference(showPlatformsPref)
+
+            // حدّ عدد الصفوف — أسرع رافعة لسرعة ظهور الواجهة الرئيسية، لأنّ التطبيق
+            // لا يرسمها حتى ينتهي آخر صفّ. «الكل» يبقي السلوك كما هو بلا تغيير.
+            val rowLimitPref = ListPreference(ctx).apply {
+                key = KEY_ROW_LIMIT
+                title = "عدد صفوف المنصّات المعروضة"
+                summary = "أقل صفوف = ظهور أسرع للواجهة الرئيسية (المنصّات كلها متاحة من الأعلى)"
+                summaryProvider = ListPreference.SimpleSummaryProvider.getInstance()
+                entryValues = arrayOf("all", "8", "6", "4", "2")
+                entries = arrayOf(
+                    "كل المنصّات (افتراضي)",
+                    "أول 8 منصّات",
+                    "أول 6 منصّات",
+                    "أول 4 منصّات",
+                    "أول منصّتين"
+                )
+                setDefaultValue("all")
+            }
+            platCat.addPreference(rowLimitPref)
+
+            for ((slug, label) in PLATFORMS) {
+                val p = SwitchPreferenceCompat(ctx).apply {
+                    key = platformKey(slug)
+                    title = label
+                    summary = "يعرض صفّ «أحدث مسلسلات $label» في الواجهة الرئيسية"
+                    setDefaultValue(true)
+                }
+                platCat.addPreference(p)
+            }
+
+            val resetPref = Preference(ctx).apply {
+                key = "os_reset_prefs"
+                title = "إعادة الضبط الافتراضي"
+                summary = "يعيد الخيارات أعلاه للافتراضي"
+                setOnPreferenceClickListener {
+                    prefs.edit().apply {
+                        remove(KEY_QUALITY_ORDER)
+                        remove(KEY_SHOW_AUTO)
+                        remove(KEY_MIN_HEIGHT)
+                        remove(KEY_BRIDGE_ENABLED)
+                        remove(KEY_CROSSPOST_ENABLED)
+                        remove(KEY_MOSALSALY_ENABLED)
+                        remove(KEY_PROBE_MAIN)
+                        remove(KEY_SUB_LANGS)
+                        remove(KEY_SHOW_PLATFORMS)
+                        remove(KEY_ROW_LIMIT)
+                        GENERAL_ROWS.forEach { (s, _) -> remove(rowKey(s)) }
+                        PLATFORMS.forEach { (s, _) -> remove(platformKey(s)) }
+                    }.apply()
+                    Toast.makeText(ctx, "تمت إعادة الضبط", Toast.LENGTH_SHORT).show()
+                    true
+                }
+            }
+            preferenceScreen.addPreference(resetPref)
+        }
+    }
+}

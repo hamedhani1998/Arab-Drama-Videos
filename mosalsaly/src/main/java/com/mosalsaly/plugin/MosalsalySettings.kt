@@ -1,0 +1,248 @@
+package com.mosalsaly.plugin
+
+import android.app.Dialog
+import android.content.SharedPreferences
+import android.os.Bundle
+import android.view.LayoutInflater
+import android.view.View
+import android.view.ViewGroup
+import android.widget.FrameLayout
+import android.widget.Toast
+import androidx.fragment.app.FragmentManager
+import androidx.preference.ListPreference
+import androidx.preference.Preference
+import androidx.preference.PreferenceCategory
+import androidx.preference.PreferenceFragmentCompat
+import androidx.preference.SwitchPreferenceCompat
+import com.google.android.material.bottomsheet.BottomSheetBehavior
+import com.google.android.material.bottomsheet.BottomSheetDialog
+import com.google.android.material.bottomsheet.BottomSheetDialogFragment
+
+/**
+ * إعدادات مصدر «Mosalsaly». BottomSheet يُعرض من زر إعدادات الإضافة في CloudStream.
+ *
+ * كل خيار يُخزَّن في SharedPreferences بصيغة `KEY_*` المفتوحة هنا، ويقرؤه
+ * [MosalsalyProvider] مباشرة عند كل تشغيل/تصفح — دون أي وسيط.
+ *
+ * الخيارات:
+ *  - الترجمة: تفعيل/تعطيل فحص وإرسال ملفات الترجمة.
+ *  - الجودات: عرض كل الجودات أم الأعلى فقط (أسرع).
+ *  - القوائم الرئيسية: إظهار أقسام «الأكثر شعبية/أحدث الإضافات» أم المنصات فقط.
+ *  - لكل منصة مفتاح تفعيل مستقل — تعطيلها يحذف روابطها فوراً ولا يزور صفحتها.
+ *  - «تحديث الروابط قسرياً»: يحثّ على إعادة جلب الواصف (refresh) حتى للروابط
+ *    المخزّنة في ذاكرة التطبيق.
+ */
+class MosalsalySettings(private val prefs: SharedPreferences) : BottomSheetDialogFragment() {
+
+    override fun onCreateDialog(savedInstanceState: Bundle?): Dialog {
+        val dialog = super.onCreateDialog(savedInstanceState) as BottomSheetDialog
+        dialog.setOnShowListener {
+            val sheet = dialog.findViewById<View>(com.google.android.material.R.id.design_bottom_sheet)
+            sheet?.let {
+                BottomSheetBehavior.from(it).apply {
+                    state = BottomSheetBehavior.STATE_EXPANDED
+                    skipCollapsed = true
+                }
+            }
+        }
+        return dialog
+    }
+
+    override fun onCreateView(inflater: LayoutInflater, container: ViewGroup?, savedInstanceState: Bundle?): View {
+        return FrameLayout(requireContext()).apply {
+            id = android.view.View.generateViewId()
+            layoutParams = ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT)
+        }
+    }
+
+    override fun onViewCreated(view: View, savedInstanceState: Bundle?) {
+        childFragmentManager.beginTransaction()
+            .replace(view.id, PrefsFragment(prefs))
+            .commit()
+    }
+
+    companion object {
+        // عام
+        const val KEY_SHOW_SUBTITLES = "mos_show_subtitles"          // Boolean الافتراضي true
+        const val KEY_QUALITY_MODE = "mos_quality_mode"              // "all" | "high"
+        const val KEY_FORCE_REFRESH = "mos_force_refresh"            // Boolean الافتراضي false
+        const val KEY_SHOW_EXTRA_SECTIONS = "mos_show_extra"         // Boolean الافتراضي true
+        const val KEY_RAW_LINKS = "mos_raw_links"                    // Boolean الافتراضي false
+        const val KEY_QUALITY_ORDER = "mos_quality_order"            // "default" | "asc" | "desc"
+        const val KEY_SHOW_AUDIO = "mos_show_audio"                  // Boolean الافتراضي true
+        const val KEY_ONLY_ALIVE = "mos_only_alive"                  // Boolean الافتراضي true
+        const val PREFS_NAME = "Mosalsaly"                          // ★ يجب أن يطابق MosalsalyPlugin
+
+        /** بادئة مفاتيح تفعيل المنصات — لكل منصة مفتاح مستقل. */
+        const val KEY_PLATFORM_PREFIX = "mos_platform_"
+
+        // المنصات — المصدر الوحيد هو PLATFORMS في MosalsalyProvider. كانت هنا نسخة
+        // منفصلة (18) تُنسَخ يدوياً، فأي إضافة لمنصة في المزوّد لا تظهر في الإعدادات
+        // ولا في الواجهة؛ وحذفها هنا يمنع ذلك من التكرار.
+        internal val PLATFORM_KEYS: List<Pair<String, String>> = PLATFORMS
+
+        fun isPlatformEnabled(prefs: SharedPreferences?, key: String): Boolean =
+            prefs?.getBoolean(KEY_PLATFORM_PREFIX + key, true) ?: true
+
+        fun showSubtitles(prefs: SharedPreferences?): Boolean =
+            prefs?.getBoolean(KEY_SHOW_SUBTITLES, true) ?: true
+
+        fun qualityMode(prefs: SharedPreferences?): String =
+            prefs?.getString(KEY_QUALITY_MODE, "all") ?: "all"
+
+        fun forceRefresh(prefs: SharedPreferences?): Boolean =
+            prefs?.getBoolean(KEY_FORCE_REFRESH, false) ?: false
+
+        fun showExtra(prefs: SharedPreferences?): Boolean =
+            prefs?.getBoolean(KEY_SHOW_EXTRA_SECTIONS, true) ?: true
+
+        fun qualityOrder(prefs: SharedPreferences?): String =
+            prefs?.getString(KEY_QUALITY_ORDER, "default") ?: "default"
+
+        /** إظهار مسارات الصوت البديلة (audioTracks) إن وفّرها المصدر. */
+        fun showAudio(prefs: SharedPreferences?): Boolean =
+            prefs?.getBoolean(KEY_SHOW_AUDIO, true) ?: true
+
+        /**
+         * «الروابط الحيّة فقط»: نفحص كل رابط ونُسقط الميت (404/403).
+         * إيقافه يعني عرض روابط المنصة كما ترسلها بلا فحص — أسرع، ويُبقي
+         * الميت ظاهراً (بلا فائدة). الافتراضي true: لا تُعرض روابط ميتة.
+         */
+        fun onlyAlive(prefs: SharedPreferences?): Boolean =
+            prefs?.getBoolean(KEY_ONLY_ALIVE, true) ?: true
+
+        fun rawLinks(prefs: SharedPreferences?): Boolean =
+            prefs?.getBoolean(KEY_RAW_LINKS, false) ?: false
+
+        fun show(fm: FragmentManager, prefs: SharedPreferences) {
+            MosalsalySettings(prefs).show(fm, "mosalsaly_settings")
+        }
+    }
+
+    class PrefsFragment(private val prefs: SharedPreferences) : PreferenceFragmentCompat() {
+
+        override fun onCreatePreferences(savedInstanceState: Bundle?, rootKey: String?) {
+            val ctx = requireContext()
+
+            // ★ اجعل الورقة تكتب في ملف التفضيلات نفسه الذي يقرأه MosalsalyProvider.
+            // بدون هذا كانت الاختيارات تذهب إلى ملف AndroidX الافتراضي الذي لا
+            // يقرأه المصدر — أي إعدادات تظهر وتُحفظ بلا أي أثر على السلوك.
+            preferenceManager.setSharedPreferencesName(PREFS_NAME)
+
+            preferenceScreen = preferenceManager.createPreferenceScreen(ctx)
+
+            // ===== عام =====
+            val generalCategory = PreferenceCategory(ctx)
+            generalCategory.title = "خيارات عامة"
+            preferenceScreen.addPreference(generalCategory)
+
+            generalCategory.addPreference(SwitchPreferenceCompat(ctx).apply {
+                key = KEY_SHOW_SUBTITLES
+                title = "الترجمات"
+                summary = "عرض ملفات الترجمة عند توفرها في المصدر"
+                setDefaultValue(true)
+            })
+
+            generalCategory.addPreference(ListPreference(ctx).apply {
+                key = KEY_QUALITY_MODE
+                title = "الجودات"
+                summaryProvider = ListPreference.SimpleSummaryProvider.getInstance()
+                entryValues = arrayOf("all", "high")
+                entries = arrayOf("كل الجودات", "الأعلى فقط (أسرع)")
+                setDefaultValue("all")
+            })
+
+            // ترتيب الجودات عند التشغيل — الافتراضي = ترتيب روابط المنصة تماماً؛
+            // التصاعدي/التنازلي يعيدان ترتيب الروابط فقط (بلا حذف أو تكرار).
+            generalCategory.addPreference(ListPreference(ctx).apply {
+                key = KEY_QUALITY_ORDER
+                title = "ترتيب الجودات"
+                summary = "افتراضي: نفس ترتيب روابط التشغيل كما هي"
+                summaryProvider = ListPreference.SimpleSummaryProvider.getInstance()
+                entryValues = arrayOf("default", "asc", "desc")
+                entries = arrayOf(
+                    "الافتراضي (كما هو)",
+                    "من الأقل إلى الأعلى",
+                    "من الأعلى إلى الأقل"
+                )
+                setDefaultValue("default")
+            })
+
+            generalCategory.addPreference(SwitchPreferenceCompat(ctx).apply {
+                key = KEY_FORCE_REFRESH
+                title = "تحديث الروابط قسرياً"
+                summary = "إعادة جلب روابط التشغيل في كل مرة (أبطأ قليلاً لكن يضمن روابط طازجة)"
+                setDefaultValue(false)
+            })
+
+            generalCategory.addPreference(SwitchPreferenceCompat(ctx).apply {
+                key = KEY_SHOW_EXTRA_SECTIONS
+                title = "أقسام الواجهة"
+                summary = "إظهار «الأكثر شعبية» و«أحدث الإضافات» أولاً في الواجهة"
+                setDefaultValue(true)
+            })
+
+            generalCategory.addPreference(SwitchPreferenceCompat(ctx).apply {
+                key = KEY_SHOW_AUDIO
+                title = "مسارات الصوت"
+                summary = "إظهار المسارات الصوتية البديلة إن وفّرها المصدر (نبهة، صوتي، أصلي)"
+                setDefaultValue(true)
+            })
+
+            generalCategory.addPreference(SwitchPreferenceCompat(ctx).apply {
+                key = KEY_ONLY_ALIVE
+                title = "الروابط الحيّة فقط"
+                summary = "فحص كل رابط وإسقاط الميت (أبطأ قليلاً). إيقافه يعرض روابط المنصة كما هي"
+                setDefaultValue(true)
+            })
+
+            generalCategory.addPreference(SwitchPreferenceCompat(ctx).apply {
+                key = KEY_RAW_LINKS
+                title = "الروابط الخام"
+                summary = "إظهار روابط الفيديو كما هي (للتشخيص) بدل أسماء الجودات"
+                setDefaultValue(false)
+            })
+
+            // ===== المنصات =====
+            val platformCategory = PreferenceCategory(ctx)
+            // العدد مشتقّ من PLATFORM_KEYS لا مكتوب يدوياً — وإلا قال «18» وأمامك 23.
+            platformCategory.title = "المنصات (${PLATFORM_KEYS.size})"
+            // وسيلة التشغيل تظهر مع كل حلقة في اسم الرابط («netshort 3 · mp4»)،
+            // وهذه هي المفتاح الذي يفسّرها: mp4 = ملف مباشر، m3u8 = بث مقطّع.
+            platformCategory.summary = "علِّم كل منصة تريد استخدامها. وسيلة التشغيل تظهر في اسم كل رابط"
+            preferenceScreen.addPreference(platformCategory)
+
+            for ((platKey, label) in PLATFORM_KEYS) {
+                platformCategory.addPreference(SwitchPreferenceCompat(ctx).apply {
+                    setKey(KEY_PLATFORM_PREFIX + platKey)
+                    title = label
+                    summary = "تمكين روابط $label"
+                    setDefaultValue(true)
+                })
+            }
+
+            // ===== إغلاق =====
+            val resetPref = Preference(ctx).apply {
+                key = "mos_reset_prefs"
+                title = "إعادة الضبط الافتراضي"
+                summary = "يعيد كل الخيارات لأعلاها الافتراضي"
+                setOnPreferenceClickListener {
+                    prefs.edit().apply {
+                        remove(KEY_SHOW_SUBTITLES)
+                        remove(KEY_QUALITY_MODE)
+                        remove(KEY_QUALITY_ORDER)
+                        remove(KEY_FORCE_REFRESH)
+                        remove(KEY_SHOW_EXTRA_SECTIONS)
+                        remove(KEY_SHOW_AUDIO)
+                        remove(KEY_ONLY_ALIVE)
+                        remove(KEY_RAW_LINKS)
+                        for ((k, _) in PLATFORM_KEYS) remove(KEY_PLATFORM_PREFIX + k)
+                    }.apply()
+                    Toast.makeText(ctx, "تمت إعادة الضبط", Toast.LENGTH_SHORT).show()
+                    true
+                }
+            }
+            preferenceScreen.addPreference(resetPref)
+        }
+    }
+}

@@ -1,0 +1,759 @@
+package com.deepdrama.plugin
+
+import cloudstreamshared.FormatTag
+import android.content.SharedPreferences
+import com.fasterxml.jackson.databind.DeserializationFeature
+import com.fasterxml.jackson.databind.JsonNode
+import com.fasterxml.jackson.databind.ObjectMapper
+import com.fasterxml.jackson.module.kotlin.registerKotlinModule
+import com.lagradost.cloudstream3.*
+import com.lagradost.cloudstream3.utils.*
+import java.net.URLEncoder
+
+private val mapper = ObjectMapper().registerKotlinModule()
+    .configure(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES, false)
+
+private const val DD_MAIN = "https://www.deep-drama.com"
+private const val DD_UA =
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36"
+
+/** ترميز مقطع مسار عربي (لا يترك المقطع على شكل بايتات خام). */
+private fun encPath(s: String): String = URLEncoder.encode(s, "UTF-8").replace("+", "%20")
+
+/**
+ * DeepDrama — قياسٌ حيّ لموقع deep-drama.com (2026-10-08).
+ *
+ * ══ عائلتان في موقع واحد — وهذا هو مفتاح المشكلة ══
+ *
+ *  ١) عائلة «المسلسلات» (CPT `dd_series`) — الصفحة `/مسلسل/<slug>-<id>/`:
+ *     بطاقات `series-card`، والحلقات من `wp-json/deep-drama/v1/playlist/{id}`،
+ *     والروابط من `wp-json/deep-drama/v1/episode/{id}/{number}`.
+ *     هذه هي التي تصلح لها «حلقة» و«خادم».
+ *
+ *  ٢) عائلة «المقالات» (`post`) — **شكلان للرابط** لصفحة واحدة وقاعدة واحدة:
+ *     `/2026/10/<slug>.html` (تاريخية) و`/<عربي>-<12hex>/` (جذرية، وهي التي
+ *     أبلغ عنها المستخدم: `قفص-الأكاذيب-الناعم-489202ca647677b3`). كلاهما
+ *     يحمل `xr-post-container` + `xr-server-btn` و`xr-card` ويخلو من `dd_series`
+ *     (قِيس: `data-id` صفر فيهما معاً) — ولذلك **لا** تصلح معها واجهة
+ *     `playlist`/`episode` (قِيس: `playlist/13612` ⇒ 404). الروابط فيها
+ *     مخزَّنة كأزرارٍ مباشرة: `<button class="xr-server-btn" data-src="…">`
+ *     وتشير إلى مضيفات جاهزة (رامبل / voe.sx / vidaraa) — «سيرفرات خاصة»
+ *     كما وصفها المستخدم. فيديو واحد لكل صفحة ⇒ فيلم لا مسلسل.
+ *     ★ التمييز يكون **بالمحتوى لا بشكل الرابط**: شرطٌ زمنيّ وحده كان يُسقط
+ *       الشكل الجرِيذي فتعود صفحة التفاصيل فارغة بلا رسالة.
+ *
+ *  ★ ثلاثة أزرار، ومعالجتان: رامبل **بلا مستخرِج مدمج في CloudStream إطلاقاً**
+ *    (قِيس على `cloudstream.jar` — لا صنف يطابق `rumble`)، فتُقرأ صفحته
+ *    ويُبنى رابطه وترجمته العربية يدوياً؛ وvoe وvidaraa بمستخرِجات مدمجة
+ *    تُمرَّر مع إعادة تسمية تُظهر الدقة والصيغة، لأنّ المشغّل لا يعرض سوى
+ *    `ExtractorLink.name` وهو الحقل الوحيد الذي يبلغ المستخدم نوع الجودة.
+ *
+ *  ★ الرئيسية تعرض 20 بطاقة `xr-card` **كلها من العائلة الثانية** (قِيس)،
+ *    والبحث `/?s=` يعرض `xr-card` كذلك. أما `/المسلسلات/` فتعرض 24 بطاقة
+ *    `series-card` من العائلة الأولى. لذلك يجب دعم الاثنتين وإلا ظهرت
+ *    الرئيسية بلا شيء، أو انفتحت بطاقة على رابط لا يعمل.
+ *
+ *  ★ مرساة البطاقة: `<article class="series-card" data-post="9437">` — أي
+ *    بخصائص. اشتراط `>` بعد اسم الصنف أعطى صفر بطاقة وأفرغ الرئيسية (سابقاً).
+ */
+
+class DeepDramaProvider(private val prefs: SharedPreferences?) : MainAPI() {
+    override var mainUrl = DD_MAIN
+    override var name = "Deep Drama"
+    override var lang = "ar"
+    override val hasMainPage = true
+    override val hasQuickSearch = false
+    override val supportedTypes = setOf(TvType.TvSeries, TvType.Movie)
+
+    /** قسم الرئيسية الخاص بالمقالات (بطاقات `xr-card` ذات روابط html). */
+    private val HOME_KEY = "__home__"
+
+    override val mainPage = mainPageOf(
+        HOME_KEY to "الأحدث",
+        "الرائج" to "الرائج",
+        "الشائع" to "الشائع",
+        "الجديد" to "الجديد",
+        "الأكثر-مشاهدة" to "الأكثر-مشاهدة",
+    )
+
+    private fun headers() = mapOf(
+        "User-Agent" to DD_UA,
+        "Accept-Language" to "ar",
+        "Referer" to "$DD_MAIN/",
+    )
+
+    private data class DdCard(val title: String, val url: String, val poster: String?, val movie: Boolean)
+    private data class DdEpisode(val number: Int, val locked: Boolean)
+
+    // ---------- تحليل البطاقات ----------
+
+    // ★ لا تشترط `>` بعد الصنف: البطاقة تحمل خصائص (data-post/data-series).
+    private val seriesCardRe =
+        Regex("""<article class="series-card"[^>]*>(.*?)</article>""", RegexOption.DOT_MATCHES_ALL)
+    private val seriesHrefRe = Regex("""<a\s+href="([^"]+)"\s+class="poster-link"""")
+    private val seriesImgRe = Regex("""<img class="series-poster"([^>]*)>""")
+    private val seriesTitleRe = Regex("""<h3>\s*<a [^>]*>(.*?)</a>\s*</h3>""", RegexOption.DOT_MATCHES_ALL)
+
+    // الشكل الثاني — الرئيسية والبحث على المحرّك الجديد (روابط مقالات html).
+    private val xrCardRe =
+        Regex("""<article class="xr-card"[^>]*>(.*?)</article>""", RegexOption.DOT_MATCHES_ALL)
+    private val xrHrefRe = Regex("""<a\s+href="([^"]+)"""")
+    private val xrTitleRe =
+        Regex("""<h3 class="xr-card__title"[^>]*>(.*?)</h3>""", RegexOption.DOT_MATCHES_ALL)
+    private val xrImgRe = Regex("""<img[^>]*\salt="([^"]*)"""")
+    private val xrSrcRe = Regex("""<img[^>]*\ssrc="([^"]+)"""")
+
+    /** زرّ خادم في صفحة المقال. */
+    private val xrButtonRe =
+        Regex("""<button[^>]*\bclass="[^"]*xr-server-btn[^"]*"[^>]*>""", RegexOption.DOT_MATCHES_ALL)
+    private val dataSrcRe = Regex("""\bdata-src="([^"]+)"""")
+    private val iframeSrcRe = Regex("""<iframe[^>]*\bdata-legacy-src="([^"]+)"""")
+
+    private fun stripTags(s: String): String = s.replace(Regex("<[^>]*>"), "").trim()
+
+    /** الشكل التاريخي فقط — بقي شرطَ احتياطٍ في [isPostPage] لا حكماً وحده. */
+    private val datePostRe = Regex("""/20\d\d/\d\d/[^/]+\.html""")
+
+    /** فكّ ترميز الـURL كي تُقارَن العربية بعربية الصفحة لا بـ`%d8%a3`. */
+    private fun decodedUrl(u: String): String = try {
+        java.net.URLDecoder.decode(u, "UTF-8")
+    } catch (e: Exception) { u }
+
+    /** عائلة المسلسلات: `/مسلسل/<slug>-<id>/` وصفحة المشاهدة `/مشاهدة/…`. */
+    private fun isSeriesUrl(u: String): Boolean {
+        val d = decodedUrl(u)
+        return d.contains("/مسلسل/") || d.contains("/مشاهدة/")
+    }
+
+    /**
+     * هل الصفحة من عائلة «المقالات»؟ — **بالمحتوى لا بشكل الرابط**.
+     *
+     * قِيس (2026-10-08): قالب المقال يحمل `xr-post-container` و`xr-server-btn`
+     * و`xr-card` ويخلو من `wp-json/wp/v2/dd_series/`، وتحقّق ذلك على **شكلين**
+     * من الروابط: التاريخية `/2026/09/x.html` والجذرية
+     * `/قفص-الأكاذيب-الناعم-489202ca647677b3/` — وكلاهما يعطي نفس العدّادات
+     * (١ و٣ و٣٠ وصفر). وأما صفحات المسلسلات (وبما فيها `/مشاهدة/`) فتحمل
+     * `dd_series` ولا تحمل أيّ من علامتَي المقال.
+     *
+     * لماذا ليس شرطاً زمنياً: الشكل الجرِيذي **لا** يطابق `/20\d\d/\d\d/…`
+     * فكان `load()` يعود بـ`null` — أي لا تفاصيل ولا روابط، بلا أي سجلّ.
+     */
+    private fun isPostPage(u: String, html: String): Boolean {
+        if (html.contains("wp-json/wp/v2/dd_series/")) return false
+        if (html.contains("xr-server-btn") || html.contains("xr-post-container")) return true
+        if (datePostRe.containsMatchIn(u)) return true
+        return !isSeriesUrl(u)
+    }
+
+    private fun parseCards(html: String): List<DdCard> {
+        val out = ArrayList<DdCard>()
+
+        for (m in seriesCardRe.findAll(html)) {
+            val body = m.groupValues[1]
+            val url = seriesHrefRe.find(body)?.groupValues?.get(1)?.trim() ?: continue
+            val title = seriesTitleRe.find(body)?.groupValues?.get(1)?.let { stripTags(it) }
+                ?.takeIf { it.isNotBlank() } ?: continue
+            val attrs = seriesImgRe.find(body)?.groupValues?.get(1).orEmpty()
+            val posters = Regex("""\s+data-posters="([^"]*)"""").find(attrs)?.groupValues?.get(1)
+            val src = Regex("""\s+data-src="([^"]+)"""").find(attrs)?.groupValues?.get(1)
+                ?: Regex("""\s+src="([^"]+)"""").find(attrs)?.groupValues?.get(1)
+            out.add(DdCard(title, url, firstPoster(posters) ?: src, movie = false))
+        }
+        if (out.isNotEmpty()) return out
+
+        // الشكل الثاني (الرئيسية والبحث).
+        for (m in xrCardRe.findAll(html)) {
+            val body = m.groupValues[1]
+            val url = xrHrefRe.find(body)?.groupValues?.get(1)?.trim() ?: continue
+            val h3 = xrTitleRe.find(body)?.groupValues?.get(1)?.let { stripTags(it) }
+            val alt = xrImgRe.find(body)?.groupValues?.get(1)?.trim()
+            val title = listOfNotNull(h3, alt).firstOrNull { !it.isNullOrBlank() } ?: continue
+            val src = xrSrcRe.find(body)?.groupValues?.get(1)?.trim()
+                ?.takeIf { !it.startsWith("data:") }
+            out.add(DdCard(title, url, src, movie = !isSeriesUrl(url)))
+        }
+        return out
+    }
+
+    /** `data-posters` قائمة JSON مُهرَّبة (`&quot;` و`\/`) — نأخذ أول رابط صالح. */
+    private fun firstPoster(raw: String?): String? {
+        if (raw.isNullOrBlank()) return null
+        val s = raw.replace("&quot;", "\"").replace("&#039;", "'").replace("\\/", "/")
+        return Regex("""(https?:[^"]+)""").find(s)?.groupValues?.get(1)
+            ?.trim()?.takeIf { it.isNotBlank() }
+    }
+
+    private fun cardOf(c: DdCard): SearchResponse? {
+        if (c.title.isBlank() || c.url.isBlank()) return null
+        return if (c.movie) {
+            newMovieSearchResponse(c.title, c.url, TvType.Movie) {
+                this.posterUrl = c.poster?.takeIf { it.isNotBlank() }
+            }
+        } else {
+            newTvSeriesSearchResponse(c.title, c.url, TvType.TvSeries) {
+                this.posterUrl = c.poster?.takeIf { it.isNotBlank() }
+            }
+        }
+    }
+
+    // ---------- الرئيسية ----------
+
+    override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse? {
+        return try {
+            if (request.data == HOME_KEY) {
+                val html = app.get("$DD_MAIN/", headers = headers()).text
+                val cards = parseCards(html).mapNotNull { cardOf(it) }
+                if (cards.isEmpty()) null
+                else newHomePageResponse(listOf(HomePageList(request.name, cards)))
+            } else {
+                val html = app.get(listingUrl(request.data, page), headers = headers()).text
+                val cards = parseCards(html).mapNotNull { cardOf(it) }
+                if (cards.isEmpty()) null
+                else newHomePageResponse(listOf(HomePageList(request.name, cards)))
+            }
+        } catch (e: Exception) { null }
+    }
+
+    /** قائمة الوسم — تحمل أغلفتها و24 بطاقة، و`صفحة/N/` يعمل عليها (قيس). */
+    private fun listingUrl(term: String, page: Int): String {
+        val q = "?" + URLEncoder.encode("قائمة", "UTF-8") + "=" + URLEncoder.encode(term, "UTF-8")
+        val base = if (page <= 1) "$DD_MAIN/${encPath("المسلسلات")}/"
+        else "$DD_MAIN/${encPath("المسلسلات")}/${encPath("صفحة")}/$page/"
+        return base + q
+    }
+
+    // ---------- البحث ----------
+
+    override suspend fun search(query: String): List<SearchResponse>? {
+        return try {
+            val html = app.get("$DD_MAIN/?s=" + URLEncoder.encode(query, "UTF-8"), headers = headers()).text
+            parseCards(html).mapNotNull { cardOf(it) }
+        } catch (e: Exception) { null }
+    }
+
+    // ---------- التفاصيل ----------
+
+    override suspend fun load(url: String): LoadResponse? {
+        return try {
+            val doc = app.get(url, headers = headers()).document
+            val html = doc.html()
+
+            val title = doc.selectFirst("meta[property=og:title]")?.attr("content")?.trim()
+                ?.takeIf { it.isNotBlank() }
+                ?: doc.selectFirst("h1")?.text()?.trim()?.takeIf { it.isNotBlank() }
+                ?: return null
+            val poster = doc.selectFirst("meta[property=og:image]")?.attr("content")
+                ?.trim()?.takeIf { it.isNotBlank() }
+            val plot = doc.selectFirst("meta[property=og:description]")?.attr("content")
+                ?.trim()?.takeIf { it.isNotBlank() }
+
+            // ★ صفحة مقال: فيديو واحد بخوادم مباشرة — لا playlist ولا حلقات.
+            if (isPostPage(url, html)) {
+                return newMovieLoadResponse(title, url, TvType.Movie, "post|$url") {
+                    this.posterUrl = poster
+                    this.plot = plot
+                }
+            }
+
+            val id = seriesIdFrom(html) ?: resolveIdBySlug(url) ?: return null
+            val eps = playlistEpisodes(id)
+            if (eps.isEmpty()) return null
+
+            val episodes = eps.map { e ->
+                newEpisode("$id|${e.number}") {
+                    this.name = if (e.locked) "الحلقة ${e.number} (مقفلة)" else "الحلقة ${e.number}"
+                    this.episode = e.number
+                }
+            }
+            newTvSeriesLoadResponse(title, url, TvType.TvSeries, episodes) {
+                this.posterUrl = poster
+                this.plot = plot
+            }
+        } catch (e: Exception) { null }
+    }
+
+    /**
+     * معرّف العمل من الصفحة نفسها. مراسٍ مرتَّبة بالقوة (كلها مقيسة):
+     *  ١) `data-id` في زرّ الحفظ — يظهر **مرةً واحدة** في صفحة العمل (`data-id="4488"`)،
+     *     أما `data-series` فتظهر عند كل بطاقة «مشابهة» فلا تصلح مرجعاً.
+     *  ٢) `wp-json/wp/v2/dd_series/<id>` المضمَّن في الوسم (shortlink).
+     *  ٣) استعلام REST بالـslug — احتياطٌ حين يختلف القالب.
+     */
+    private fun seriesIdFrom(html: String): Int? {
+        val ids = Regex("""data-id="(\d+)"""").findAll(html).map { it.groupValues[1] }.toList()
+        if (ids.size == 1) return ids[0].toIntOrNull()
+        return Regex("""wp-json/wp/v2/dd_series/(\d+)""").find(html)
+            ?.groupValues?.get(1)?.toIntOrNull()
+    }
+
+    private suspend fun resolveIdBySlug(url: String): Int? {
+        return try {
+            val raw = url.trimEnd('/').substringAfterLast('/')
+            val slug = java.net.URLDecoder.decode(raw, "UTF-8")
+            if (slug.isBlank()) return null
+            val text = app.get(
+                "$DD_MAIN/wp-json/wp/v2/dd_series?slug=${URLEncoder.encode(slug, "UTF-8")}&_fields=id",
+                headers = headers()
+            ).text
+            val root = mapper.readTree(text)
+            if (root.isArray && root.size() > 0) root[0].get("id")?.asInt() else null
+        } catch (e: Exception) { null }
+    }
+
+    private suspend fun playlistEpisodes(id: Int): List<DdEpisode> {
+        return try {
+            val text = app.get("$DD_MAIN/wp-json/deep-drama/v1/playlist/$id", headers = headers()).text
+            val arr = mapper.readTree(text).get("episodes") ?: return emptyList()
+            arr.mapNotNull { e ->
+                val n = e.get("number")?.asInt() ?: return@mapNotNull null
+                DdEpisode(n, e.get("locked")?.asBoolean() ?: false)
+            }
+        } catch (e: Exception) { emptyList() }
+    }
+
+    /** خوادم العمل كما يعلنها `playlist.servers` (قِيس: نترو دائماً، و«ريل فرين» أحياناً). */
+    private suspend fun playlistServers(id: String): List<String> {
+        return try {
+            val text = app.get("$DD_MAIN/wp-json/deep-drama/v1/playlist/$id", headers = headers()).text
+            val arr = mapper.readTree(text).get("servers") ?: return emptyList()
+            arr.mapNotNull { it.get("id")?.asText()?.takeIf { s -> s.isNotBlank() } }
+        } catch (e: Exception) { emptyList() }
+    }
+
+    // ---------- التشغيل ----------
+
+    override suspend fun loadLinks(
+        data: String,
+        isCasting: Boolean,
+        subtitleCallback: (SubtitleFile) -> Unit,
+        callback: (ExtractorLink) -> Unit
+    ): Boolean {
+        return try {
+            // ★ صفحة مقال: خوادمها مخزَّنة كأزرار مباشرة.
+            val postUrl = Regex("""\|(https?://.+)$""").find(data)?.groupValues?.get(1)
+            if (postUrl != null) return loadPostLinks(postUrl, subtitleCallback, callback)
+
+            // الحِمل "id|number" — بمؤشّر ثابت لأن CloudStream قد يُسبقه بـ mainUrl.
+            val m = Regex("""(\d+)\|(\d+)""").find(data) ?: return false
+            loadEpisodeLinks(m.groupValues[1], m.groupValues[2], subtitleCallback, callback)
+        } catch (e: Exception) { false }
+    }
+
+    /**
+     * روابط الحلقة.
+     *
+     * ★ الطريقة الصحيحة هي طريقة الموقع نفسه: يُنادى على الخادم الأول، فإن سقط
+     *   يُنادى على التالي مع `failed=<السابق>` — وهذا هو ما يقيسه الموقع في
+     *   `dd-player-data`. قِيس على 2406 (خادمان): بلا معاملات ⇒ نترو؛
+     *   و`?server=reelfren&failed=narto` ⇒ `proxy.dramafren.org`. أما
+     *   `?server=reelfren` **وحده** فيُتجاهل ويعيد نترو.
+     *
+     * ★ الشكل الأول `تلقائي` هو **موجِّه** `stream-e1.narto-drama.com/e/m/<base64>`
+     *   يحمل نفس رابط الشكل الثاني داخل حقل `src` — فنبني منه الرابط الحقيقي
+     *   بدل تمرير موجِّه لا يقدر أي مشغّل على فتحه (وهو سبب «Source error»).
+     */
+    private suspend fun loadEpisodeLinks(
+        id: String,
+        number: String,
+        subtitleCallback: (SubtitleFile) -> Unit,
+        callback: (ExtractorLink) -> Unit
+    ): Boolean {
+        val servers = playlistServers(id)
+        val order = servers.ifEmpty { listOf("") }
+        val collected = ArrayList<ExtractorLink>()
+        var lastSubtitles: JsonNode? = null
+        var server = ""
+
+        for ((i, s) in order.withIndex()) {
+            val failed = servers.take(i).joinToString(",")
+            val text = try {
+                var url = "$DD_MAIN/wp-json/deep-drama/v1/episode/$id/$number"
+                val params = ArrayList<String>()
+                if (s.isNotBlank()) params.add("server=" + URLEncoder.encode(s, "UTF-8"))
+                if (failed.isNotBlank()) params.add("failed=" + URLEncoder.encode(failed, "UTF-8"))
+                if (params.isNotEmpty()) url += "?" + params.joinToString("&")
+                app.get(url, headers = headers()).text
+            } catch (e: Exception) { null } ?: continue
+
+            val root = try { mapper.readTree(text) } catch (e: Exception) { continue }
+            server = root.get("server")?.asText().orEmpty()
+            val label = serverLabel(server)
+            val formats = root.get("formats")
+            if (formats == null || !formats.isArray || formats.size() == 0) continue
+            lastSubtitles = root.get("subtitles")
+
+            // (الرابط ← الجودة والنوع). التكرار يُدمج — والشكل `تلقائي` هو نفسه
+            // الشكل المسمّى بعد فكّ الموجِّه، فتُبقى التسمية المفيدة.
+            val seen = LinkedHashMap<String, Fmt>()
+            for (f in formats) {
+                val raw = f.get("url")?.asText()?.takeIf { it.isNotBlank() } ?: continue
+                val u = unwrapRedirector(raw) ?: if (raw.contains("/e/m/")) null else raw
+                if (u.isNullOrBlank()) continue
+                val q = f.get("quality")?.asText().orEmpty()
+                val hls = f.get("type")?.asText().equals("hls", true) ||
+                    u.contains(".m3u8", true) || u.contains("/api/proxy/", true)
+                val old = seen[u]
+                if (old == null || (isAutoLabel(old.q) && !isAutoLabel(q))) seen[u] = Fmt(q, hls)
+            }
+            if (seen.isEmpty()) continue
+
+            seen.entries.forEachIndexed { idx, (u, fmt) ->
+                val linkType = if (fmt.hls) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
+                val nm = buildString {
+                    append(label)
+                    if (fmt.q.isNotBlank() && !isAutoLabel(fmt.q)) append(" · ").append(fmt.q)
+                    if (seen.size > 1) append(" · ").append(idx + 1)
+                }
+                collected.add(newExtractorLink(name, FormatTag.tagged(nm, u, linkType), u, linkType) {
+                    this.quality = getQualityFromName(if (fmt.q.endsWith("p")) fmt.q else "720p")
+                    this.headers = headers()
+                })
+            }
+            break // أول خادم يردّ بروابط هو المقصود — كما يفعل الموقع.
+        }
+
+        if (collected.isEmpty()) return false
+        ordered(collected).forEach { callback(it) }
+        emitSubtitles(lastSubtitles, subtitleCallback)
+        return true
+    }
+
+    /**
+     * روابط صفحة مقال: أزرار `xr-server-btn data-src` — رامبل / voe.sx / vidaraa.
+     *
+     * ★ ترتيب الأزرار هو ترتيب الموقع، والمشغّل يشغّل الرابط الأول كما يفعل
+     *   الموقع نفسه، فلا يُقلَب الترتيب بين السيرفرات.
+     *
+     * ★ ولماذا التسمية على عاتقنا: المشغّل لا يعرض سوى `ExtractorLink.name`،
+     *   واسم المستخرِج المدمج لا يقول شيئاً عن الجودة. فنُعيد بناء كل رابط
+     *   باسمٍ يحمل اسم السيرفر ثم الدقة ثم وسم الصيغة، تاركين `url`
+     *   و`referer` و`headers` و`quality` و`type` كما هي تماماً.
+     */
+    private suspend fun loadPostLinks(
+        postUrl: String,
+        subtitleCallback: (SubtitleFile) -> Unit,
+        callback: (ExtractorLink) -> Unit
+    ): Boolean {
+        val html = try { app.get(postUrl, headers = headers()).text } catch (e: Exception) { return false }
+
+        val servers = ArrayList<String>()
+        xrButtonRe.findAll(html).forEach { b ->
+            dataSrcRe.find(b.value)?.groupValues?.get(1)?.let { if (it.isNotBlank()) servers.add(it) }
+        }
+        if (servers.isEmpty()) {
+            iframeSrcRe.find(html)?.groupValues?.get(1)?.let { servers.add(it) }
+        }
+        if (servers.isEmpty()) return false
+
+        var ok = false
+        for (s in servers.distinct()) {
+            val hit = try {
+                if (hostIs(s, "rumble.com")) resolveRumble(s, subtitleCallback, callback)
+                else labelledExtractor(s, postUrl, subtitleCallback, callback)
+            } catch (e: Exception) { false }
+            if (hit) ok = true
+        }
+        return ok
+    }
+
+    /** مضيف الرابط بأحرف صغيرة، وسلسلة فارغة إن تعذّر تحليله. */
+    private fun hostOf(u: String): String = try {
+        java.net.URI(u).host?.lowercase() ?: ""
+    } catch (e: Exception) { "" }
+
+    /**
+     * مطابقة بلاحقة المضيف الكاملة: `notrumble.com` لا يُعدّ `rumble.com`،
+     * وهذا هو الفرق بين استضافةٍ صدفةٍ ومُستضِفٍ حقيقي.
+     */
+    private fun hostIs(u: String, domain: String): Boolean {
+        val h = hostOf(u)
+        return h == domain || h.endsWith(".$domain")
+    }
+
+    /** اسم السيرفر في صفحة المقال — من المضيف لا من نصّ الزرّ («Server 1»). */
+    private fun postServerLabel(src: String): String = when {
+        hostIs(src, "rumble.com") -> "رامبل Rumble"
+        hostIs(src, "voe.sx") -> "فو VOE"
+        hostIs(src, "vidaraa.cc") -> "فيدارا Vidaraa"
+        else -> hostOf(src).removePrefix("www.").ifBlank { "خادم" }
+    }
+
+    /**
+     * العقدة JSON المعلَّقة بـ`"<key>":` — تُقرأ **بموازنة الأقواس** لا
+     * بنمطٍ كسول، فالقيم تحتوي أقواساً داخلية يبتلعها `.*`، والأقواس داخل
+     * السلاسل النصّية لا تُعدّ (درسٌ مقيس في مصادر أخرى من هذا المخزن).
+     */
+    private fun nodeText(scope: String, key: String): String? {
+        val m = Regex("\"" + Regex.escape(key) + "\"\\s*:\\s*\\{").find(scope) ?: return null
+        val open = scope.indexOf('{', m.range.first)
+        if (open < 0) return null
+        var depth = 0
+        var inStr = false
+        var esc = false
+        for (i in open until scope.length) {
+            val c = scope[i]
+            if (inStr) when {
+                esc -> esc = false
+                c == '\\' -> esc = true
+                c == '"' -> inStr = false
+                else -> {}
+            }
+            else when (c) {
+                '"' -> inStr = true
+                '{' -> depth++
+                '}' -> { depth--; if (depth == 0) return scope.substring(open, i + 1) }
+                else -> {}
+            }
+        }
+        return null
+    }
+
+    /**
+     * الدقة المعلَّنة في قائمة الأم — طلبٌ واحد صغير لا يُحسّ في سرعة
+     * البدء (قِيس: قائمة vidaraa مئةٌ و٧٤ بايتاً). وكلّ عطلٍ يُبتلع: الوسم
+     * زيادةٌ على الاسم، وغيابه لا يُسقط الرابط ولا يؤخّره.
+     *
+     * لا تُطلب إلا من رابط `.m3u8` فعلاً؛ أما ملفّ mp4 فلا دقة تُقرأ منه
+     * بطلبٍ واحد، فتُترك التسمية بلا دقة بدل تخمينٍ كاذب.
+     */
+    private suspend fun masterInfo(url: String): Pair<String, Int>? {
+        if (!url.contains(".m3u8", true)) return null
+        val text = try {
+            app.get(url, headers = headers(), timeout = 6000L).text
+        } catch (e: Exception) { return null }
+        val hits = Regex("""RESOLUTION=(\d+)x(\d+)""", RegexOption.IGNORE_CASE)
+            .findAll(text).toList()
+        if (hits.isEmpty()) return null
+        val label = hits.map { it.groupValues[1] + "x" + it.groupValues[2] }
+            .distinct().take(3).joinToString("/")
+        val maxH = hits.maxOf { it.groupValues[2].toIntOrNull() ?: 0 }
+        return label to maxH
+    }
+
+    /**
+     * مستخرِجٌ مدمج (voe / vidaraa) مع إعادة تسمية ما يُخرجه.
+     *
+     * تُجمع النتائج أولاً لا تُمرَّر مباشرة: فلا يُعاد البناء إلا بعد نجاح
+     * المستخرِج فعلاً، ولا يُكرَّر رابطٌ يعيده مرّتين، ولغة الترجمة تمرّ
+     * على `subLangLabel` لأنّ المستخرِج قد يرسل «Arabic» لا رمزاً ISO
+     * فيقع وسمٌ فارغ ولا يُحفظ اختيار المستخدم بين الحلقات.
+     */
+    private suspend fun labelledExtractor(
+        src: String,
+        postUrl: String,
+        subtitleCallback: (SubtitleFile) -> Unit,
+        callback: (ExtractorLink) -> Unit
+    ): Boolean {
+        val label = postServerLabel(src)
+        val links = ArrayList<ExtractorLink>()
+        val subs = ArrayList<SubtitleFile>()
+        val hit = try {
+            loadExtractor(src, postUrl, { subs.add(it) }) { links.add(it) }
+        } catch (e: Exception) { false }
+        if (!hit) return false
+
+        val hdr = headers()
+        val seen = HashSet<String>()
+        var emitted = 0
+        for (l in links) {
+            if (!seen.add(l.url)) continue
+            val info = masterInfo(l.url)
+            val title = if (info == null) label else "$label · ${info.first}"
+            val qv = if (l.quality != Qualities.Unknown.value) l.quality
+            else info?.second?.takeIf { it > 0 }?.let { getQualityFromName(it.toString() + "p") }
+                ?: l.quality
+            callback(newExtractorLink(
+                source = name,
+                name = FormatTag.tagged(title, l.url, l.type),
+                url = l.url,
+                type = l.type
+            ) {
+                this.quality = qv
+                this.referer = l.referer
+                this.headers = l.headers.ifEmpty { hdr }
+                this.extractorData = l.extractorData
+                this.audioTracks = l.audioTracks
+            })
+            emitted++
+        }
+
+        for (sf in subs) {
+            try {
+                subtitleCallback(newSubtitleFile(subLangLabel(sf.lang), sf.url) {
+                    this.headers = sf.headers
+                })
+            } catch (e: Exception) { }
+        }
+        return emitted > 0
+    }
+
+    /**
+     * رامبل — لا مستخرِج مدمج له، فتُقرأ بيانات صفحة التضمين نفسها.
+     *
+     * قِيس (2026-10-08) على `embed/v7dsibs`: العقدة `m.f["<id>"]` تحمل
+     * `ua` (وربما `u`) وفيها `hls.auto.url` قائمة الأم، و`tar` جوداتٌ
+     * مفردةٌ مفتاحُها `240/360/480/720` و`meta` يحمل الدقة الحقيقية،
+     * و`cc` ترجماتٌ منها العربية. كلّها رُجِّحت **حيّةً** بطلبٍ يطابق شكل
+     * المشغّل لا بطلبٍ اعتباطيّ:
+     *   القائمة الأم 200 بـ`application/vnd.apple.mpegurl` وأربعة `RESOLUTION`؛
+     *   وكلّ جرعة `tar` 200 و206 بجسم MPEG-TS؛ والترجمة 200 بـ`WEBVTT`.
+     *
+     * لماذا نُخرج الجودات المفردة أيضاً: المستخدم يطلب صراحةً معرفة أنّ
+     * الجودة 720 أو 480 أو 240، وقائمة الأم وحدها تُخفيها خلف «تلقائي».
+     */
+    private suspend fun resolveRumble(
+        embedUrl: String,
+        subtitleCallback: (SubtitleFile) -> Unit,
+        callback: (ExtractorLink) -> Unit
+    ): Boolean {
+        val html = try {
+            app.get(embedUrl, headers = headers()).text
+        } catch (e: Exception) { return false }
+
+        // نبدأ من `m.f[` كي لا يطابق `"u":{` شيءٌ آخر في الصفحة.
+        val anchor = html.indexOf("m.f[")
+        val scope = if (anchor >= 0) html.substring(anchor) else html
+        val uaText = nodeText(scope, "ua") ?: nodeText(scope, "u") ?: return false
+        val ua = try { mapper.readTree(uaText) } catch (e: Exception) { null } ?: return false
+        if (!ua.isObject) return false
+
+        val label = postServerLabel(embedUrl)
+        val hdr = headers()
+
+        val hls = ua.get("hls")
+        val master = hls?.get("auto")?.get("url")?.asText()
+            ?: hls?.get("url")?.asText()
+        if (!master.isNullOrBlank() && !master.contains(".m3u8", true)) return false
+
+        // (المفتاح ← الرابط). مفاتيح رامبل هي تسمياتها نفسها: 240/360/480/720.
+        val rends = ArrayList<Triple<Int, String, String>>()
+        val tar = ua.get("tar")
+        if (tar != null && tar.isObject) {
+            val names = tar.fieldNames()
+            while (names.hasNext()) {
+                val k = names.next()
+                val node = tar.get(k)
+                val u = node?.get("url")?.asText()?.takeIf { it.isNotBlank() } ?: continue
+                val h = node.get("meta")?.get("h")?.asInt() ?: 0
+                rends.add(Triple(k.toIntOrNull() ?: h, k, u))
+            }
+        }
+
+        val collected = ArrayList<ExtractorLink>()
+        val top = rends.maxOfOrNull { it.first } ?: 0
+
+        if (!master.isNullOrBlank()) {
+            collected.add(newExtractorLink(
+                source = name,
+                name = FormatTag.tagged("$label · تلقائي", master, ExtractorLinkType.M3U8),
+                url = master,
+                type = ExtractorLinkType.M3U8
+            ) {
+                this.quality = if (top > 0) getQualityFromName(top.toString() + "p")
+                else Qualities.Unknown.value
+                this.headers = hdr
+            })
+        }
+        for ((sortKey, key, u) in rends.sortedByDescending { it.first }) {
+            collected.add(newExtractorLink(
+                source = name,
+                name = FormatTag.tagged("$label · ${key}p", u, ExtractorLinkType.M3U8),
+                url = u,
+                type = ExtractorLinkType.M3U8
+            ) {
+                this.quality = getQualityFromName(key + "p")
+                this.headers = hdr
+            })
+        }
+        if (collected.isEmpty()) return false
+        ordered(collected).forEach { callback(it) }
+
+        // `cc` — ترجمات صفحة التضمين، منها العربية: مسار VTT مطلق.
+        val ccText = nodeText(scope, "cc")
+        if (ccText != null) {
+            try {
+                val cc = mapper.readTree(ccText)
+                if (cc.isObject) {
+                    val arr = mapper.createArrayNode()
+                    val langs = cc.fieldNames()
+                    while (langs.hasNext()) {
+                        val lang = langs.next()
+                        val p = cc.get(lang)?.get("path")?.asText()?.takeIf { it.isNotBlank() }
+                            ?: continue
+                        val o = mapper.createObjectNode()
+                        o.put("language", lang)
+                        o.put("url", p)
+                        arr.add(o)
+                    }
+                    emitSubtitles(arr, subtitleCallback)
+                }
+            } catch (e: Exception) { }
+        }
+        return true
+    }
+
+    private suspend fun emitSubtitles(subs: JsonNode?, subtitleCallback: (SubtitleFile) -> Unit) {
+        if (prefs?.getBoolean(DeepDramaSettingsBottomSheet.KEY_SHOW_SUBTITLES, true) == false) return
+        if (subs == null || !subs.isArray) return
+        subs.forEach { s ->
+            val u = firstOf(s, "url", "file", "src", "link")?.takeIf { it.isNotBlank() } ?: return@forEach
+            // ★ زوج «عربي لاتيني» عبر subLangLabel: العرض يكتب `lang` حرفياً
+            //   فـ«ar» تظهر هكذا، والاسم العربي وحده يعطي وسم IETF فارغاً؛
+            //   الزوج يُصحّح العرض ويُبقي الوسم حيّاً للتحديد التلقائي.
+            val code = (firstOf(s, "language", "lang", "code", "locale") ?: "ar").trim()
+            if (code.isNotBlank()) subtitleCallback(newSubtitleFile(subLangLabel(code), u))
+        }
+    }
+
+    /**
+     * فكّ موجِّه `/e/m/`: مقطع واحد يحمل `<base64url(payload)>.<signature>`،
+     * والرابط الحقيقي في `src`. يُعاد `null` إن تعذّر الفكّ كي يُسقَط الشكل
+     * بدل تمرير ما لا يُشغَّل.
+     */
+    private fun unwrapRedirector(u: String): String? {
+        val marker = "/e/m/"
+        val i = u.indexOf(marker)
+        if (i < 0) return null
+        val seg = u.substring(i + marker.length).substringBefore('?').substringBefore('#')
+        val dot = seg.indexOf('.')
+        if (dot <= 0) return null
+        return try {
+            var b = seg.substring(0, dot).replace('-', '+').replace('_', '/')
+            while (b.length % 4 != 0) b += "="
+            val payload = String(android.util.Base64.decode(b, android.util.Base64.DEFAULT), Charsets.UTF_8)
+            Regex(""""src"\s*:\s*"([^"]+)"""").find(payload)?.groupValues?.get(1)?.trim()
+                ?.takeIf { it.isNotBlank() }
+        } catch (e: Exception) { null }
+    }
+
+    private fun isAutoLabel(q: String): Boolean =
+        q.isBlank() || q == "تلقائي" || q.equals("auto", true)
+
+    /** الشكل: اسم الجودة كما يعرضه الموقع، وهل الرابط m3u8. */
+    private data class Fmt(val q: String, val hls: Boolean)
+
+    /** ترتيب الجودات بحسب الإعداد — الافتراضي يبقي ترتيب الموقع حرفياً. */
+    private fun ordered(list: List<ExtractorLink>): List<ExtractorLink> {
+        return when (prefs?.getString(DeepDramaSettingsBottomSheet.KEY_QUALITY_ORDER, "default")) {
+            "asc" -> list.sortedBy { it.quality }
+            "desc" -> list.sortedByDescending { it.quality }
+            else -> list
+        }
+    }
+
+    private fun firstOf(node: JsonNode, vararg keys: String): String? {
+        for (k in keys) {
+            val v = node.get(k)?.asText()
+            if (!v.isNullOrBlank()) return v
+        }
+        return null
+    }
+
+    /** اسم الخادم كما يعرضه الردّ (الموقع يسمّيه «نترو دراما»). */
+    private fun serverLabel(id: String): String = when (id.lowercase()) {
+        "", "narto" -> "نترو دراما"
+        "reelfren" -> "ريل فرين"
+        "dramabuzz" -> "درامابَز"
+        else -> id
+    }
+}
