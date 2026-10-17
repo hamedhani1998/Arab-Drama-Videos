@@ -1299,8 +1299,22 @@ class DramaTipProvider(private val prefs: SharedPreferences? = null) : MainAPI()
             // لطلبٍ ويقبل التالي بالقيمة نفسها)، وسلسلةٌ من عنصرٍ واحد يسقط عنصرها
             // = «لا روابط» للحلقة كلّها. والإعادة تُحفظ بحيث لا تعود أسوأ من الأول:
             // المهلة أو انقطاع الاتصال لا يُثبتان شيئًا، والحكم القاطع يبقى قاطعًا.
+            // ★ 2026-10-17. **الجذر الثاني لدوران الفيديو.** كان الرمز المنتهي
+            // يُفحَص أوّلًا (٧ث مهلةً للطلب، ثم حتى ٣ إعادات = ‎~٢٢ث‎) **ثم**
+            // يُسقَط — فيدفع المستخدم ثمن رحلةٍ محكومٍ عليها سلفًا، ويراها دورانًا.
+            // والعمر معلومٌ محلّيًّا من الرابط نفسه، فلا يُصرف عليه فحصٌ أصلًا:
+            // حكمٌ صناعيّ «منتهٍ» بلا شبكة. وهذا يقصّر الطريق إلى الروابط
+            // الحيّة بقدر ما في القائمة من موتى — وقد كانت كلّها موتى في الالتقاط.
             suspend fun probeAll(list: List<Cand>): List<Verdict?> = coroutineScope {
-                list.map { c -> async(Dispatchers.IO) { if (probing) probe.check(c.url) else null } }.awaitAll()
+                list.map { c ->
+                    async(Dispatchers.IO) {
+                        when {
+                            !probing -> null
+                            tokenExpired(c.url, null) -> Verdict(false, "", null, "منتهٍ محلّيًّا", true)
+                            else -> probe.check(c.url)
+                        }
+                    }
+                }.awaitAll()
             }
             var verdicts = probeAll(uniq)
             run {
@@ -1309,10 +1323,16 @@ class DramaTipProvider(private val prefs: SharedPreferences? = null) : MainAPI()
                 // dramatip. ولا تُعاد المهلة (٧ ثوانٍ لكل محاولة ولا تُثبت شيئًا)،
                 // ولا المضيف الذي لا يُحلّ (الحلّ يُعاد صريحًا داخل one())، ولا
                 // فشل شهادة TLS (قاطعٌ بالطبع).
-                val toRetry = uniq.filterIndexed { i, _ ->
+                // ★ 2026-10-17. ولا تُعاد رحلةٌ **محكومةٌ سلفًا**: الرمز المنتهي
+                // عمره معروفٌ محلّيًّا (وقد يكون حكمُه من `probeAll` محليًّا
+                // أيضًا)، وإعادته ثلاثة أضعافٍ (٣‎×‎٧ث = ‎٢١ث‎) لا تُقلب حكمًا
+                // ولا تُنجي شيئًا — وقد قِيس أنّ كلّ مرشّحٍ في الالتقاط كان
+                // منتهيًا، فكانت الإعادات كلّها زمنًا يُرى دورانًا في اللاعب.
+                val toRetry = uniq.filterIndexed { i, c ->
                     val v = if (probing) verdicts[i] else null
-                    v != null && !v.alive && (v.why.startsWith("HTTP ") ||
-                        v.why.startsWith("proxy body:") || v.why.startsWith("not a playlist:"))
+                    v != null && !v.alive && !tokenExpired(c.url, v) &&
+                        (v.why.startsWith("HTTP ") ||
+                            v.why.startsWith("proxy body:") || v.why.startsWith("not a playlist:"))
                 }
                 if (toRetry.isEmpty()) return@run
                 val again = coroutineScope {
@@ -1327,6 +1347,10 @@ class DramaTipProvider(private val prefs: SharedPreferences? = null) : MainAPI()
             //    المفتاح)، بل **نعيد إنتاج الوصفة** من أصلها بتخريب ذاكرة العُقدة،
             //    ونُعيد الفحص. وذلك مرّتين على الأكثر — فلا يطول الزمن على الحلقة
             //    السليمة (تُنجي من الموجة الأولى فتُقفز الحلقة كلّها).
+            // ★ 2026-10-17. إعادة الإنتاج **لازمةٌ بالضبط** عندما تكون الرموز
+            // منتهية: قِيس أنّ `refresh=1` يعيد رمزًا طازجًا (‎+3500ث‎، ١٤/١٤)
+            // بينما نسخة الصفحة المخبّأة منتهية (‎-700ث‎، ٠/١٤). فالرمز المنتهي
+            // هو أوضح داعٍ لإعادة الجلب لا مانعٌ منه — فلا يُشترط هنا غيره.
             if (probing && bookId != null && verdicts.none { it?.alive == true }) {
                 val baseSerial = meta.firstSerial
                 val ser = ep + baseSerial - 1
