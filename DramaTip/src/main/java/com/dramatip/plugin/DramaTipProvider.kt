@@ -817,6 +817,57 @@ class DramaTipProvider(private val prefs: SharedPreferences? = null) : MainAPI()
     }
 
     /**
+     * ★ 2026-10-18. **فخّ `org.json`: الشرطة المائلة تُهرَب فتُعمي كلّ أنماط الاستخراج.**
+     *
+     * `JSONObject.toString()` يمرّ بـ`JSONStringer` في libcore، وهو يُهرِب `/`
+     * إلى `\/` (نصّ RFC 4627: علامة التنصيص والشرطة المائلة العكسيّة والشرطة
+     * المائلة). وكلّا نمطينا يُغلق على علامة تنصيصٍ مباشرةً:
+     * `"enc":"([A-Za-z0-9+/=]+)"`. فحين تحمل القيمة `/` — وهي تحمله دائمًا لأنّ
+     * الحمولة base64 لرابطٍ — يصير النصّ `"enc":"Q56F…\/…"`، والحرف الذي يلي
+     * المجموعة `\` لا `"`، فيفشل **المطابقة كلّها**. و`Regex` بلا مرساةٍ يُسقط
+     * الموضع الفاشل ولا يقصّه، فلا تبقى من القيمة شيء.
+     *
+     * والأثر مقيسٌ على الجهاز في التقاط v23 لمنصّة BiliTV:
+     *   `episode-source ok … stale=24823s token=?s`
+     * أي أنّ الأرقام (`refreshAfter`) طابقت والحمولةَ لم تطابق. فسقط
+     * `descBestLife` إلى null، وسقط `candsOf(apiDesc)` إلى **صفر مرشّحين**، فلم
+     * يعرف الكود عمر الرمز أصلًا — وهو جذر «لم يعثر على روابط» و«‎2004» معًا.
+     *
+     * ووصفة الصفحة ما كانت تُبتلى لأنّ `extractFlight` يمرّ بـ[unescapeJsonStr]
+     * فيُفكّ قبل المطابقة — وهذا هو الفرق الوحيد بين المسارين.
+     *
+     * فالعلاج الجذريّ واحد: **التطبيع عند الحدّ** — كلّ نصٍّ آتٍ من `JSONObject`
+     * يمرّ من هنا قبل أيّ استخراج. ولا يمسّ النصّ السليم: `\/` و`\"` و`\\`
+     * و`\uXXXX` إعادةُ كتابةٍ لا عملية على وصفةٍ بلا هرب، والحمولات المفكوكة
+     * تبقى كما هي.
+     */
+    private fun unescapeJson(s: String): String {
+        if (!s.contains('\\')) return s
+        val sb = StringBuilder(s.length)
+        var i = 0
+        while (i < s.length) {
+            val c = s[i]
+            if (c != '\\' || i + 1 >= s.length) { sb.append(c); i++; continue }
+            when (val n = s[i + 1]) {
+                'u' -> {
+                    val hex = s.substring(i + 2, minOf(i + 6, s.length))
+                    val cp = hex.toIntOrNull(16)
+                    if (cp != null && hex.length == 4) { sb.append(cp.toChar()); i += 6 }
+                    else { sb.append(c); i++ }
+                }
+                '/', '"', '\\' -> { sb.append(n); i += 2 }
+                'n' -> { sb.append('\n'); i += 2 }
+                'r' -> { sb.append('\r'); i += 2 }
+                't' -> { sb.append('\t'); i += 2 }
+                'b' -> { sb.append('\b'); i += 2 }
+                'f' -> { sb.append('\u000C'); i += 2 }
+                else -> { sb.append(c); i++ }
+            }
+        }
+        return sb.toString()
+    }
+
+    /**
      * كل الروابط المُفكَّكة (بالصيغة التي يفهمها كود الاستخراج القائم: حقول
      * ‎enc/qال‎ مفصولة بـNUL) من وصفة الـAPI — أو null إن فشل الطلب.
      *
@@ -872,14 +923,26 @@ class DramaTipProvider(private val prefs: SharedPreferences? = null) : MainAPI()
                         // بدل انتظار مهلةٍ كاملة. وإن أصرّ الأصل على نسخةٍ بائتة،
                         // قبولها خيرٌ من null: خطّ نجاة البثّ يبقيها، واللاعب قد
                         // يجلب القائمة فيجدّدها بنفسه.
-                        val staleness = descStaleness(desc.toString())
+                        // ★ 2026-10-18. **نصّ الوصفة يمرّ بـ[unescapeJson] أوّلًا.**
+                        // `desc.toString()` يُهرِب `/` إلى `\/`، فيعمي `encRe`
+                        // و`qualRe` معًا (التفصيل في تعليق unescapeJson) —
+                        // وهو ما جعل سجلّ الجهاز يقول `token=?s` على BiliTV.
+                        // ويستفيد منه أيضًا [parseChain]/[chainCands] لأنّ
+                        // [plainFromDescriptor] أدناه يعمل على النصّ المطبَّع.
+                        val descText = unescapeJson(desc.toString())
+                        // ★ 2026-10-18. عدّادٌ واحد يجعل الجذر مرئيًّا في السجلّ:
+                        // إن صفر، فالوصفة بلا حمولةٍ مفكوكة أصلًا (فلا حكمَ زمنيّ
+                        // ولا مرشّح) — وهو ما كان يمرّ صامتًا قبل الإصلاح.
+                        logD("DramaTip: descriptor chain=${desc.optJSONArray("chain")?.length() ?: 0}" +
+                            " enc=${encRe.findAll(descText).count()} book=$bookId ser=$serial")
+                        val staleness = descStaleness(descText)
                         // ★ 2026-10-17. الحكم الثاني — وهو الحاسم: **عمر الرمز
                         // نفسه**. `refreshAfter` قد يغيب تمامًا (قِيس اليوم
                         // `None` على الوصفة المخبّأة لكتابٍ رمزُه منتهٍ)، فلا
                         // تُكتشف البلى بالحقل بل بالرمز. وحين ينتهي الرمز يكون
                         // بثّه خطأ 2004 (BAD_HTTP_STATUS) حتمًا: القائمة تفتح
                         // ثم يرفض الحافّة قطعةَ الفيديو بـ403.
-                        val bestLife = descBestLife(desc.toString())
+                        val bestLife = descBestLife(descText)
                         // ★ 2026-10-17. الصيغة الصحيحة (`refreshAfter` = موعد
                         // التجديد، والوصفة بائتةٌ إذا **فات**): انظر descStaleness.
                         val staleByField = staleness != null && staleness < 0
@@ -900,7 +963,7 @@ class DramaTipProvider(private val prefs: SharedPreferences? = null) : MainAPI()
                                 "episode-source accept (token حيّ $bestLife s يتقدّم على الحقل" +
                                     " ${staleness ?: "?"}s) book=$bookId ser=$serial"
                             )
-                            return plainFromDescriptor(desc.toString())
+                            return plainFromDescriptor(descText)
                         }
                         if (staleByField || staleByToken) {
                             lastWhy = if (staleByToken)
@@ -919,7 +982,7 @@ class DramaTipProvider(private val prefs: SharedPreferences? = null) : MainAPI()
                             // هذه هي الحالة الوحيدة التي يُقبل فيها الميت —
                             // ليقرّرها loadLinks: تُسقَط صراحةً خيرٌ من بثّها
                             // فيرى المستخدم خطأ 2004 على محتوى شغّال.
-                            return plainFromDescriptor(desc.toString())
+                            return plainFromDescriptor(descText)
                         }
                         // ★ رصدٌ للتقاط: كم تأخّرت الوصفة عن موعد بلاها، وكم
                         // يتبقّى لرمزها؟ الرقمان هما الفرق بين «بائتة» و«طازجة»
@@ -929,7 +992,7 @@ class DramaTipProvider(private val prefs: SharedPreferences? = null) : MainAPI()
                             "episode-source ok book=$bookId ser=$serial bust=$bust" +
                                 " stale=${staleness ?: "?"}s token=${bestLife ?: "?"}s"
                         )
-                        return plainFromDescriptor(desc.toString())
+                        return plainFromDescriptor(descText)
                     }
                     lastWhy = if (desc == null) "بلا descriptor" else "بلا chain"
                 } else {
@@ -1294,17 +1357,41 @@ class DramaTipProvider(private val prefs: SharedPreferences? = null) : MainAPI()
             } catch (e: Exception) {
                 // شهادة TLS مرفوضة حكمٌ: البايتات موجودة لكنّ كلّ عميلٍ صارم يرفضها.
                 // ★ 2026-10-16. ومضيفٌ لا يُحلّ اسمه أصلًا حكمٌ كذلك: لا عميلَ يبلغه.
-                // قِيس على DotDrama أنّ مضيفه videotv.vividshort.com لم يُحلّ قطّ؛
-                // وحين كان ‎UnknownHostException‎ يُعدّ «تعذّر معرفة» بُثّ الرابط
-                // الميت فاختار اللاعب التشغيل وأظهر «خطأ 2001» — وهو عطلُ شبكةٍ في
-                // ظاهر الأمر لا رابطٌ ميت. نُعيد الحلّ مرّةً صريحةً قبل الحكم كي لا
-                // يُسقط سباقُ DNS عابرٌ رابطًا حيًّا. وما عدا ذلك (مهلة، انقطاع
-                // اتصال) لا يقول شيئًا عن الرابط — يُبثّ بلا حكمٍ في آخر القائمة.
+                // قِيس على DotDrama أنّ مضيفه videotv.vividshort.com سقط في كلّ
+                // فحصٍ من الجهاز؛ وحين كان ‎UnknownHostException‎ يُعدّ «تعذّر
+                // معرفة» بُثّ الرابط الميت فاختار اللاعب التشغيل وأظهر «خطأ 2001»
+                // — وهو عطلُ شبكةٍ في ظاهر الأمر لا رابطٌ ميت. وما عدا ذلك (مهلة،
+                // انقطاع اتصال) لا يقول شيئًا عن الرابط — يُبثّ بلا حكمٍ في آخر
+                // القائمة. ★ وعن إعادة الحلّ المتكرّرة: انظر التعليق داخل catch.
                 var certain = e is javax.net.ssl.SSLHandshakeException
                 if (e is java.net.UnknownHostException) {
-                    val stillDead = try { java.net.InetAddress.getByName(uri.host); false }
-                    catch (_: Exception) { true }
-                    certain = stillDead
+                    // ★ 2026-10-18. **الحلّ يُعاد ثلاثًا بفاصلٍ لا مرّةً واحدة.**
+                    //
+                    // القاعدة سليمة — «مضيفٌ لا يُحلّ حكمٌ» — لكن تنفيذها كان
+                    // ضعيفًا: إعادةُ حلٍّ **فوريّة** تقع داخل النافذة نفسها التي
+                    // فشل فيها الطلب، فيُصيب العابرُ المحاولتين معًا فتُصنَّف
+                    // ميتةً مُثبتة. وهذا مقيسٌ على FlickReels في التقاط 2026-10-18:
+                    // أُسقطت `zshipricf.farsunpteltd.net` بحكم «موتٍ مُثبت»،
+                    // ثم حُلّ الاسم على الجهاز نفسه بعد لحظات (104.18.2.42).
+                    // أي أنّ حلقةً تعمل سقطت بسباقِ DNS عابر.
+                    //
+                    // والإصلاحان معًا: (١) ثلاث محاولاتٍ متباعدة، فالمضيف الميت
+                    // فعلًا (videotv.vividshort.com مقيسًا) يسقط في الثلاث كلّها
+                    // فيبقى حكمه كما كان؛ (٢) وحين يفلح الحلّ في أيّ محاولة
+                    // نُعيد الحكم إلى «تعذّر معرفة» لا «ميّت» — فيُبثّ الرابط في
+                    // مؤخّرة القائمة ويعيد التطبيقُ فحصه، ولا يُسقط سباقٌ عابرٌ
+                    // رابطًا حيًّا. ولا يُبثّ رابطٌ مُثبتُ الموت أبدًا، فالقاعدة
+                    // الأولى لم تُخرَق.
+                    var resolved = false
+                    for (attempt in 1..3) {
+                        val ok = try { java.net.InetAddress.getByName(uri.host); true }
+                        catch (_: Exception) { false }
+                        if (ok) { resolved = true; break }
+                        if (attempt < 3) try { Thread.sleep(150L * attempt) } catch (_: Exception) {}
+                    }
+                    // داخل هذا الفرع `e` هو UnknownHostException بالضرورة، فالحكم
+                    // موتٌ مُثبتٌ إن لم يفلح الحلّ في المحاولات الثلاث كلّها.
+                    certain = !resolved
                 }
                 Verdict(
                     false, "", null,
