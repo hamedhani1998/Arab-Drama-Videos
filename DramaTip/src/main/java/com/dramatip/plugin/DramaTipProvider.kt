@@ -1648,6 +1648,28 @@ class DramaTipProvider(private val prefs: SharedPreferences? = null) : MainAPI()
             }
             val fakePlaylist = { v: Verdict? -> v != null && v.why.startsWith("not a playlist:") }
 
+            // ★★ 2026-10-18. **«موتٌ مُثبت» صنفًا موجبًا، لا استثناءً في قائمة.**
+            //
+            // خطّ النجاة (`lenient`) أُنشئ ليُرخي الحكم على ما **تعذّر الحكم
+            // عليه** وحدَه (مهلة، انقطاع اتصال) فلا تسقط حلقةٌ حيّة لعابرِ شبكة.
+            // لكن تنفيذه كان مقلوبًا: يشترط `raw.certain == true` — أي أن يطلب
+            // إرخاء **الأحكام القاطعة** — ثم يستثني ثلاث فئاتٍ معدودة
+            // (`wrongToken`، `fakePlaylist`، `tokenExpired`). وكلّ حكمٍ قاطعٍ
+            // خارج تلك الثلاث يمرّ: و**‎404‎ منها**، لأنّ `certain=true` وليس
+            // رابطًا موقّعًا فتفشل الثلاثة كلّها فيُقلب إلى «حيّ» ويُبثّ.
+            //
+            // وهذا هو ما ظهر في التقاط الجهاز 2026-10-18 فعلًا:
+            //   `CS3ExoPlayer: playerError (…pl.shortdizilab.com/v1/happyshort/17169797.m3u8…)
+            //    InvalidResponseCodeException: Response code: 404`
+            // — بُثّ رابطٌ مردودٌ بـ‎404‎ من الخادم مع أنّ المسبار أثبته ميتًا،
+            // و`lenient=true` كانت في السجلّ في اللحظة نفسها. وهو أصل «الخطأ
+            // 2004» نفسه من وجهٍ آخر: رابطٌ يُبثّ بعد أن أُثبت موته.
+            //
+            // والقاعدة الصحيحة كما تقولها تعليقات البوّابة نفسها: **لا يُرخى
+            // القاطع أبدًا، ويُرخى غير القاطع فقط**. وهذا ما يعنيه `!certain`:
+            // لا مهلةٌ ولا انقطاعَ يُثبتان موتًا، وأيّ كود حالةٍ يُثبته.
+            val definiteDeath = { v: Verdict? -> v != null && !v.alive && v.certain }
+
             // ★ 2026-10-17. الجذر الحقيقيّ لخطأ **2004**.
             //
             // الالتقاط أثبت أنّ اللاعب يردّ 2004 (`ERROR_CODE_IO_BAD_HTTP_STATUS`)
@@ -1675,6 +1697,20 @@ class DramaTipProvider(private val prefs: SharedPreferences? = null) : MainAPI()
             // هذا الصنف اليوم**: قِيس على JoyReels أنّ المضيف يجدّده بتحويل 302،
             // فبثُّه ليس خطأً حتمًا (انظر بوّابة الإسقاط).
             var lenient = false
+            // ★ 2026-10-18. **عدّادات الأحكام القاطعة** — الدليل الذي كان غائبًا.
+            //
+            // التقاط 2026-10-18 أظهر `video=3` ورابطًا مردودًا بـ‎404‎ بلا أيّ أثر
+            // في السجلّ يفسّره: خرج رابطٌ مُثبتُ الموت من البوّابة ولم يُطبع
+            // سطرٌ واحد يقول ذلك. فصار كلّ حكمٍ قاطعٍ يُعدّ، والملخّص يُطبع في
+            // سطر الإخراج الأخير — فيُقرأ العطب من السجلّ بلا تخمين، ويُقارَن
+            // العدد بالمُبثّ (`video=`): ‎403‎ أو ‎404‎ داخل المُبثّ = خللٌ في
+            // البوّابة لا في الشبكة. مفاتيح مرتّبة كي يبقى السطر ثابتًا للقراءة.
+            val certainReasons = java.util.TreeMap<String, Int>()
+            fun noteCertain(v: Verdict?) {
+                if (v == null || v.alive || !v.certain) return
+                val k = v.why.substringBefore(':').substringBefore(' ').ifBlank { "-" }
+                certainReasons[k] = (certainReasons[k] ?: 0) + 1
+            }
 
             suspend fun uniqOf(fc: List<Cand>): List<Cand> {
                 val cs = if (fc.isNotEmpty()) fc + pageCands else pageCands
@@ -1905,10 +1941,14 @@ class DramaTipProvider(private val prefs: SharedPreferences? = null) : MainAPI()
                 // عليه وحدَه**: رمزٌ محكومٌ بموته (منتهٍ أو ناقص التوقيع أو قائمةٌ
                 // مزيفة) يبقى ميتًا فلا يُبثّ، لأنّ بثّه يظهر للمستخدم خطأ 2004
                 // (BAD_HTTP_STATUS) أو 3002 — وهي الأخطاء التي جاء الإصلاح لأجلها.
-                val v = if (lenient && raw != null && !raw.alive && raw.certain &&
-                    !wrongToken(raw) && !fakePlaylist(raw) && !tokenExpired(c.url, raw)
-                ) raw.copy(alive = true) else raw
+                // ★ 2026-10-18. صار الشرط صنفًا موجبًا (`!certain`) لا استثناءً من
+                // قائمة: `wrongToken`/`fakePlaylist`/`tokenExpired` كلّها أحكامٌ
+                // قاطعة (‎certain=true‎) فتشملها `definiteDeath` تلقائيًّا، وليس
+                // بقيّةُ الأحكام القاطعة وحدها هو ما كان يفلت.
+                noteCertain(raw)   // حكم المسبار الأصلي، قبل أيّ إرخاء
+                val v = if (lenient && raw != null && !raw.alive && !definiteDeath(raw)) raw.copy(alive = true) else raw
                 if (v != null && !v.alive && v.certain) {
+                    noteCertain(v)
                     logD("DramaTip: drop dead ${c.label} ${c.url.take(70)} why=${v.why}")
                     continue
                 }
@@ -2069,8 +2109,13 @@ class DramaTipProvider(private val prefs: SharedPreferences? = null) : MainAPI()
                 // بُثّ فعلًا رغم كل الفحص — وهي أهمّ ما يُقرأ في التقاط المستخدم.
                 val firstLife = ordered.firstOrNull { it.url.startsWith("http") }
                     ?.let { tokenRemainingSeconds(it.url) }
+                // ★ 2026-10-18. ويُلحق بالموتِ المُثبت عدده وأسبابه: إن ظهر داخل
+                // `video=` رابطٌ من هذه الأسباب فالخلل في البوّابة، وإن خلا منها
+                // فالإسقاط سليم والعلّة في الشبكة أو في الرمز البائت.
+                val deaths = certainReasons.entries.joinToString(",") { "${it.key}=${it.value}" }
                 logD("DramaTip.loadLinks $source ep=$ep video=${ordered.size} sub=$sentSub" +
-                    (firstLife?.let { " توكن=${it}s" } ?: ""))
+                    (firstLife?.let { " توكن=${it}s" } ?: "") +
+                    " موت-مثبت=[${deaths.ifBlank { "-" }}]")
                 return true
             }
             logE("DramaTip.loadLinks $source ep=$ep nothing survived probes")
@@ -2094,8 +2139,28 @@ class DramaTipProvider(private val prefs: SharedPreferences? = null) : MainAPI()
         declared: String?,
     ) {
         val tagged = FormatTag.tagged(label, url, kind, declared)
+        // ★★ 2026-10-18. **جذرٌ مُثبتٌ لعطب Petadrama، وخلافٌ بين المسبار والرابط.**
+        //
+        // كان البثّ يمرّر `reqHeaders()` — وهي تحمل `Referer` **ثابتًا** على
+        // `https://dramatip.net/ar` — بينما المسبار (`Probe.one`) يفحص بـ
+        // `platformReferer(url)`، أي مرجع المنصّة نفسها. فالفحص يقول «حيّ» عن
+        // مرجعٍ لا يطلبه اللاعب أبدًا، والرابط يُبثّ بمرجعٍ آخر يُرفض في الشوط
+        // الثاني: أي أنّ بوابة القبول تُخترَق بخلافٍ داخليّ لا بعطبٍ في الشبكة.
+        //
+        // وقِيس 2026-10-18 على ٢٤ منصّة (٣ حلقاتٍ لكلٍّ، ٢٧ زوج مضيف×مرجع، بلا
+        // رأس Range أي بشكل طلب اللاعب حرفيًّا):
+        //   - `cfcdn.petadrama.com` ←‏ **403** مع `dramatip.net/ar` و**200** مع
+        //     `https://petadrama.com/` (مرجع المنصّة). الفرق قاطع ومتكرّر.
+        //   - ولا مضيفَ واحد **يشترط** `dramatip.net/ar` (المجموعة المقابلة صفر).
+        //     ونقاط النارتو (`stream-e1`/`bibishort-e2` على narto-drama.com)
+        //     تقبله لأنّ `platformReferer` تُعيده صريحًا لمسارات `/e/m/` و`/e/s/`.
+        // فصار المرجع مرجعَ المنصّة، وهو **نفس ما يفحصه المسبار** — فلا يبقى
+        // اختلافٌ بين ما يُفحص وما يُبثّ. وهذا إصلاحٌ محض: لم يُسقط مضيفًا واحدًا
+        // ممّا كان يعمل (المقاس أعلاه).
+        val headers = reqHeaders().toMutableMap()
+        headers["Referer"] = platformReferer(url)
         collected.add(newExtractorLink(name, tagged, url, kind) {
-            this.headers = reqHeaders()
+            this.headers = headers
             if (!qLabel.isNullOrBlank()) {
                 val q = getQualityFromName(qLabel)
                 if (q > 0) this.quality = q
