@@ -1357,10 +1357,31 @@ class DramaTipProvider(private val prefs: SharedPreferences? = null) : MainAPI()
                 if (claimsHls && body.contains("#EXT-X-ENDLIST")) {
                     val child = firstChildOf(c.url?.toString() ?: u, body)
                     if (child != null) {
-                        val segCode = segStatus(child, platformReferer(child), ANDROID_UA)
+                        // ★ 2026-10-18. **مرجعُ القائمة لا مرجعُ الجزء.**
+                        //
+                        // اللاعب يرسل هامش `Referer` واحدًا لكلّ رحلات مصدرٍ واحد:
+                        // هو مرجعُ القائمة (`platformReferer(playUrl)`)، لا مرجعَ
+                        // مضيفِ الجزء. وقِيس على HappyShort أنّ قائمتها تُسلَّم من
+                        // `pl.shortdizilab.com` بينما أجزاؤها **موكَلة** خلف
+                        // `hls-proxy-i4ic7.b-cdn.net/?url=<media.tqshort.com/…>`.
+                        // فكانت `platformReferer(child)` تُرجع `https://b-cdn.net/`
+                        // (جذر مضيف الجزء) وهو **مرفوض** ‎403، بينما مرجع القائمة
+                        // `https://shortdizilab.com/` **مقبول** ‎200 — أي أنّ
+                        // المسبار كان يُسقط رابطًا حيًّا يصلحه اللاعب، فيظهر
+                        // «لم يعثر على روابط». والقاعدة: افحص الجزء بمَرجع القائمة.
+                        val segRef = platformReferer(c.url?.toString() ?: u)
+                        val segCode = segStatus(child, segRef, ANDROID_UA)
+                        // ★ 2026-10-18. **الشِّقّ المقلوب في بوّابة الإجماع.**
+                        //
+                        // التعليق يقول «لا يُسقط رابطٌ يقبله اللاعب»، لكن التنفيذ
+                        // كان يفعل العكس: `if (byPlayer in 400..499) byPlayer
+                        // else segCode` — فإذا قال فحص اللاعب إنّ الجزء **حيّ**
+                        // (‎200‎) رجع الحكم إلى `segCode` المرفوض ويُسقط. والصواب
+                        // أنّ قبولَ اللاعب يُبطل الرفض: نُرجع ‎-1‎ (خارج نطاق
+                        // ‎4xx‎) فلا يدخل `if (agreed in 400..499)` ولا يُسقَط.
                         val agreed = if (segCode in 400..499) {
                             val byPlayer = segStatus(child, TIP_MAIN, TIP_UA)
-                            if (byPlayer in 400..499) byPlayer else segCode
+                            if (byPlayer in 400..499) byPlayer else -1
                         } else segCode
                         if (agreed in 400..499) {
                             return Verdict(
