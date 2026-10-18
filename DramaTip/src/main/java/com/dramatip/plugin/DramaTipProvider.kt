@@ -770,6 +770,22 @@ class DramaTipProvider(private val prefs: SharedPreferences? = null) : MainAPI()
         if (host == null) return TIP_MAIN
         val parts = host.split('.')
         val root = if (parts.size >= 2) parts.takeLast(2).joinToString(".") else host
+        // ★ 2026-10-18. **فخّ سياسة مراجع الدلو على HappyShort.**
+        //
+        // `media.tqshort.com` يقف خلف حافّة CloudFront/S3 تحمل سياسة مراجع
+        // على الدلو، والقاعدة فيها تضادٌّ خبيث: `https://tqshort.com/` — وهو
+        // ما تُنتجه القاعدة العامة من آخر نطاقين — **مرفوضة** بـ403 جسمه
+        // `denied by bucket referer policy`، بينما `https://www.tqshort.com/`
+        // **مقبولة**، والمرجع الغائب (بلا Referer) كذلك. قِيس على الرابط
+        // نفسه في الالتقاط 2026-10-18:
+        //   none=200   tqshort.com/=403   www.tqshort.com/=200   dramatip=403
+        // أي أنّ الرابط حيٌّ والمرجع وحده هو ما يقتله. ولأنّ الفحص
+        // (`Probe.one`) والبثّ (`addLink`) كلاهما يمرّ عبر `platformReferer`
+        // — ويُقيس `segStatus` للأجزاء كذلك — كانت السياسة تُسقط رابطًا
+        // حيًّا فيُصنَّف موتًا قاطعًا فتُطرح الحلقة بـ«لم يعثر على روابط».
+        // والإصلاح هنا مرجعٌ واحد لا يمسّ منصّةً أخرى: لا مضيفٌ سوا tqshort
+        // ينتهي root=tqshort.com، وقِيس أنّ www مقبولة و200 ثابتة.
+        if (root == "tqshort.com") return "https://www.tqshort.com/"
         return "https://$root/"
     }
 
