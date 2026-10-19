@@ -8,9 +8,6 @@ import com.fasterxml.jackson.databind.ObjectMapper
 import com.fasterxml.jackson.module.kotlin.registerKotlinModule
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
-import kotlinx.coroutines.async
-import kotlinx.coroutines.coroutineScope
-import kotlinx.coroutines.awaitAll
 
 private val mapper = ObjectMapper().registerKotlinModule()
 
@@ -79,16 +76,15 @@ class CutDramaProvider(private val prefs: SharedPreferences? = null) : MainAPI()
      * الصفّ الأول «الرئيسية» يقرأ `/api/home` ويُظهر أقسام الموقع كما هي.
      */
     override val mainPage = mainPageOf(
-        "مقترحات عربية" to "home",
-        "الأحدث" to "sort=latest",
-        "مدبلج للعربية" to "translation=dubbed",
-        "رومانسي مدبلج" to "genre=romance&translation=dubbed",
-        "انتقام مدبلج" to "genre=revenge&translation=dubbed",
-        "فانتازيا مدبلجة" to "genre=fantasy&translation=dubbed",
-        "مستذئبون مدبلج" to "genre=werewolf&translation=dubbed",
-        "قوى خفية مدبلج" to "genre=master&translation=dubbed",
-        "أكشن وتشويق مدبلج" to "genre=action&translation=dubbed",
-        "دراما مكتبية مدبلج" to "genre=office&translation=dubbed",
+        "الأحدث المدبلج" to "sort=latest&translation=dubbed",
+        "رومانسي" to "genre=romance&translation=dubbed",
+        "انتقام" to "genre=revenge&translation=dubbed",
+        "فانتازيا وأساطير" to "genre=fantasy&translation=dubbed",
+        "بطلات قويات" to "genre=strong-heroine&translation=dubbed",
+        "مستذئبون" to "genre=werewolf&translation=dubbed",
+        "قوى خفية" to "genre=master&translation=dubbed",
+        "أكشن وتشويق" to "genre=action&translation=dubbed",
+        "عائلة ومشاعر" to "genre=family&translation=dubbed",
     )
 
     // ---------- كيان الموقع ----------
@@ -158,65 +154,45 @@ class CutDramaProvider(private val prefs: SharedPreferences? = null) : MainAPI()
 
     private fun List<JsonNode>.mapCards(): List<SearchResponse> = mapNotNull { it.toCard() }
 
+    /**
+     * هل في عنوان العمل حرفٌ عربي؟
+     *
+     * الموقع يخلط اللاتيني بالعربي في الاستجابة الواحدة (قيس: صفّ «بطلات
+     * قويات» ١٥/١٧ عربية)، والمستخدم طلب صفحةً رئيسية عربية — فيُسقَط من
+     * **الصفوف وحدها** ما لا عنوانَ عربيَّ له.
+     *
+     * ولا يُطبَّق على البحث: من يكتب عنوانًا لاتينيًّا (‏Sister Stole My Guy‏)
+     * يجب أن يجده، والباحث عن عملٍ بعينه لا يسأل عن لغته.
+     */
+    private fun JsonNode.hasArabicTitle(): Boolean {
+        val t = str("title") ?: str("title_original") ?: return false
+        return t.any { it.code in 0x0600..0x06FF }
+    }
+
+    private fun List<JsonNode>.mapArabicCards(): List<SearchResponse> =
+        mapNotNull { if (it.hasArabicTitle()) it.toCard() else null }
+
     // ---------- الصفحات ----------
 
     /**
-     * صفّ «الرئيسية»: أقسام `/api/home` كما هي بأسمائها العربية. كلّ الأقسام
-     * تُبنى من طلبٍ واحد، فلا تُكلِّف الظهور الأول بتسع طلبات متوازية.
-     * القسم بترتيب `hero` يُرسَم بالبانرات في الموقع، ونحن نعرضه صفًّا عاديًا
-     * لأنّ بطاقاته هي بطاقات الأعمال نفسها.
-     */
-    /**
-     * صفوف الصفحة الرئيسية — عربيةٌ كلّها.
+     * صفوف الصفحة الرئيسية — عربيةٌ كلّها، وكلٌّ منها استعلام `/api/discover` واحد.
      *
-     * قِيس على `/api/home`: الصفوفُ الثلاثة الأولى (`trending`/`popular`) ترد
-     * بعناوين لاتينية بالكامل (٠/١٢ عربية)، وصفوفُ التصنيفات كذلك — أي أنّ
-     * «الأبرز الآن» في الموقع يعرض أعمالًا لم تُعرَّب بعد. أمّا `translation=dubbed`
-     * فقد قيس ١٢/١٢ عربية في كلّ استعلامٍ جُرِّب، ومع أيّ تصنيف.
+     * قِيس على `/api/home`: الصفوفُ الأولى (`trending` و`popular`) ترد بعناوين
+     * لاتينية بالكامل — ٠/١٢ عربية — وكذلك صفوفُ التصنيفات فيه، أي أنّ «الأبرز
+     * الآن» في الموقع يعرض أعمالًا لم تُعرَّب. أمّا `translation=dubbed` فقد قيس
+     * ٢٤/٢٤ عربية في كلّ صفٍّ جُرِّب ومع كلّ تصنيف (بلا صورةٍ ناقصة).
      *
-     * فالصفوف تُبنى من `/api/discover` بـ`translation=dubbed`، وتُجلب متوازية
-     * ثمّ تُرتَّب في النتيجة — الترتيب في العائد لا في الإصدار، كي لا يكون
-     * زمنُ الظهور الأول مجموعَ الأزمنة (قِيس: كلّ صفٍّ طلبٌ واحد).
-     */
-    private suspend fun homeLists(): List<HomePageList> {
-        val rows = listOf(
-            "الأحدث المدبلج" to "sort=latest&translation=dubbed",
-            "رومانسي" to "genre=romance&translation=dubbed",
-            "انتقام" to "genre=revenge&translation=dubbed",
-            "فانتازيا وأساطير" to "genre=fantasy&translation=dubbed",
-            "مستذئبون" to "genre=werewolf&translation=dubbed",
-            "قوى خفية" to "genre=master&translation=dubbed",
-            "أكشن وتشويق" to "genre=action&translation=dubbed",
-            "عائلة ومشاعر" to "genre=family&translation=dubbed",
-        )
-        return coroutineScope {
-            rows.map { (title, qs) ->
-                async {
-                    val items = fetch("discover?limit=$PAGE_SIZE&offset=0&$qs")
-                        ?.arr("items")?.mapCards().orEmpty()
-                    if (items.isEmpty()) null else HomePageList(title, items)
-                }
-            }.awaitAll().filterNotNull()
-        }
-    }
-
-    /**
-     * الصفّان معًا: «الرئيسية» تقرأ `/api/home` وتُبقي أقسام الموقع بأسمائها،
-     * وسائر الصفوف تقرأ `/api/discover` بالترتيب والفلتر كما يبنيهما موقع الويب
-     * (`qsFor`)، فيترقّم كلٌّ منها بـ`offset` على حدة.
+     * فالمصدر يعرض صفوفًا من `discover` بمرشِّح التعريب، لا أقسام `/api/home`:
+     * كلٌّ استعلامٌ واحد بـ`offset` خاصّ، تمامًا كسائر الصفوف — فيبقى الظهور
+     * الأول بعدد الطلبات نفسها التي كان `/api/home` يكلّفها بلا زيادة.
      */
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse? {
         return try {
-            if (request.data == "home") {
-                if (page > 1) return newHomePageResponse(request.name, emptyList())
-                newHomePageResponse(homeLists(), false)
-            } else {
-                val offset = (page - 1) * PAGE_SIZE
-                val node = fetch("discover?limit=$PAGE_SIZE&offset=$offset&${request.data}")
-                val items = node?.arr("items")?.mapCards().orEmpty()
-                val total = node?.intOrNull("total") ?: 0
-                newHomePageResponse(request.name, items, offset + items.size < total)
-            }
+            val offset = (page - 1) * PAGE_SIZE
+            val node = fetch("discover?limit=$PAGE_SIZE&offset=$offset&${request.data}")
+            val items = node?.arr("items")?.mapArabicCards().orEmpty()
+            val total = node?.intOrNull("total") ?: 0
+            newHomePageResponse(request.name, items, offset + items.size < total)
         } catch (_: Exception) {
             null
         }
