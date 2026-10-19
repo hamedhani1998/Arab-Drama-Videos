@@ -29,8 +29,20 @@ jobs:
           ref: "builds"
           path: "builds"
 
-      - name: Clean old builds
-        run: rm -f $GITHUB_WORKSPACE/builds/*.cs3 $GITHUB_WORKSPACE/builds/plugins.json
+      # The builds branch is an artefact branch: nothing may live on it but the
+      # published .cs3 files, plugins.json and repo.json — all of which the
+      # steps below regenerate from scratch. It was originally cut from a full
+      # copy of the source tree, and the workflow only ever copied artefacts
+      # *in*, so 700+ stale files (the whole module tree, .kotlin compiler logs,
+      # .github) sat there and were re-committed on every build. Wiping the
+      # working tree first makes the branch converge on every run, and also
+      # drops .cs3 files left behind by plugins that no longer exist.
+      - name: Prune builds branch
+        run: |
+          cd $GITHUB_WORKSPACE/builds
+          find . -mindepth 1 -maxdepth 1 ! -name '.git' -exec rm -rf {} +
+          echo "pruned; remaining:"
+          ls -la
 
       - name: Set up JDK 17
         uses: actions/setup-java@v4
