@@ -1,0 +1,14 @@
+[
+    {
+        "merged": "com.hamedhani1998.MoviesMod-release-43:/color-night-v8/material_timepicker_clockface.xml",
+        "source": "com.hamedhani1998.MoviesMod-material-1.13.0-38:/color-night-v8/material_timepicker_clockface.xml"
+    },
+    {
+        "merged": "com.hamedhani1998.MoviesMod-release-43:/color-night-v8/material_timepicker_button_stroke.xml",
+        "source": "com.hamedhani1998.MoviesMod-material-1.13.0-38:/color-night-v8/material_timepicker_button_stroke.xml"
+    },
+    {
+        "merged": "com.hamedhani1998.MoviesMod-release-43:/color-night-v8/material_timepicker_modebutton_tint.xml",
+        "source": "com.hamedhani1998.MoviesMod-material-1.13.0-38:/color-night-v8/material_timepicker_modebutton_tint.xml"
+    }
+]

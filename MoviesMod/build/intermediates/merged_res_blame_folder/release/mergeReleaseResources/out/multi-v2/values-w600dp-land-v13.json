@@ -1,0 +1,34 @@
+{
+    "logs": [
+        {
+            "outputFile": "com.hamedhani1998.MoviesMod-release-43:/values-w600dp-land-v13/values-w600dp-land-v13.xml",
+            "map": [
+                {
+                    "source": "C:\\Users\\yemen\\.gradle\\caches\\8.13\\transforms\\fe503c1e75d59445f49ad4a6d5ab58e4\\transformed\\material-1.13.0\\res\\values-w600dp-land-v13\\values-w600dp-land-v13.xml",
+                    "from": {
+                        "startLines": "2",
+                        "startColumns": "4",
+                        "startOffsets": "55",
+                        "endColumns": "54",
+                        "endOffsets": "105"
+                    }
+                }
+            ]
+        },
+        {
+            "outputFile": "com.hamedhani1998.MoviesMod-mergeReleaseResources-41:/values-w600dp-land-v13/values-w600dp-land-v13.xml",
+            "map": [
+                {
+                    "source": "C:\\Users\\yemen\\.gradle\\caches\\8.13\\transforms\\fe503c1e75d59445f49ad4a6d5ab58e4\\transformed\\material-1.13.0\\res\\values-w600dp-land-v13\\values-w600dp-land-v13.xml",
+                    "from": {
+                        "startLines": "2",
+                        "startColumns": "4",
+                        "startOffsets": "55",
+                        "endColumns": "54",
+                        "endOffsets": "105"
+                    }
+                }
+            ]
+        }
+    ]
+}

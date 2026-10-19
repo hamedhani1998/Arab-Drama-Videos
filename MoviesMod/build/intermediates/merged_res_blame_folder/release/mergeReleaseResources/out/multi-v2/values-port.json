@@ -1,0 +1,34 @@
+{
+    "logs": [
+        {
+            "outputFile": "com.hamedhani1998.MoviesMod-release-43:/values-port/values-port.xml",
+            "map": [
+                {
+                    "source": "C:\\Users\\yemen\\.gradle\\caches\\8.13\\transforms\\723064af817ebff43d203bbc7626760b\\transformed\\appcompat-1.7.0\\res\\values-port\\values-port.xml",
+                    "from": {
+                        "startLines": "2",
+                        "startColumns": "4",
+                        "startOffsets": "55",
+                        "endColumns": "55",
+                        "endOffsets": "106"
+                    }
+                }
+            ]
+        },
+        {
+            "outputFile": "com.hamedhani1998.MoviesMod-mergeReleaseResources-41:/values-port/values-port.xml",
+            "map": [
+                {
+                    "source": "C:\\Users\\yemen\\.gradle\\caches\\8.13\\transforms\\723064af817ebff43d203bbc7626760b\\transformed\\appcompat-1.7.0\\res\\values-port\\values-port.xml",
+                    "from": {
+                        "startLines": "2",
+                        "startColumns": "4",
+                        "startOffsets": "55",
+                        "endColumns": "55",
+                        "endOffsets": "106"
+                    }
+                }
+            ]
+        }
+    ]
+}

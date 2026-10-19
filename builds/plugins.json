@@ -542,5 +542,25 @@
     "description": "قصة عشق - مسلسلات تركية مترجمة ومدبلجة",
     "url": "https://raw.githubusercontent.com/hamedhani1998/Arab-Drama-Videos/builds/ThreeSk.cs3",
     "name": "ThreeSk"
+  },
+  {
+    "url": "https://raw.githubusercontent.com/hamedhani1998/Arab-Drama-Videos/builds/MoviesMod.cs3",
+    "status": 1,
+    "version": 1,
+    "name": "MoviesMod",
+    "internalName": "MoviesMod",
+    "authors": [
+      "hamedhani1998"
+    ],
+    "description": "MoviesMod - أفلام ومسلسلات مع روابط التحميل المباشر",
+    "fileSize": 25246,
+    "fileHash": "sha256-cd842d0fa2df5bf747f64241d7e7001b3fb2713b2f8d6a40fb413b2e65b34732",
+    "repositoryUrl": "https://github.com/hamedhani1998/Arab-Drama-Videos",
+    "language": "ar",
+    "tvTypes": [
+      "Movie",
+      "TvSeries"
+    ],
+    "iconUrl": "https://moviesmod.uk.com/wp-content/uploads/2024/06/moviesmod-logo.png"
   }
 ]

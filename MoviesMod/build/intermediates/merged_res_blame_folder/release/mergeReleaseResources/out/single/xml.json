@@ -1,0 +1,22 @@
+[
+    {
+        "merged": "com.hamedhani1998.MoviesMod-release-43:/xml/m3_button_group_child_size_change.xml",
+        "source": "com.hamedhani1998.MoviesMod-material-1.13.0-38:/xml/m3_button_group_child_size_change.xml"
+    },
+    {
+        "merged": "com.hamedhani1998.MoviesMod-release-43:/xml/m3expressive_connected_buttons_inner_corner_size_state_list.xml",
+        "source": "com.hamedhani1998.MoviesMod-material-1.13.0-38:/xml/m3expressive_connected_buttons_inner_corner_size_state_list.xml"
+    },
+    {
+        "merged": "com.hamedhani1998.MoviesMod-release-43:/xml/m3_split_button_inner_corner_size_state_list.xml",
+        "source": "com.hamedhani1998.MoviesMod-material-1.13.0-38:/xml/m3_split_button_inner_corner_size_state_list.xml"
+    },
+    {
+        "merged": "com.hamedhani1998.MoviesMod-release-43:/xml/image_share_filepaths.xml",
+        "source": "com.hamedhani1998.MoviesMod-browser-1.9.0-17:/xml/image_share_filepaths.xml"
+    },
+    {
+        "merged": "com.hamedhani1998.MoviesMod-release-43:/xml/m3expressive_button_shape_state_list.xml",
+        "source": "com.hamedhani1998.MoviesMod-material-1.13.0-38:/xml/m3expressive_button_shape_state_list.xml"
+    }
+]

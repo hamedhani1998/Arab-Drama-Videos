@@ -1,0 +1,10 @@
+[
+    {
+        "merged": "com.hamedhani1998.MoviesMod-release-43:/layout-sw600dp-v13/design_layout_snackbar.xml",
+        "source": "com.hamedhani1998.MoviesMod-material-1.13.0-38:/layout-sw600dp-v13/design_layout_snackbar.xml"
+    },
+    {
+        "merged": "com.hamedhani1998.MoviesMod-release-43:/layout-sw600dp-v13/mtrl_layout_snackbar.xml",
+        "source": "com.hamedhani1998.MoviesMod-material-1.13.0-38:/layout-sw600dp-v13/mtrl_layout_snackbar.xml"
+    }
+]
