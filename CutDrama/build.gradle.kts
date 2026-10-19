@@ -1,4 +1,4 @@
-version = 5
+version = 6
 
 cloudstream {
     description = "إضافة CutDrama - دراما قصيرة بمجموعة جودات وترجمات لكل حلقة"

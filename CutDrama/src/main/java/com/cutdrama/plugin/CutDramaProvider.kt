@@ -73,18 +73,27 @@ class CutDramaProvider(private val prefs: SharedPreferences? = null) : MainAPI()
     /**
      * صفوف الصفحة الرئيسية. `data` هو نصّ الاستعلام كما يبنيه موقع الويب
      * في `browsePage` (`qsFor`) — نفس المعاملات حرفيًا، فلا نخترع بروتوكولًا.
-     * الصفّ الأول «الرئيسية» يقرأ `/api/home` ويُظهر أقسام الموقع كما هي.
+     *
+     * ★ **ترتيب الزوج مقلوب عمداً**: `mainPageOf` يبني `MainPageData(name, data)`
+     *   من `Pair` بترتيب `second → name` و`first → data` (قيس: الكودُ المُجمَّع للدالة
+     *   يمرّر `component2` ثم `component1`). فالأول الاستعلام والثاني العنوان:
+     *   `"الاستعلام" to "العنوان"`.
+     *
+     *   وعُكِس الترتيب في الإصدارات السابقة، فظهر العنوان نصًّا استعلاميًّا
+     *   في رأس الصفّ — و`request.data` صار العنوان العربي فذهب الطلب إلى
+     *   `discover?…&رومانسي` → ردّ غير JSON → `null` → الصفوف كلّها فارغة
+     *   بلا بطاقة واحدة. علامتان على الشاشة، سببهما خللّ واحد.
      */
     override val mainPage = mainPageOf(
-        "الأحدث المدبلج" to "sort=latest&translation=dubbed",
-        "رومانسي" to "genre=romance&translation=dubbed",
-        "انتقام" to "genre=revenge&translation=dubbed",
-        "فانتازيا وأساطير" to "genre=fantasy&translation=dubbed",
-        "بطلات قويات" to "genre=strong-heroine&translation=dubbed",
-        "مستذئبون" to "genre=werewolf&translation=dubbed",
-        "قوى خفية" to "genre=master&translation=dubbed",
-        "أكشن وتشويق" to "genre=action&translation=dubbed",
-        "عائلة ومشاعر" to "genre=family&translation=dubbed",
+        "sort=latest&translation=dubbed" to "الأحدث المدبلج",
+        "genre=romance&translation=dubbed" to "رومانسي",
+        "genre=revenge&translation=dubbed" to "انتقام",
+        "genre=fantasy&translation=dubbed" to "فانتازيا وأساطير",
+        "genre=strong-heroine&translation=dubbed" to "بطلات قويات",
+        "genre=werewolf&translation=dubbed" to "مستذئبون",
+        "genre=master&translation=dubbed" to "قوى خفية",
+        "genre=action&translation=dubbed" to "أكشن وتشويق",
+        "genre=family&translation=dubbed" to "عائلة ومشاعر",
     )
 
     // ---------- كيان الموقع ----------
