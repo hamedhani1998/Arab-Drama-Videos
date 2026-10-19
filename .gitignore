@@ -7,61 +7,16 @@ local.properties
 hs_err_pid*.log
 replay_pid*.log
 
-# Provider-level build output (Gradle caches) — but NOT root build/ (holds .cs3 files)
-OnShort/build/
-ArabShortDrama/build/
-NetShort/build/
-ReelShort/build/
-DirectDrama/build/
-Dramadunyam/build/
-DeepDrama/build/
-Drama4All/build/
-NartoDrama/build/
-StardustTV/build/
-extractors/build/
-Reelree/build/
-DramaGlance/build/
-HuangguoDrama/build/
-Aflamk1/build/
-ArabHubX/build/
-ArabNok/build/
-ArabSex1/build/
-ArabSexXxx/build/
-ArabSexx/build/
-ArabxCam/build/
-ArbNaar/build/
-Arbada/build/
-FagerNeek/build/
-FreeSexArab/build/
-Sex6x/build/
-SexAlArab/build/
-SexAlArabNet/build/
-SexAllArab/build/
-SexArab69/build/
-SexArabFun/build/
-SexSatee/build/
-Sexalarab11/build/
-XNXX3rab/build/
-Zebawy/build/
-Zebzob/build/
-MinuteDrama/build/
-ThreeSk/build/
-NartoEdge/build/
-kirmzi/build/
-krmzi/build/
-lodynet/build/
-aryarabia/build/
-mosalsaly/build/
-pakistanilive/build/
-build/reports/
+# Gradle build output — every module's build/ and the root one.
+# Previously enumerated per module by hand, which silently missed
+# MoviesMod, DramaMondo and FullDrama — 2800 files got committed.
+build/
+builds/
+
+# Build artefacts that used to be committed at the repository root.
+# The app only ever reads these from the builds branch, never from here.
+*.cs3
+/plugins.json
 
 # Scratch / dev probes
 _tmp/
-humarabia/build/
-ShortDramaAR/build/
-DramaTip/build/
-
-DramaVideoShow/build/
-ShahidFree/build/
-ArabTools/build/
-CutDrama/build/
