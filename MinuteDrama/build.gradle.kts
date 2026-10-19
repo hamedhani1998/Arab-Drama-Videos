@@ -1,4 +1,4 @@
-﻿version = 1
+version = 1
 
 cloudstream {
     description = "إضافة MinuteDrama - مسلسلات دراما قصيرة إنجليزية"
