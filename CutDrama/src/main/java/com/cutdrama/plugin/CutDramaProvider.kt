@@ -1,5 +1,6 @@
 package com.cutdrama.plugin
 
+import android.util.Log
 import cloudstreamshared.FormatTag
 import com.fasterxml.jackson.databind.JsonNode
 import com.fasterxml.jackson.databind.ObjectMapper
@@ -55,6 +56,7 @@ private const val CACHE_MS = 60_000L
  *   على الموقع، أمّا `loadLinks` فيُبقيها بلا سيرفر — لا اختراع لرابط.
  */
 class CutDramaProvider : MainAPI() {
+    private val TAG = "CutDrama"
     override var name = "CutDrama"
     override var mainUrl = "https://cutdrama.cam"
     override var lang = "ar"
@@ -289,23 +291,53 @@ class CutDramaProvider : MainAPI() {
         callback: (ExtractorLink) -> Unit
     ): Boolean {
         return try {
-            val parts = data.split("|", limit = 2)
-            if (parts.size < 2) return false
-            val dramaId = parts[0].trim()
-            val epId = parts[1].trim().toIntOrNull() ?: return false
-            if (dramaId.isBlank()) return false
+            // الحِمل «id|epId» — بمؤشّر ثابت لا بموقع، لأنّ CloudStream قدّ يُسبِقه
+            // بـ`mainUrl` حين لا يبدؤ بـhttp، فيصير ما نستقبله
+            // «https://cutdrama.cam/355|16032» لا «355|16032» — والتقسيم الموضعي
+            // يعطي dramaId يحمل رابطًا → `dramas/https://…` → 404 → «لا روابط».
+            Log.i(TAG, "loadLinks raw=$data")
+            val m = Regex("""(\d+)\|(\d+)""").find(data)
+            if (m == null) {
+                Log.i(TAG, "loadLinks FAIL parse raw=$data")
+                return false
+            }
+            val dramaId = m.groupValues[1]
+            val epId = m.groupValues[2].toIntOrNull()
+            if (epId == null) {
+                Log.i(TAG, "loadLinks FAIL epId raw=$data")
+                return false
+            }
 
             // نقرأ من صفحة المسلسل لا من `/episodes/{id}/playback`: تلك ترفض
             // الزائر بـ401، وهذه تحمل نفس المرآة موقّعة لـ`uid=0` ومُدمجة أصلًا.
-            val d = fetch("dramas/$dramaId") ?: return false
-            val ep = d.arr("episodes").firstOrNull { it.intOrNull("id") == epId } ?: return false
+            val d = fetch("dramas/$dramaId")
+            if (d == null) {
+                Log.i(TAG, "loadLinks FAIL fetch dramaId=$dramaId raw=$data")
+                return false
+            }
+            val ep = d.arr("episodes").firstOrNull { it.intOrNull("id") == epId }
+            if (ep == null) {
+                Log.i(TAG, "loadLinks FAIL episode dramaId=$dramaId epId=$epId")
+                return false
+            }
 
             val locked = ep.get("access")?.get("locked")?.takeIf { !it.isNull }?.asBoolean(true) ?: true
-            if (locked) return false
+            if (locked) {
+                Log.i(TAG, "loadLinks FAIL locked epId=$epId")
+                return false
+            }
 
-            val pb = ep.get("playback") ?: return false
+            val pb = ep.get("playback")
+            if (pb == null) {
+                Log.i(TAG, "loadLinks FAIL no-playback epId=$epId")
+                return false
+            }
             val mirrors = pb.arr("mirrors").filter { !it.str("url").isNullOrBlank() }
-            if (mirrors.isEmpty()) return false
+            if (mirrors.isEmpty()) {
+                Log.i(TAG, "loadLinks FAIL no-mirrors epId=$epId")
+                return false
+            }
+            Log.i(TAG, "loadLinks OK dramaId=$dramaId epId=$epId mirrors=${mirrors.size}")
 
             // الترجمات — ٣١ لغة، والمسار علني لكلّ حلقة حرة. نمرّر الرمز
             // IETF كما هو (`ar-SA`) لا الاسم اللاتيني، كي لا يسقط الوسم.
@@ -343,7 +375,8 @@ class CutDramaProvider : MainAPI() {
                 }
 
             true
-        } catch (_: Exception) {
+        } catch (e: Exception) {
+            Log.i(TAG, "loadLinks FAIL exception ${e::class.simpleName} ${e.message}")
             false
         }
     }
