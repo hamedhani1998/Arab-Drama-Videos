@@ -1,5 +1,6 @@
 package com.cutdrama.plugin
 
+import android.content.SharedPreferences
 import android.util.Log
 import cloudstreamshared.FormatTag
 import com.fasterxml.jackson.databind.JsonNode
@@ -7,6 +8,9 @@ import com.fasterxml.jackson.databind.ObjectMapper
 import com.fasterxml.jackson.module.kotlin.registerKotlinModule
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
+import kotlinx.coroutines.async
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.awaitAll
 
 private val mapper = ObjectMapper().registerKotlinModule()
 
@@ -55,7 +59,7 @@ private const val CACHE_MS = 60_000L
  *   وترجمتها 403 حتى بتوكن. تُدرَج في القائمة كي يظهر المسلسل كاملًا كما هو
  *   على الموقع، أمّا `loadLinks` فيُبقيها بلا سيرفر — لا اختراع لرابط.
  */
-class CutDramaProvider : MainAPI() {
+class CutDramaProvider(private val prefs: SharedPreferences? = null) : MainAPI() {
     private val TAG = "CutDrama"
     override var name = "CutDrama"
     override var mainUrl = "https://cutdrama.cam"
@@ -75,14 +79,16 @@ class CutDramaProvider : MainAPI() {
      * الصفّ الأول «الرئيسية» يقرأ `/api/home` ويُظهر أقسام الموقع كما هي.
      */
     override val mainPage = mainPageOf(
-        "الرئيسية" to "home",
-        "الأكثر مشاهدة" to "sort=popular",
+        "مقترحات عربية" to "home",
         "الأحدث" to "sort=latest",
-        "الأعلى تقييمًا" to "sort=rating",
-        "الأكثر حلقات" to "sort=episodes",
-        "مدبلج للعربية" to "sort=popular&translation=dubbed",
-        "دراما آسيوية" to "sort=popular&language=asia",
-        "دراما غربية" to "sort=popular&language=west",
+        "مدبلج للعربية" to "translation=dubbed",
+        "رومانسي مدبلج" to "genre=romance&translation=dubbed",
+        "انتقام مدبلج" to "genre=revenge&translation=dubbed",
+        "فانتازيا مدبلجة" to "genre=fantasy&translation=dubbed",
+        "مستذئبون مدبلج" to "genre=werewolf&translation=dubbed",
+        "قوى خفية مدبلج" to "genre=master&translation=dubbed",
+        "أكشن وتشويق مدبلج" to "genre=action&translation=dubbed",
+        "دراما مكتبية مدبلج" to "genre=office&translation=dubbed",
     )
 
     // ---------- كيان الموقع ----------
@@ -160,17 +166,38 @@ class CutDramaProvider : MainAPI() {
      * القسم بترتيب `hero` يُرسَم بالبانرات في الموقع، ونحن نعرضه صفًّا عاديًا
      * لأنّ بطاقاته هي بطاقات الأعمال نفسها.
      */
+    /**
+     * صفوف الصفحة الرئيسية — عربيةٌ كلّها.
+     *
+     * قِيس على `/api/home`: الصفوفُ الثلاثة الأولى (`trending`/`popular`) ترد
+     * بعناوين لاتينية بالكامل (٠/١٢ عربية)، وصفوفُ التصنيفات كذلك — أي أنّ
+     * «الأبرز الآن» في الموقع يعرض أعمالًا لم تُعرَّب بعد. أمّا `translation=dubbed`
+     * فقد قيس ١٢/١٢ عربية في كلّ استعلامٍ جُرِّب، ومع أيّ تصنيف.
+     *
+     * فالصفوف تُبنى من `/api/discover` بـ`translation=dubbed`، وتُجلب متوازية
+     * ثمّ تُرتَّب في النتيجة — الترتيب في العائد لا في الإصدار، كي لا يكون
+     * زمنُ الظهور الأول مجموعَ الأزمنة (قِيس: كلّ صفٍّ طلبٌ واحد).
+     */
     private suspend fun homeLists(): List<HomePageList> {
-        val home = fetch("home") ?: return emptyList()
-        val lists = home.arr("sections").mapNotNull { sec ->
-            val title = sec.str("title") ?: return@mapNotNull null
-            val items = sec.arr("items").mapCards()
-            if (items.isEmpty()) null else HomePageList(title, items)
-        }.toMutableList()
-        home.arr("recommendations").mapCards().takeIf { it.isNotEmpty() }?.let {
-            lists.add(HomePageList("مرشّح لك", it))
+        val rows = listOf(
+            "الأحدث المدبلج" to "sort=latest&translation=dubbed",
+            "رومانسي" to "genre=romance&translation=dubbed",
+            "انتقام" to "genre=revenge&translation=dubbed",
+            "فانتازيا وأساطير" to "genre=fantasy&translation=dubbed",
+            "مستذئبون" to "genre=werewolf&translation=dubbed",
+            "قوى خفية" to "genre=master&translation=dubbed",
+            "أكشن وتشويق" to "genre=action&translation=dubbed",
+            "عائلة ومشاعر" to "genre=family&translation=dubbed",
+        )
+        return coroutineScope {
+            rows.map { (title, qs) ->
+                async {
+                    val items = fetch("discover?limit=$PAGE_SIZE&offset=0&$qs")
+                        ?.arr("items")?.mapCards().orEmpty()
+                    if (items.isEmpty()) null else HomePageList(title, items)
+                }
+            }.awaitAll().filterNotNull()
         }
-        return lists
     }
 
     /**
@@ -347,10 +374,24 @@ class CutDramaProvider : MainAPI() {
                 subtitleCallback(newSubtitleFile(subLangLabel(lang), fixUrl(path)))
             }
 
-            mirrors.sortedWith(
+            val base = mirrors.sortedWith(
                 compareBy<JsonNode>({ mirrorRank(it) }, { -(mirrorQuality(it) ?: 0) })
             )
-                .forEach { m ->
+            val showAdaptive = prefs?.getBoolean(CutDramaSettingsBottomSheet.KEY_SHOW_ADAPTIVE, true) ?: true
+            val qualityOrder = prefs?.getString(CutDramaSettingsBottomSheet.KEY_QUALITY_ORDER, "default") ?: "default"
+
+            // الحلقات ٢+ لا تحمل في الموقع إلا مرايا «المزوّد» وحدها (قيس: حلقة ‎٢‎
+            // مرآتان، ‎٣‎ مرآتان، ‎٤‎ مرآة واحدة — كلّها `source=provider`). فإطفاء
+            // خيار المزوّد كان يُفرغ تلك الحلقات تمامًا ويعيد «لا روابط» — وهو
+            // الخللُ الذي نُصلحه لا نُعيده. فإن أفرغ المرشِّحُ القائمةَ يُلغى.
+            var ordered = if (showAdaptive) base else base.filterNot { it.str("source") == "provider" }
+            if (ordered.isEmpty()) ordered = base
+            when (qualityOrder) {
+                "asc" -> ordered = ordered.sortedBy { mirrorQuality(it) ?: Int.MAX_VALUE }
+                "desc" -> ordered = ordered.sortedByDescending { mirrorQuality(it) ?: Int.MIN_VALUE }
+            }
+
+            ordered.forEach { m ->
                     val raw = m.str("url") ?: return@forEach
                     val url = fixUrl(raw)
                     val quality = mirrorQuality(m)

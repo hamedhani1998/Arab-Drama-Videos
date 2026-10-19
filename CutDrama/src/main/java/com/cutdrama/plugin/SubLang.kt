@@ -18,14 +18,24 @@ import com.lagradost.cloudstream3.utils.SubtitleHelper
  * كلُّ فشلٍ في الاشتقاق يُعيد `raw` كما هو: لا اختراعٌ ولا رفض.
  * (قِيس كلّ مسارٍ أدناه على cloudstream.jar 2026-10-08.)
  *
- * CutDrama يرسل الرمز IETF كاملاً (`ar-SA`, `zh-TW`, `nb-NO`) لا الاسم،
- * فالتحقّق هنا من أنّ الرمز الكاملاً يعبر الأدراج الثلاثة دون أن يُكسر.
+ * CutDrama يرسل الرمز IETF كاملاً (`ar-SA`, `zh-TW`, `nb-NO`) لا الاسم.
+ * وقِيس على الـjar: `fromCodeToLangTagIETF("ar-SA")` تعيد `null` — الخرائط
+ * تعرف الرمز الأساسي وحده (`ar`). فبلا تجريدٍ للأساس كان ٢٨ رمزًا من ٣١
+ * يسقط إلى `raw`، و`getLangTag()` على `"ar-SA"` يعيد `null` — أي لا اختيارًا
+ * تلقائيًّا بين الحلقات ولا حفظًا للاختيار، وهو عينُ ما تُصلحه هذه الدالة.
+ *
+ * فالسلسلة: الرمز الكامل، ثمّ الأساس قبل الشرطة، ثمّ خريطة الأسماء الخامّة.
+ * وكلُّ فشلٍ يُعيد `raw` كما هو: لا اختراعٌ ولا رفض.
  */
 internal fun subLangLabel(raw: String): String {
     if (raw.isEmpty()) return raw
+    val base = raw.trim().substringBefore('-')
     val tag = SubtitleHelper.fromCodeToLangTagIETF(raw)
         ?: SubtitleHelper.fromLanguageToTagIETF(raw, true)
         ?: KNOWN_SUB_LANG[raw.trim()]
+        ?: SubtitleHelper.fromCodeToLangTagIETF(base)
+        ?: SubtitleHelper.fromLanguageToTagIETF(base, true)
+        ?: KNOWN_SUB_LANG[base]
         ?: return raw
     val ar = SubtitleHelper.fromTagToLanguageName(tag, "ar") ?: return raw
     val en = SubtitleHelper.fromTagToEnglishLanguageName(tag) ?: return raw
