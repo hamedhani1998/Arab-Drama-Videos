@@ -668,12 +668,21 @@ class MoviesModProvider(private val prefs: SharedPreferences? = null) : MainAPI(
                     } else {
                         Log.i(TAG, "followChain try$i hop$hops B[0]=${body.take(400)}")
                     }
-                    // look for driveseed links directly
-                    Regex("https?://[^\"'\\s<>]*driveseed[^\"'\\s<>/]+/file/[^\"'\\s<>]+").find(body)?.let { return it.value }
-                    Regex("https?://[^\"'\\s<>]*driveseed[^\"'\\s<>]+/r\\?[^\"'\\s<>]+").find(body)?.let { return it.value }
-                    Regex("https?://[^\"'\\s<>]*driveseed[^\"'\\s<>]+/[^\"'\\s<>]+").find(body)?.let {
-                        val v = it.value
+                    // look for driveseed links directly - be very aggressive
+                    Regex("https?://[^\"'\\s<> ]*driveseed[^\"'\\s<> ]*/file/[^\"'\\s<> ]+").find(body)?.let { return it.value.replace("\\/", "/") }
+                    Regex("https?://[^\"'\\s<> ]*driveseed[^\"'\\s<> ]*/r\\?[^\"'\\s<> ]+").find(body)?.let { return it.value.replace("\\/", "/") }
+                    Regex("https?://[^\"'\\s<> ]*driveseed[^\"'\\s<> ]+/[^\"'\\s<> ]+").find(body)?.let {
+                        val v = it.value.replace("\\/", "/")
                         if (v.contains("/file/") || v.contains("/r?") || v.contains("download") || v.contains("drive")) return v
+                    }
+                    // look for any driveseed in the whole body
+                    Regex("driveseed\\.[a-zA-Z]+/[^\"'\\s<> ]+").findAll(body).forEach { m ->
+                        val v = "https://${m.value.replace("\\/", "/")}"
+                        if (v.contains("/file/") || v.contains("/r?")) return v
+                    }
+                    Regex("driveseed[^\"'\\s<> ]+/file/[^\"'\\s<> ]+").findAll(body).forEach { m ->
+                        val v = "https://${m.value.replace("\\/", "/")}"
+                        return v
                     }
                     // also look for lp-s1-form anywhere
                     Regex("<form[^>]*lp-s1-form[^>]*>(.*?)</form>", RegexOption.DOT_MATCHES_ALL).find(body)?.let { fm ->
