@@ -592,7 +592,7 @@ class MoviesModProvider(private val prefs: SharedPreferences? = null) : MainAPI(
             Log.i(TAG, "resolve: direct sid=$sid")
         } else {
             val (body, finalUrl) = try {
-                val r = app.get(archive, headers = head, allowRedirects = true)
+                val r = app.get(archive, headers = head, allowRedirects = true, referer = mainUrl)
                 if (!r.isSuccessful) return emptyList()
                 r.text to r.url.toString()
             } catch (e: Exception) {
@@ -606,34 +606,36 @@ class MoviesModProvider(private val prefs: SharedPreferences? = null) : MainAPI(
                 sid = finalUrl
                 label = serverLabel
                 Log.i(TAG, "resolve: redirected to sid=$sid")
-            } else if (body.contains("lp-land") || body.contains("_lp_http") || body.contains("lp-s1-form")) {
+            } else if (finalUrl.contains("en.thenaukriadda.in")) {
                 sid = finalUrl
                 label = serverLabel
-                Log.i(TAG, "resolve: using lp page as start=$sid")
+                Log.i(TAG, "resolve: final is thenaukriadda=$sid")
             } else {
-                val pairs = RE_SID.findAll(body)
-                    .map { unescapeText(it.groupValues[1]).replace(RE_WS, "") to stripTags(it.groupValues[2]) }
-                    .filterNot { it.second.contains("comment", true) }
-                    .toList()
-                if (pairs.isEmpty()) {
-                    // try to find any sid in body
-                    val anySid = Regex("https?://[^\"'\\s<>]+en\\.thenaukriadda\\.in/\\?[^\"'\\s<>]*sid=[^\"'\\s<>]+").find(body)
-                    if (anySid != null) {
-                        sid = anySid.value
-                        label = serverLabel
-                        Log.i(TAG, "resolve: found sid in body=$sid")
-                    } else {
-                        // maybe the page itself IS the lp page?
-                        // try to follow from finalUrl
+                // look for direct thenaukriadda sid links first
+                val anySid = Regex("https?://[^\"'\\s<>]+en\\.thenaukriadda\\.in/\\?[^\"'\\s<>]*sid=[^\"'\\s<>]+").find(body)
+                if (anySid != null) {
+                    sid = anySid.value
+                    label = serverLabel
+                    Log.i(TAG, "resolve: found sid link in body=$sid")
+                } else if (body.contains("lp-land") || body.contains("_lp_http") || body.contains("lp-s1-form") || body.contains("thenaukriadda.in") || body.contains("timed-content")) {
+                    sid = finalUrl
+                    label = serverLabel
+                    Log.i(TAG, "resolve: using lp page as start=$sid")
+                } else {
+                    val pairs = RE_SID.findAll(body)
+                        .map { unescapeText(it.groupValues[1]).replace(RE_WS, "") to stripTags(it.groupValues[2]) }
+                        .filterNot { it.second.contains("comment", true) }
+                        .toList()
+                    if (pairs.isEmpty()) {
                         sid = finalUrl
                         label = serverLabel
                         Log.i(TAG, "resolve: using finalUrl as start=$sid")
+                    } else {
+                        // مرآةٌ واحدة تكفي: المطابقة لاسم المرآة إن طُلب، وإلا الأولى.
+                        val pick = serverLabel?.let { want -> pairs.firstOrNull { it.second.contains(want, true) } } ?: pairs.first()
+                        sid = pick.first
+                        label = pick.second
                     }
-                } else {
-                    // مرآةٌ واحدة تكفي: المطابقة لاسم المرآة إن طُلب، وإلا الأولى.
-                    val pick = serverLabel?.let { want -> pairs.firstOrNull { it.second.contains(want, true) } } ?: pairs.first()
-                    sid = pick.first
-                    label = pick.second
                 }
             }
         }
