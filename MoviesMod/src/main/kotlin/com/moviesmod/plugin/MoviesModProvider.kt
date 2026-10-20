@@ -571,12 +571,14 @@ class MoviesModProvider(private val prefs: SharedPreferences? = null) : MainAPI(
      */
     private suspend fun resolve(archive: String, serverLabel: String?): List<Cand> {
         if (archive.isBlank()) return emptyList()
+        Log.i(TAG, "resolve: start ${archive.take(80)} label=$serverLabel")
 
         val sid: String
         val label: String?
         if (archive.contains("?sid=")) {
             sid = archive
             label = serverLabel
+            Log.i(TAG, "resolve: direct sid")
         } else {
             val body = try {
                 val r = app.get(archive, headers = head)
