@@ -11,9 +11,7 @@ import com.lagradost.cloudstream3.utils.ExtractorLink
 import com.lagradost.cloudstream3.utils.ExtractorLinkType
 import com.lagradost.cloudstream3.utils.getQualityFromName
 import com.lagradost.cloudstream3.utils.newExtractorLink
-import kotlinx.coroutines.async
-import kotlinx.coroutines.awaitAll
-import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.withTimeoutOrNull
 import java.net.URLEncoder
 
 private val mapper = ObjectMapper().registerKotlinModule()
@@ -23,6 +21,20 @@ private const val TAG = "RimShort"
 
 /** لغة الاستعلامات في الـAPI — الموقع يخدم العربية على `/ar` والباقي بلا تغيير. */
 private const val API_LANG = "ar"
+
+/**
+ * سقف انتظار الواجهة الرئيسية.
+ *
+ * الموقع نفسه هو البطيء لا الكود: `/api/home` قِيس ٢٠٢٦-١٠-٢٠ بين ٠٫٦ث و٢٢ث
+ * (`ttfb` وحده بين ٠٫٦ث و٢٢ث)، والاستجابة ١٨٣ كيلوبايت لا تقبل التقسيم — لا
+ * `limit` ولا `shelf` ولا `page` تُقلّلها (كلّها مُتجاهَلة، والردّ واحد بالحجم
+ * نفسه). فما بقي إلا سقفٌ صريح.
+ *
+ * ولاستخدام السقف فائدةٌ ثانية: الحافّة تخزّن الردّ يوماً كاملاً
+ * (`s-maxage=86400`)، فانتهاء المهلة هنا يُسخّن الحافّة ويجعل إعادة المحاولة
+ * سريعة — وذلك أهون من دوّارٍ لا ينتهي.
+ */
+private const val HOME_BUDGET_MS = 10_000L
 
 /**
  * عملٌ مصغّر كما تعيده `/api/home` و`/api/search` — **لا** يُشترك نموذجَه مع
@@ -146,7 +158,14 @@ class RimShortProvider(private val prefs: SharedPreferences? = null) : MainAPI()
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse? {
         if (page > 1) return null
         return try {
-            val text = apiJson("/api/home?lang=$API_LANG") ?: return null
+            // سقفٌ صريح: مهلة الـOkHttp الافتراضية دقائق، فسطرٌ بطيء يُبقي
+            // الواجهة فارغة كل ذلك الوقت. عند انتهاء المهلة يعود `null` —
+            // والتطبيق يعرض واجهةً بديلة أو رسالة بدل دوّارٍ لا ينتهي.
+            val text = withTimeoutOrNull(HOME_BUDGET_MS) { apiJson("/api/home?lang=$API_LANG") }
+                ?: run {
+                    Log.e(TAG, "getMainPage over budget ${HOME_BUDGET_MS}ms")
+                    return null
+                }
             val home = mapper.readValue(text, HomeResponse::class.java)
             val rows = ArrayList<HomePageList>()
 
@@ -319,32 +338,43 @@ class RimShortProvider(private val prefs: SharedPreferences? = null) : MainAPI()
             }
             val playlistUrl = abs(stream)
 
-            // سيرفرٌ واحد لكل حلقة — هذا ما يقيسه كل ما جرّبناه: `videoUrl` حقلٌ
-            // واحد، ولا منتقي سيرفرات في الواجهة، و`line`/`server`/`quality`/
-            // `format` مُتجاهَلة كلّها، ولواحق الجودات (‑ld/‑hd/‑fhd/‑hd2/‑sd2)
-            // تردّ 404. فما «السيرفرات» هنا إلا درجات القائمة الواحدة، وهي التي
-            // كان الكود السابق يُسقطها: يبثّ رابط القائمة الواحد ولا يقرأها.
+            // ============ سيرفرات التشغيل: لماذا لا نقرأ القائمة دائماً ============
             //
-            // وقائمتان مقيستان (٦٦ عملاً، ٢٠٢٦-١٠-٢٠):
-            // - تكيّفية (~١٣٪): `h264/h264_XXXXXXXX.m3u8` بـ٣ درجات حقيقية
-            //   (540×960/720×1280/1080×1920 — كلّها 200 ومقاطعها 206) و١٩ مسار
-            //   ترجمة. ثابتة لكل حلقات العمل: فُحصت أول حلقة وآخرها في ٥ أعمال.
-            // - مفردة (~٨٧٪): `<hash>-<hash>-sd.m3u8` بلا درجات ولا ترجمات.
-            val playlist = fetchPlaylist(playlistUrl)
-            val parsed = playlist?.let { parsePlaylist(it, playlistUrl) }
+            // سيرفرٌ واحد لكل حلقة: `videoUrl` حقلٌ واحد، ولا منتقي سيرفرات في
+            // الواجهة، و`line`/`server`/`quality`/`format` مُتجاهَلة، ولواحق
+            // الجودات (‑ld/‑hd/‑fhd/‑hd2/‑sd2) تردّ 404. فما «السيرفرات» إلا
+            // درجات القائمة الواحدة.
+            //
+            // لكن انتظار القائمة قبل إرسال أي رابط هو ما جعل الدوّار لا ينتهي:
+            // التطبيق (`ResultViewModel2.loadLinks`) يُجمِّع الروابط في مجموعةٍ
+            // ويُعيدها **دفعةً واحدة بعد رجوع `loadLinks`**، ودوّاره `_loadedLinks`
+            // يبقى طوال ذلك. وقائمة هذا الموقع قِيس ٢٠٢٦-١٠-٢٠ بين ٠٫٧ث و٢٣ث
+            // (وتأخّرت مرّةً حتى المهلة فسقطت)، فالانتظار كان يقع كله على البثّ.
+            //
+            // والحلّ: شكل الرابط نفسه يقول أيّ قائمةٍ هي، بلا أي جلب.
+            // مقياسٌ على **١٠٣ أعمال: صفر مخالفة** —
+            //   `/h264/` في المسار  ⟺  قائمةٌ تكيّفية (٣ درجات + ١٩ ترجمة)
+            //   وما عداه                ⟺  قائمةٌ مفردة (لا درجات ولا ترجمات)
+            // والتكيّفيّ نادر: **١ من ١٠٣ (٠٫٩٧٪)**. فالغالبية تُبَثّ فوراً،
+            // والنادر وحده ينتظر القائمة ليُظهر جوداته الثلاث.
+            val declared = v.videoType?.let { FormatTag.fromMime(it) ?: it.trim().uppercase() }
+
+            val adaptive = ADAPTIVE_PATH.containsMatchIn(playlistUrl)
+            val parsed = if (adaptive) {
+                // سقفٌ للقائمة النادرة وحدها: بعد انتهائه يُبَثّ رابطها كما هو
+                // (المشغّل يقرأ القائمة التكيّفية بنفسه)، فلا ينكسر شيء.
+                val text = withTimeoutOrNull(PLAYLIST_BUDGET_MS) { fetchPlaylist(playlistUrl) }
+                if (text == null) Log.e(TAG, "master over budget id=$id ep=$ep")
+                text?.let { parsePlaylist(it, playlistUrl) }
+            } else {
+                null
+            }
             val variants = parsed?.variants.orEmpty()
 
             // بلا درجات (مفردة، أو فشل جلب القائمة) يبقى رابط القائمة نفسه صالحاً
             // للتشغيل — فالفشل هنا لا يُسقط البثّ.
             val streams = if (variants.isNotEmpty()) variants
             else listOf(Variant(playlistUrl, qOf(playlistUrl)))
-
-            // ما أعلنه الموقع في `videoType` (قِيس: `application/x-mpegURL` و`hls`)
-            // يُحوَّل إلى وسمٍ قصير عبر `FormatTag.fromMime` قبل تمريره: تمرير
-            // الإعلان خاماً يعطي `[APPLICATION/X-MPEGURL]`، وهو أطول من الاسم نفسه.
-            // والامتداد في المسار يبقى الحاكم أولاً، فهذا احتياطٌ ليومٍ يأتي فيه
-            // رابطٌ بلا امتداد — فيكون الفاصل بين M3U8 وHLS وMP4 بدل «[VIDEO]».
-            val declared = v.videoType?.let { FormatTag.fromMime(it) ?: it.trim().uppercase() }
 
             for (s in streams) {
                 // الجودة المقيسة ثم وسم الصيغة في الاسم — التطبيق يعرض
@@ -384,15 +414,17 @@ class RimShortProvider(private val prefs: SharedPreferences? = null) : MainAPI()
     /**
      * إظهار ترجمات القائمة التكيّفية — ١٩ لغة، والعربية فيها.
      *
-     * ولماذا لا تُمرَّر روابط المسارات كما هي: `URI` في `#EXT-X-MEDIA` قائمةُ
-     * ترجمةٍ بدورها (`subtitle_<hash>/ar.m3u8`) وفيها ملفّ `.vtt` واحد
-     * (`ar-00001.vtt`). والمشغّل يُسلَّم ملفَّ ترجمةٍ لا قائمة تشغيل، فيُجلَب
-     * المسار ويُستخرج ملفّه. قِيس ٢٠٢٦-١٠-٢٠: ١٩/١٩ تنجح دفعةً واحدة في ~٤ث
-     * (وكلّها على CDN منفصل عن مضيف الـAPI المسقوف)، والـVTT عربيٌّ حقيقي
-     * (`text/vtt`، ١٣١٦–٢٣٨٢ بايتاً، `WEBVTT` و`X-TIMESTAMP-MAP`).
+     * **بلا أي جلب.** `URI` في `#EXT-X-MEDIA` قائمةُ ترجمةٍ (`subtitle_<hash>/ar.m3u8`)
+     * وفيها ملفّ `.vtt` واحد باسم `<اللغة>-00001.vtt` — نمطٌ ثابت قِيس
+     * ٢٠٢٦-١٠-٢٠ على **١٩/١٩ مساراً** في العمل التكيّفيّ، وعلى رابطٍ مشتقٍّ
+     * بلا قراءة القائمة الفرعية أصلاً: **١٩/١٩ يردّ 200 و`WEBVTT` صحيحاً**.
+     * فالمسار يُبنى من نص القائمة وحدها.
      *
-     * ومسارٌ فشل جلبُه يُسقَط ولا يُمرَّر رابط قائمته بدلاً منه: رابط قائمةٍ
-     * حيث يُتوقَّع ملفُّ ترجمة يعطي مدخلاً مكسوراً في القائمة.
+     * ولماذا هذا مهمّ: المشغّل يُسلَّم ملفَّ ترجمةٍ لا قائمة تشغيل، وكانت
+     * النسخة السابقة تجلب القوائم الـ١٩ لتستخرج ملفّاتها — ٤ إلى ٧ ثوانٍ
+     * (وتحت الحمل نجح ١٤/١٩ ثم ٩/١٩، لأن الـCDN يخنق الطلبات المتزامنة).
+     * وصفرُ جلبٍ يعني أن الترجمات تصل مع الروابط في النداء نفسه، فلا تضيع
+     * على مستمعٍ رحل — فالتطبيق يُعيد النتيجة دفعةً واحدة بعد رجوع `loadLinks`.
      */
     private suspend fun emitSubtitles(
         subs: List<SubTrack>,
@@ -401,22 +433,10 @@ class RimShortProvider(private val prefs: SharedPreferences? = null) : MainAPI()
         subtitleCallback: (SubtitleFile) -> Unit,
     ) {
         if (subs.isEmpty()) return
-        val resolved = try {
-            coroutineScope {
-                subs.distinctBy { it.lang }.map { t -> async { t to resolveSubFile(t.url) } }
-                    .awaitAll()
-            }
-        } catch (e: kotlinx.coroutines.CancellationException) {
-            throw e
-        } catch (e: Exception) {
-            Log.e(TAG, "subs FAILED id=$id ep=$ep", e)
-            return
-        }
-        for ((t, vtt) in resolved) {
-            if (vtt == null) {
-                Log.e(TAG, "sub ${t.lang} unresolved id=$id ep=$ep")
-                continue
-            }
+        for (t in subs.distinctBy { it.lang }) {
+            // رابط مسار الترجمة ← ملفّه الوحيد: `<مجلّده>/<اللغة>-00001.vtt`
+            val dir = t.url.substringBeforeLast('/', "")
+            val vtt = if (dir.isEmpty()) t.url else "$dir/${t.lang}-00001.vtt"
             Log.d(TAG, "sub ${t.lang} id=$id ep=$ep url=$vtt")
             subtitleCallback(
                 newSubtitleFile(subLangLabel(t.lang), vtt) {
@@ -438,16 +458,6 @@ class RimShortProvider(private val prefs: SharedPreferences? = null) : MainAPI()
     } catch (e: Exception) {
         Log.e(TAG, "playlist FAILED $url", e)
         null
-    }
-
-    /** ملفّ الـVTT داخل قائمة ترجمةٍ، أو `null` إن لم يُقرأ. */
-    private suspend fun resolveSubFile(subPlaylistUrl: String): String? {
-        val text = fetchPlaylist(subPlaylistUrl) ?: return null
-        val dir = subPlaylistUrl.substringBeforeLast('/', subPlaylistUrl) + "/"
-        val seg = text.lines().asSequence().map { it.trim() }
-            .firstOrNull { it.isNotEmpty() && !it.startsWith("#") }
-            ?: return null
-        return resolve(dir, seg)
     }
 
     /**
@@ -531,5 +541,18 @@ class RimShortProvider(private val prefs: SharedPreferences? = null) : MainAPI()
         val RE_RESOLUTION = Regex("""RESOLUTION=(\d+)x(\d+)""")
         val RE_PATH_QUALITY = Regex("""_(\d{3,4})/""")
         val RE_ORIGIN = Regex("""^(https?://[^/]+)""")
+
+        /**
+         * علامة القائمة التكيّفية: `/h264/` في مسار `videoUrl`.
+         *
+         * مقياسٌ على ١٠٣ أعمال (٢٠٢٦-١٠-٢٠): صفر مخالفة — كل عملٍ مساره يحوي
+         * `/h264/` أعطى قائمةً بثلاث درجات و١٩ ترجمة، وكل ما عداه قائمةً
+         * مفردةً بلا درجات ولا ترجمات. والعلامة تُفحَص **قبل** أي جلب، فالمفردة
+         * (١٠٢ من ١٠٣) تُبَثّ فوراً بلا انتظار.
+         */
+        val ADAPTIVE_PATH = Regex("""/h264/""")
+
+        /** سقف انتظار القائمة التكيّفية — بعد انتهائه يُبَثّ رابطها كما هو. */
+        const val PLAYLIST_BUDGET_MS = 6_000L
     }
 }

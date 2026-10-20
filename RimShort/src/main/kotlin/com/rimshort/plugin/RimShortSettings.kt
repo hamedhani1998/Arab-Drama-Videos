@@ -136,13 +136,13 @@ class RimShortSettings(private val prefs: SharedPreferences) : BottomSheetDialog
             }
             playbackCategory.addPreference(formatTagPref)
 
-            // الترجمات: ١٩ لغة تصل مع القوائم التكيّفية وحدها (~١٣٪ من الأعمال)،
-            // والعربية فيها. وإظهارها يكلّف ~٤ث عند الفتح (قِيس: ١٩ جلباً
-            // متوازياً)، فمن لا يريدها يوقفها هنا.
+            // الترجمات: ١٩ لغة تصل مع القوائم التكيّفية وحدها، والعربية فيها.
+            // وبلا كلفة: روابطها تُبنى من نص القائمة (نمط `<اللغة>-00001.vtt`
+            // قِيس ١٩/١٩)، فلا جلب ولا تأخير على فتح السيرفرات.
             val showSubsPref = SwitchPreferenceCompat(ctx).apply {
                 key = KEY_SHOW_SUBS
                 title = "إظهار الترجمات"
-                summary = "ترجمات الأعمال ذات القوائم التكيّفية (١٩ لغة) — تُبطئ فتح السيرفرات قليلاً"
+                summary = "ترجمات الأعمال ذات القوائم التكيّفية (١٩ لغة) — بلا تأثير على سرعة الفتح"
                 setDefaultValue(true)
             }
             playbackCategory.addPreference(showSubsPref)
