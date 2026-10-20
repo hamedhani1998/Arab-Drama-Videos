@@ -603,24 +603,33 @@ class MoviesModProvider(private val prefs: SharedPreferences? = null) : MainAPI(
             }
             // check if redirected to sid
             if (finalUrl.contains("?sid=")) {
-                sid = finalUrl
+                sid = finalUrl.replace("&amp;", "&")
                 label = serverLabel
                 Log.i(TAG, "resolve: redirected to sid=$sid")
             } else if (finalUrl.contains("en.thenaukriadda.in")) {
-                sid = finalUrl
+                sid = finalUrl.replace("&amp;", "&")
                 label = serverLabel
                 Log.i(TAG, "resolve: final is thenaukriadda=$sid")
             } else {
                 // look for direct thenaukriadda sid links first
-                val anySid = RE_SID_ANY.find(body) ?: Regex("https?://[^\"'\\s<>]+en\\.thenaukriadda\\.in/\\?sid=[^\"'\\s<>]+").find(body)
+                val anySid = RE_SID_ANY.find(body) ?: Regex("https?://[^\"'\\s<>]+en\\.thenaukriadda\\.in/\\?sid=[^\"'\\s<>]+").find(body) ?: Regex("en\\.thenaukriadda\\.in/\\?[^\"'\\s<>]*sid=[^\"'\\s<>]+").find(body)
                 if (anySid != null) {
-                    sid = anySid.value.replace("&amp;", "&")
+                    val raw = anySid.value
+                    sid = if (raw.startsWith("http")) raw.replace("&amp;", "&") else "https://$raw".replace("&amp;", "&")
                     label = serverLabel
                     Log.i(TAG, "resolve: found sid link in body=$sid")
                 } else if (body.contains("lp-land") || body.contains("_lp_http") || body.contains("lp-s1-form") || body.contains("thenaukriadda.in") || body.contains("timed-content")) {
-                    sid = finalUrl
-                    label = serverLabel
-                    Log.i(TAG, "resolve: using lp page as start=$sid")
+                    // try to find any sid in body again more aggressively
+                    val anySid2 = Regex("sid=([A-Za-z0-9+/=]+)").find(body)
+                    if (anySid2 != null) {
+                        sid = "https://en.thenaukriadda.in/?sid=${anySid2.groupValues[1]}"
+                        label = serverLabel
+                        Log.i(TAG, "resolve: extracted sid param=$sid")
+                    } else {
+                        sid = finalUrl.replace("&amp;", "&")
+                        label = serverLabel
+                        Log.i(TAG, "resolve: using lp page as start=$sid")
+                    }
                 } else {
                     val pairs = RE_SID.findAll(body)
                         .map { unescapeText(it.groupValues[1]).replace(RE_WS, "") to stripTags(it.groupValues[2]) }
