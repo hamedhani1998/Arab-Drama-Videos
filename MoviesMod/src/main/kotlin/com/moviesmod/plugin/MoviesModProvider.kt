@@ -461,7 +461,7 @@ class MoviesModProvider(private val prefs: SharedPreferences? = null) : MainAPI(
                 }.awaitAll().flatten()
             }
             if (resolved.isEmpty()) {
-                Log.i(TAG, "loadLinks: resolved nothing from ${entries.size} entries")
+                Log.i(TAG, "loadLinks: resolved nothing from ${entries.size} entries (dns fixed)")
                 return false
             }
 
