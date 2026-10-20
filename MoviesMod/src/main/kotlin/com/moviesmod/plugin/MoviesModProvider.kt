@@ -219,6 +219,7 @@ class MoviesModProvider(private val prefs: SharedPreferences? = null) : MainAPI(
 
     override suspend fun load(url: String): LoadResponse? {
         return try {
+            fixDns()
             val doc = app.get(url, headers = head).document
             val rawTitle = doc.selectFirst("h1.entry-title")?.text()
                 ?: doc.selectFirst("h1")?.text()
@@ -337,6 +338,7 @@ class MoviesModProvider(private val prefs: SharedPreferences? = null) : MainAPI(
      * «Korean 1080p x264 Esubs [1.1GB]» هو المقصود، لا ‎720p‎ ولا ‎10bit‎.
      */
     private suspend fun buildEpisodes(epRows: List<Row>, batchRows: List<Row>): List<Episode> {
+        fixDns()
         val archives = epRows.distinctBy { it.href }
         val fetched = coroutineScope {
             archives.map { row ->
