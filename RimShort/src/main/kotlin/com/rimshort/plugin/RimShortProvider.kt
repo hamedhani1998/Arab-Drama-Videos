@@ -378,19 +378,35 @@ class RimShortProvider(private val prefs: SharedPreferences? = null) : MainAPI()
 
             for (s in streams) {
                 // الجودة المقيسة ثم وسم الصيغة في الاسم — التطبيق يعرض
-                // `ExtractorLink.name` فقط في «سيرفرات التشغيل».
+                // `ExtractorLink.name` فقط في «سيرفرات التشغيل». الوسم يُقرأ
+                // من رابط الحافّة الأصلي، لا من رابط الوسيط المحلّي.
                 val q = s.quality ?: "720p"
                 val linkName = if (showFormatTag()) {
                     FormatTag.tagged(q, s.url, ExtractorLinkType.M3U8, declared)
                 } else {
                     q
                 }
-                Log.d(TAG, "emit id=$id ep=$ep q=$q url=${s.url}")
+
+                // ============ لماذا الوسيط المحلّي ============
+                //
+                // التقطّع المتكرّر جذره انقطاعٌ على مستوى الاتصال لا عرضُ
+                // نطاق: قِيس 2026-10-20 تعثّر 20–45 ثانية على 6–30٪ من
+                // الطلبات — حتى قائمة 6.9 كيلوبايت بحافّة `X-Cache: HIT`
+                // تأخّرت 22 ثانية، والطلب التالي فوراً. ومعدّل البثّ 1.16
+                // ميغابت مقابل 2.0–3.0 دافئاً. اللاعب معدّله 8 ثوانٍ، فكل
+                // تعثّر = خطأ = دوّار = استئناف = الشكوى.
+                //
+                // [RimShortProxy] يجلب العنصر بدلاً من اللاعب ويعيد المحاولة
+                // على اتصالٍ طازج بعد كل تعثّر — وقياسات التعثّر كلّها مفردة،
+                // فالإعادة تنجح. إن فشل تشغيل الخادم يُرسَل الرابط الأصلي
+                // كما هو (التعطّل هنا يستحيل أن يُسقط ما كان يعمل).
+                val proxied = RimShortProxy.register(s.url) ?: s.url
+                Log.d(TAG, "emit id=$id ep=$ep q=$q url=${s.url} via=$proxied")
                 callback(
                     newExtractorLink(
                         source = name,
                         name = linkName,
-                        url = s.url,
+                        url = proxied,
                         type = ExtractorLinkType.M3U8,
                     ) {
                         this.quality = getQualityFromName(q)
