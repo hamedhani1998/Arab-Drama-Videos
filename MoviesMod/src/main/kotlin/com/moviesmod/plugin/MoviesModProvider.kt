@@ -17,6 +17,7 @@ import java.net.URI
 import java.net.URLDecoder
 import java.net.URLEncoder
 import java.net.UnknownHostException
+import java.util.concurrent.TimeUnit
 import okhttp3.Dns
 
 /**
@@ -93,9 +94,24 @@ class MoviesModProvider(private val prefs: SharedPreferences? = null) : MainAPI(
      */
     private fun fixDns() {
         val c = app.baseClient
-        if (c.dns is PinnedDns) return
-        app.baseClient = c.newBuilder().dns(PinnedDns(c.dns)).build()
-        Log.i(TAG, "fixDns: ثُبِّت $PINNED_HOST على ${PinnedDns.lastIps.joinToString()}")
+        val needsDns = c.dns !is PinnedDns
+        val needsTimeout = c.readTimeoutMillis < 60000
+        if (!needsDns && !needsTimeout) return
+        val b = c.newBuilder()
+        if (needsDns) b.dns(PinnedDns(c.dns))
+        if (needsTimeout) {
+            b.readTimeout(60, TimeUnit.SECONDS)
+            b.connectTimeout(60, TimeUnit.SECONDS)
+            b.writeTimeout(60, TimeUnit.SECONDS)
+            b.callTimeout(90, TimeUnit.SECONDS)
+        }
+        app.baseClient = b.build()
+        if (needsDns) {
+            Log.i(TAG, "fixDns: ثُبِّت $PINNED_HOST على ${PinnedDns.lastIps.joinToString()}")
+        }
+        if (needsTimeout) {
+            Log.i(TAG, "fixDns: زيدت مهلات الطلبات")
+        }
     }
 
     /** اسم المضيف من رابط، بلا رمي استثناء على رابطٍ مشوّه. */
