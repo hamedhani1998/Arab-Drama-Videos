@@ -1,4 +1,4 @@
-version = 8
+version = 9
 
 cloudstream {
     description = "MoviesMod - أفلام ومسلسلات مع روابط التحميل المباشر"

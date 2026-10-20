@@ -639,13 +639,28 @@ class MoviesModProvider(private val prefs: SharedPreferences? = null) : MainAPI(
                 Log.i(TAG, "followChain try$i: sc $cname len=${cval.length}")
                 val go = "https://en.thenaukriadda.in/?lp_go=$cname"
                 val goBody = app.get(go, headers = head, referer = f2.first, cookies = mapOf(cname to cval)).text
-                Log.i(TAG, "followChain try$i: goBody len=${goBody.length}")
+                Log.i(TAG, "followChain try$i: goBody len=${goBody.length} snip=${goBody.take(200).replace("\n"," ").replace("\r"," ")}")
 
-                val first = jsRedirect(goBody) ?: run { Log.i(TAG, "followChain try$i: first jsRedirect null"); return null }
+                val first = jsRedirect(goBody) ?: run {
+                    Log.i(TAG, "followChain try$i: first jsRedirect null, trying fallback")
+                    // محاولة البحث عن أي رابط في الجسم
+                    val m = Regex("https?://[^\"'\\s<>]+").findAll(goBody).firstOrNull { it.value.contains("driveseed") || it.value.contains("thenaukriadda") || it.value.contains("file") }
+                    if (m != null) {
+                        Log.i(TAG, "followChain try$i: fallback1 ${m.value}")
+                        m.value
+                    } else null
+                } ?: run { Log.i(TAG, "followChain try$i: first jsRedirect null"); return null }
                 Log.i(TAG, "followChain try$i: first $first")
                 val rBody = app.get(first, headers = head, referer = go).text
-                Log.i(TAG, "followChain try$i: rBody len=${rBody.length}")
-                val second = jsRedirect(rBody) ?: run { Log.i(TAG, "followChain try$i: second jsRedirect null"); return null }
+                Log.i(TAG, "followChain try$i: rBody len=${rBody.length} snip=${rBody.take(200).replace("\n"," ").replace("\r"," ")}")
+                val second = jsRedirect(rBody) ?: run {
+                    Log.i(TAG, "followChain try$i: second jsRedirect null, trying fallback")
+                    val m = Regex("https?://[^\"'\\s<>]+").findAll(rBody).firstOrNull { it.value.contains("driveseed") || it.value.contains("file") }
+                    if (m != null) {
+                        Log.i(TAG, "followChain try$i: fallback2 ${m.value}")
+                        if (m.value.startsWith("/")) "https://driveseed.org${m.value}" else m.value
+                    } else null
+                } ?: run { Log.i(TAG, "followChain try$i: second jsRedirect null"); return null }
                 Log.i(TAG, "followChain try$i: second $second")
                 val res = if (second.startsWith("/")) "https://driveseed.org$second" else second
                 Log.i(TAG, "followChain try$i: OK $res")
