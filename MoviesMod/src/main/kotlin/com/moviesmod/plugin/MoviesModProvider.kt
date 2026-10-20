@@ -896,7 +896,7 @@ class MoviesModProvider(private val prefs: SharedPreferences? = null) : MainAPI(
         val RE_SC = Regex("sc\\(\"([^\"]+)\",\"([^\"]+)\",\\d+\\)")
         // البادئة `window.` **اختيارية**: صفحة `?lp_go` تستعمل `window.location`
         // (داخل `setTimeout`)، وصفحة `/r` تستعمل `location` وحدها. الاثنتان مقيسة.
-        val RE_JS_REDIRECT = Regex("(?:window\\.)?location\\.replace\\(\"([^\"]+)\"\\)")
+        val RE_JS_REDIRECT = Regex("(?:window\\.)?location\\.(?:replace|href|assign)\\s*\\(?\\s*[\"']([^\"']+)[\"']\\s*\\)?", RegexOption.IGNORE_CASE)
 
         val RE_R2 = Regex("href=\"(https://pub-[^\"]*\\.r2\\.dev/[^\"]+)\"")
         val RE_VG = Regex("href=\"(https://(?:instant|cdn)\\.video-gen\\.xyz/[^\"]+)\"")
