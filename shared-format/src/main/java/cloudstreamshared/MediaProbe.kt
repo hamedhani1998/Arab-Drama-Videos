@@ -195,8 +195,32 @@ object MediaProbe {
     }
 
     /**
+     * ما الذي يفعله الرابط: **مشاهدة** أم **تحميل**.
+     *
+     * لماذا يلزم تمييزه: قائمة «سيرفرات التشغيل» تعرض كل شيء في قائمة واحدة،
+     * ورابط تحميل ملفٍّ كامل بجوار بثٍّ مباشر لا يفترقان بالعين إلا بهذا
+     * الوسم — والاثنان يُفتحان في المشغّل نفسه. المستخدم طلب التمييز صريحًا.
+     *
+     * ولماذا كلمةٌ عربية لا أيقونة وحدها: الاسم يظهر في قائمة نصّية، والرمز
+     * وحده قد لا يُقرأ (أو يُقرأ صندوقًا فارغًا في بعض الخطوط)، فالمعنى في
+     * الكلمة والرمز زينةٌ لها.
+     */
+    enum class Use(val mark: String) {
+        WATCH("▶ مشاهدة"),
+        DOWNLOAD("⬇ تحميل"),
+    }
+
+    /**
      * اسم السيرفر الكامل كما يراه المستخدم في قائمة التشغيل:
-     * `Rumble · 720p · 858 MB · [M3U8]` — الحقول الغائبة تُحذف بلا فراغات زائدة.
+     * `▶ مشاهدة · Rumble · 720p · 858 MB · [M3U8]` — الحقول الغائبة تُحذف بلا
+     * فراغات زائدة.
+     *
+     * [use] يضع وسم مشاهدة/تحميل **في الصدارة** لا في الذيل: العين تمسح أول
+     * الاسم، والذيل مزدحم بالصيغة والحجم. وغيابه يعني «لم يُصنَّف» فلا يُوسم
+     * بشيء كاذب.
+     *
+     * [declared] صيغةٌ أعلنها الخادم (`Content-Type`) — تُستعمل عند غياب
+     * الامتداد من الرابط، وهو حال مرايا `video-gen` التي لا امتداد لها.
      */
     fun label(
         server: String,
@@ -205,12 +229,15 @@ object MediaProbe {
         url: String,
         type: com.lagradost.cloudstream3.utils.ExtractorLinkType?,
         note: String? = null,
+        use: Use? = null,
+        declared: String? = null,
     ): String {
-        val parts = ArrayList<String>(5)
+        val parts = ArrayList<String>(6)
+        use?.let { parts.add(it.mark) }
         parts.add(server.ifBlank { "تشغيل" })
         quality?.takeIf { it.isNotBlank() }?.let { parts.add(it) }
         note?.takeIf { it.isNotBlank() }?.let { parts.add(it) }
         human(bytes)?.let { parts.add(it) }
-        return FormatTag.tagged(parts.joinToString(" · "), url, type)
+        return FormatTag.tagged(parts.joinToString(" · "), url, type, declared)
     }
 }

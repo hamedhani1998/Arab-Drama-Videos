@@ -2,6 +2,7 @@ package com.moviesmod.plugin
 
 import android.content.SharedPreferences
 import android.util.Log
+import cloudstreamshared.FormatTag
 import cloudstreamshared.MediaProbe
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
@@ -333,6 +334,12 @@ class MoviesModProvider(private val prefs: SharedPreferences? = null) : MainAPI(
         var ttfb: Long = Long.MAX_VALUE,
         var alive: Boolean = true,
         var certain: Boolean = false,
+        /**
+         * `Content-Type` الذي أعلنه الخادم — يُقرأ من الفحص نفسه بلا طلبٍ ثانٍ.
+         * لولاه لعُرضت مرايا `video-gen` بوسم `[VIDEO]` وهي ملفّ Matroska حقيقي
+         * (رابطها بلا امتدادٍ إطلاقًا).
+         */
+        var mime: String? = null,
     ) {
         /** رافعة الترتيب: الحي الأسرع أوّلًا، وما لا حكم له آخرًا. */
         fun rank(): Long = if (alive) ttfb else Long.MAX_VALUE - 1
@@ -377,6 +384,7 @@ class MoviesModProvider(private val prefs: SharedPreferences? = null) : MainAPI(
                         c.ttfb = if (r.alive) r.ttfbMs else Long.MAX_VALUE - 1
                         c.alive = r.alive
                         c.certain = r.certain
+                        c.mime = r.contentType.ifBlank { null }
                         c
                     }
                 }.awaitAll()
@@ -392,29 +400,72 @@ class MoviesModProvider(private val prefs: SharedPreferences? = null) : MainAPI(
             val take = if (showAlt) ordered else ordered.take(1)
             var emitted = 0
             for (c in take) {
-                val label = MediaProbe.label(
-                    c.server,
-                    MediaProbe.qualityLabel(heightOf(c.quality)),
-                    c.bytes,
-                    c.url,
-                    ExtractorLinkType.VIDEO,
-                    c.note,
-                )
-                callback(
-                    newExtractorLink(source = name, name = label, url = c.url, type = ExtractorLinkType.VIDEO) {
-                        this.referer = c.referer ?: ""
-                        this.headers = c.headers
-                        this.quality = c.quality
-                    }
-                )
-                emitted++
+                // ★ الإرسال محاطٌ بـ`try` **داخل** الحلقة لا حولها كلّها: قِيس أن
+                // مرشّحًا واحدًا شاذًّا (رابط لا يُبنى، أو خادم يردّ شيئًا غير
+                // متوقّع) كان يُسقط القائمة بأكملها لأن الاستثناء يصعد إلى
+                // `catch` الخارجي فيعود `false` ولو كان قبله ما أُرسل. الآن
+                // يسقط المرشّح وحده ويُسجَّل، وتبقى بقيّة القائمة.
+                try {
+                    val label = MediaProbe.label(
+                        c.server,
+                        MediaProbe.qualityLabel(heightOf(c.quality)),
+                        c.bytes,
+                        c.url,
+                        ExtractorLinkType.VIDEO,
+                        c.note,
+                        useOf(c),
+                        FormatTag.fromMime(c.mime),
+                    )
+                    callback(
+                        newExtractorLink(source = name, name = label, url = c.url, type = ExtractorLinkType.VIDEO) {
+                            this.referer = c.referer ?: ""
+                            this.headers = c.headers
+                            this.quality = c.quality
+                        }
+                    )
+                    emitted++
+                } catch (e: kotlinx.coroutines.CancellationException) {
+                    // الإلغاء ليس خطأ مصدر: يُعاد إطلاقه وإلا بدا للمستخدم
+                    // «لا نتائج» بدل «أُلغيت العملية».
+                    throw e
+                } catch (e: Exception) {
+                    Log.i(TAG, "loadLinks: skip ${c.server} ${e::class.simpleName} ${e.message}")
+                }
             }
-            Log.i(TAG, "loadLinks: emitted $emitted of ${probed.size} probed")
+            // ★ «لا شيء» ليس حالة واحدة: هنا نُفرّق بين «الموقع لا يملك مرآة
+            // حيّة لهذا الملفّ» و«المرايا موجودة لكن الفحص لم يحسم». الحالتان
+            // كانتا تُسجَّلان سطرًا واحدًا فتبدو العلّة غامضة.
+            if (emitted == 0) {
+                val dead = probed.count { !it.alive && it.certain }
+                Log.i(TAG, "loadLinks: emitted 0 — ${probed.size} candidates, $dead certain-dead" +
+                    if (dead == probed.size) " (الموقع لا يملك مرآة حيّة لهذا الملفّ)" else " (لا حكم — أعد المحاولة)")
+            } else {
+                Log.i(TAG, "loadLinks: emitted $emitted of ${probed.size} probed")
+            }
             emitted > 0
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            throw e
         } catch (e: Exception) {
             Log.i(TAG, "loadLinks FAIL ${e::class.simpleName} ${e.message}")
             false
         }
+    }
+
+    /**
+     * وسم مشاهدة/تحميل من **طبيعة الرابط نفسه** لا من ادّعاء.
+     *
+     * قائمة تشغيل (`m3u8`/`mpd`) بثٌّ يُشاهد ولا يُنزَّل ملفًّا واحدًا ⇒ «مشاهدة».
+     * وما عداه ملفٌّ مباشر — وهو ما يقدّمه الموقع فعلًا: زرُّه «Download» على
+     * `driveseed`، وقِيس أنّ صفحة العمل لا تحمل ولا `iframe` واحدًا (‎0‎ إطارًا
+     * و‎0‎ وسم `video` في ‎81764‎ بايتًا من `entry-content`) ⇒ لا مسار مشاهدة
+     * أصلًا، فوسم «تحميل» هو الصدق لا التقليل. والملفّ يُشغَّل في المشغّل أيضًا
+     * — الوسم يوضّح مصدره لا يمنع تشغيله.
+     */
+    private fun useOf(c: Cand): MediaProbe.Use {
+        val u = c.url.lowercase()
+        val playlist = u.contains(".m3u8") || u.contains(".mpd") ||
+            c.mime?.contains("mpegurl", true) == true || c.mime?.contains("dash+xml", true) == true
+        return if (playlist) MediaProbe.Use.WATCH else MediaProbe.Use.DOWNLOAD
     }
 
     /**
@@ -519,10 +570,27 @@ class MoviesModProvider(private val prefs: SharedPreferences? = null) : MainAPI(
             cands.add(Cand(u, server, quality, note, referer, head))
         }
 
-        RE_R2.find(page)?.let { add(it.groupValues[1], "Cloud", null) }
-        for (m in RE_VG.findAll(page)) {
+        val r2 = RE_R2.findAll(page).toList()
+        val vg = RE_VG.findAll(page).toList()
+        // كل مرايا `r2` لا أولها فقط: الصفحة قد تُعلن أكثر من رابط مباشر للملفّ
+        // نفسه، وكان الأول وحده يُلتقط فيسقط الباقي بلا سبب. والتكرار مأمون
+        // لأن `add` تُسقط المكرّر بالرابط.
+        for (m in r2) add(m.groupValues[1], "Cloud", null)
+        for (m in vg) {
             val u = unescapeText(m.groupValues[1])
             add(u, if (u.contains("cdn.")) "CDN" else "Fast", fileUrl)
+        }
+
+        // ★ سطرٌ واحد يكفي لتشخيص «لا روابط» مستقبلًا: عدد كل عائلة مرايا.
+        // قِيس أنّ الملفّ قد يحمل `r2=0 vg=2` — أي أنّ مرآة `r2` المباشرة غير
+        // موجودة، والبديلان على `video-gen.xyz` وهو نطاق **لا يُحلّ** (NXDOMAIN
+        // من 1.1.1.1 و8.8.8.8 معًا، والضابط `driveseed.org` يُحلّ). فتلك الملفّات
+        // لا مرآة حيّة لها في الموقع نفسه، ولا يُنقذها أي تغيير في الكود.
+        // و`r2=1` يقابل ملفًّا يُبَثّ فعلًا (قِيس `200 video/matroska`).
+        Log.i(TAG, "mirrorsOf ${fileUrl.substringAfterLast('/')}: r2=${r2.size} vg=${vg.size}" +
+            if (r2.isEmpty() && vg.isEmpty()) " — الموقع لا يُعلن أي مرآة لهذا الملفّ" else "")
+        if (r2.isEmpty() && vg.isNotEmpty()) {
+            Log.i(TAG, "mirrorsOf: مرايا r2 غائبة والبديل على نطاق لا يُحلّ — قد يُسقطها innerMedia")
         }
 
         // حلّ 302 إلى رابط الوسائط الداخلي — والرابط الداخلي يُبَثّ بلا مُحيل.

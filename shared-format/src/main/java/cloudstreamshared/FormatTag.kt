@@ -79,6 +79,37 @@ object FormatTag {
         return plain + SEP + "[" + tag + "]"
     }
 
+    /**
+     * الصيغة من `Content-Type` الذي أعلنه الخادم فعلًا.
+     *
+     * لماذا يلزم: مرايا `video-gen` (وروابط `googleusercontent` التي تحلّ إليها)
+     * **بلا امتدادٍ في المسار إطلاقًا** — قِيس ‎288‎ حرفًا من base64 ولا نقطة
+     * واحدة. فاقتراع الامتداد يعطي `[VIDEO]` وهي ملفّ Matroska حقيقي. لكن
+     * الاستجابة تحمل الحقيقة: `Content-Type: video/matroska` — وهي حجّة أقوى من
+     * الاسم، لأنها من الخادم نفسه.
+     *
+     * ولا تُستعمل إلا عند غياب الامتداد: `label` تقدّم المسار عليه دائمًا.
+     */
+    fun fromMime(ct: String?): String? {
+        val c = ct?.lowercase()?.substringBefore(';')?.trim().orEmpty()
+        if (c.isEmpty()) return null
+        return when {
+            c.contains("matroska") -> "MKV"
+            c.contains("webm") -> "WEBM"
+            c.contains("quicktime") -> "MOV"
+            c.contains("mpegurl") -> "M3U8"
+            c.contains("dash+xml") -> "DASH"
+            c.contains("x-msvideo") -> "AVI"
+            c.contains("x-flv") -> "FLV"
+            c.contains("mp4") -> "MP4"
+            c.contains("mpeg") && c.contains("audio") -> "MP3"
+            c.contains("mpeg") -> "MPEG"
+            c.startsWith("video/") -> c.substringAfter("video/").uppercase()
+            c.startsWith("audio/") -> c.substringAfter("audio/").uppercase()
+            else -> null
+        }
+    }
+
     /** الوسم وحده مع قوسين — للاستعمال في التسميات المركّبة. */
     fun bracket(url: String, type: ExtractorLinkType?): String = "[" + label(url, type) + "]"
 }
