@@ -612,9 +612,9 @@ class MoviesModProvider(private val prefs: SharedPreferences? = null) : MainAPI(
                 Log.i(TAG, "resolve: final is thenaukriadda=$sid")
             } else {
                 // look for direct thenaukriadda sid links first
-                val anySid = Regex("https?://[^\"'\\s<>]+en\\.thenaukriadda\\.in/\\?[^\"'\\s<>]*sid=[^\"'\\s<>]+").find(body)
+                val anySid = RE_SID_ANY.find(body) ?: Regex("https?://[^\"'\\s<>]+en\\.thenaukriadda\\.in/\\?sid=[^\"'\\s<>]+").find(body)
                 if (anySid != null) {
-                    sid = anySid.value
+                    sid = anySid.value.replace("&amp;", "&")
                     label = serverLabel
                     Log.i(TAG, "resolve: found sid link in body=$sid")
                 } else if (body.contains("lp-land") || body.contains("_lp_http") || body.contains("lp-s1-form") || body.contains("thenaukriadda.in") || body.contains("timed-content")) {
@@ -1200,6 +1200,10 @@ class MoviesModProvider(private val prefs: SharedPreferences? = null) : MainAPI(
         /** روابط الحلقات: الرقم من نصّ الرابط لا من الرابط نفسه. */
         val RE_SID = Regex(
             "<a[^>]*href=\"(https://en\\.thenaukriadda\\.in/\\?sid=[^\"]+)\"[^>]*>(.*?)</a>",
+            RegexOption.DOT_MATCHES_ALL,
+        )
+        val RE_SID_ANY = Regex(
+            "(https?://[^\"'\\s<>]+en\\.thenaukriadda\\.in/\\?[^\"'\\s<>]*sid=[^\"'\\s<>]+)",
             RegexOption.DOT_MATCHES_ALL,
         )
 
