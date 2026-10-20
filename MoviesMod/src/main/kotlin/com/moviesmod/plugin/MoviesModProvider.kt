@@ -100,17 +100,17 @@ class MoviesModProvider(private val prefs: SharedPreferences? = null) : MainAPI(
         val b = c.newBuilder()
         if (needsDns) b.dns(PinnedDns(c.dns))
         if (needsTimeout) {
-            b.readTimeout(90, TimeUnit.SECONDS)
-            b.connectTimeout(90, TimeUnit.SECONDS)
-            b.writeTimeout(90, TimeUnit.SECONDS)
-            b.callTimeout(120, TimeUnit.SECONDS)
+            b.readTimeout(180, TimeUnit.SECONDS)
+            b.connectTimeout(120, TimeUnit.SECONDS)
+            b.writeTimeout(120, TimeUnit.SECONDS)
+            b.callTimeout(300, TimeUnit.SECONDS)
         }
         app.baseClient = b.build()
         if (needsDns) {
             Log.i(TAG, "fixDns: ثُبِّت $PINNED_HOST على ${PinnedDns.lastIps.joinToString()}")
         }
         if (needsTimeout) {
-            Log.i(TAG, "fixDns: زيدت مهلات الطلبات إلى 90-120ث")
+            Log.i(TAG, "fixDns: زيدت مهلات الطلبات إلى 180-300ث")
         }
     }
 
@@ -618,7 +618,7 @@ class MoviesModProvider(private val prefs: SharedPreferences? = null) : MainAPI(
     private suspend fun followChain(sid: String): String? {
         Log.i(TAG, "followChain ENTRY sidLen=${sid.length}")
         var lastErr: Exception? = null
-        for (i in 1..3) {
+        for (i in 1..4) {
             try {
                 Log.i(TAG, "followChain try$i: GET land $sid")
                 val land = app.get(sid, headers = head).text
@@ -653,7 +653,7 @@ class MoviesModProvider(private val prefs: SharedPreferences? = null) : MainAPI(
             } catch (e: Exception) {
                 lastErr = e
                 Log.i(TAG, "followChain try$i FAIL ${e::class.simpleName} ${e.message}")
-                if (i < 3) kotlinx.coroutines.delay(1500)
+                if (i < 4) kotlinx.coroutines.delay(2000)
             }
         }
         Log.i(TAG, "followChain FAIL ${lastErr?.javaClass?.simpleName} ${lastErr?.message}")
