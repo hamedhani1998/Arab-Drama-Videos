@@ -638,30 +638,66 @@ class MoviesModProvider(private val prefs: SharedPreferences? = null) : MainAPI(
                 val cval = unescapeText(ck.groupValues[2])
                 Log.i(TAG, "followChain try$i: sc $cname len=${cval.length}")
                 val go = "https://en.thenaukriadda.in/?lp_go=$cname"
-                val goBody = app.get(go, headers = head, referer = f2.first, cookies = mapOf(cname to cval)).text
-                Log.i(TAG, "followChain try$i: goBody len=${goBody.length} snip=${goBody.take(250).replace("\n"," ").replace("\r"," ")}")
-
-                fun extractRedirect(html: String): String? {
-                    jsRedirect(html)?.let { return it }
-                    RE_META_REFRESH.find(html)?.groupValues?.getOrNull(1)?.let { return it }
-                    // أي رابط http/https خارجية
-                    Regex("https?://[^\"'\\s<>]+").findAll(html).forEach { m ->
-                        val v = m.value
-                        if (v.contains("driveseed") || v.contains("drive") || v.contains("file") && !v.contains("thenaukriadda.in/?sid=")) return v
+                var first: String? = null
+                try {
+                    val goResp = app.get(go, headers = head, referer = f2.first, cookies = mapOf(cname to cval), allowRedirects = false)
+                    val locHdr = goResp.headers["Location"] ?: goResp.headers["location"]
+                    if (!locHdr.isNullOrBlank()) {
+                        Log.i(TAG, "followChain try$i: go Location header $locHdr")
+                        first = locHdr
+                    } else {
+                        val goBody = goResp.text
+                        Log.i(TAG, "followChain try$i: goBody len=${goBody.length} snip=${goBody.take(300).replace("\n"," ").replace("\r"," ")}")
+                        fun extractRedirect(html: String): String? {
+                            jsRedirect(html)?.let { return it }
+                            RE_META_REFRESH.find(html)?.groupValues?.getOrNull(1)?.let { return it }
+                            Regex("https?://[^\"'\\s<>]+").findAll(html).forEach { m ->
+                                val v = m.value
+                                if ((v.contains("driveseed") || v.contains("file")) && !v.contains("thenaukriadda.in/?sid=") && !v.contains("lp_go")) return v
+                            }
+                            Regex("['\"](/[^\"']+)['\"]").findAll(html).forEach { m ->
+                                val v = m.value.removeSurrounding("'", "'").removeSurrounding("\"", "\"")
+                                if (v.contains("file") || v.contains("download") || v.contains("r?")) return "https://driveseed.org$v"
+                            }
+                            return null
+                        }
+                        first = extractRedirect(goBody)
                     }
-                    // أي مسار مطلق
-                    Regex("['\"](/[^\"']+)['\"]").findAll(html).forEach { m ->
-                        val v = m.value.removeSurrounding("'", "'").removeSurrounding("\"", "\"")
-                        if (v.contains("file") || v.contains("download")) return "https://driveseed.org$v"
-                    }
-                    return null
+                } catch (e: Exception) {
+                    Log.i(TAG, "followChain try$i: go exception ${e::class.simpleName}")
                 }
-
-                val first = extractRedirect(goBody) ?: run { Log.i(TAG, "followChain try$i: first jsRedirect null"); return null }
+                first ?: run { Log.i(TAG, "followChain try$i: first jsRedirect null"); return null }
                 Log.i(TAG, "followChain try$i: first $first")
-                val rBody = app.get(first, headers = head, referer = go).text
-                Log.i(TAG, "followChain try$i: rBody len=${rBody.length} snip=${rBody.take(250).replace("\n"," ").replace("\r"," ")}")
-                val second = extractRedirect(rBody) ?: run { Log.i(TAG, "followChain try$i: second jsRedirect null"); return null }
+
+                var second: String? = null
+                try {
+                    val rResp = app.get(first, headers = head, referer = go, allowRedirects = false)
+                    val locHdr2 = rResp.headers["Location"] ?: rResp.headers["location"]
+                    if (!locHdr2.isNullOrBlank()) {
+                        Log.i(TAG, "followChain try$i: r Location header $locHdr2")
+                        second = locHdr2
+                    } else {
+                        val rBody = rResp.text
+                        Log.i(TAG, "followChain try$i: rBody len=${rBody.length} snip=${rBody.take(300).replace("\n"," ").replace("\r"," ")}")
+                        fun extractRedirect(html: String): String? {
+                            jsRedirect(html)?.let { return it }
+                            RE_META_REFRESH.find(html)?.groupValues?.getOrNull(1)?.let { return it }
+                            Regex("https?://[^\"'\\s<>]+").findAll(html).forEach { m ->
+                                val v = m.value
+                                if (v.contains("driveseed") || v.contains("file")) return v
+                            }
+                            Regex("['\"](/[^\"']+)['\"]").findAll(html).forEach { m ->
+                                val v = m.value.removeSurrounding("'", "'").removeSurrounding("\"", "\"")
+                                if (v.isNotBlank()) return if (v.startsWith("/")) "https://driveseed.org$v" else v
+                            }
+                            return null
+                        }
+                        second = extractRedirect(rBody)
+                    }
+                } catch (e: Exception) {
+                    Log.i(TAG, "followChain try$i: r exception ${e::class.simpleName}")
+                }
+                second ?: run { Log.i(TAG, "followChain try$i: second jsRedirect null"); return null }
                 Log.i(TAG, "followChain try$i: second $second")
                 val res = if (second.startsWith("/")) "https://driveseed.org$second" else second
                 Log.i(TAG, "followChain try$i: OK $res")
