@@ -629,12 +629,12 @@ class MoviesModProvider(private val prefs: SharedPreferences? = null) : MainAPI(
     private suspend fun followChain(sid: String): String? {
         Log.i(TAG, "followChain ENTRY sidLen=${sid.length}")
         var lastErr: Exception? = null
-        for (i in 1..6) {
+        for (i in 1..8) {
             try {
                 var current = sid
                 var referer: String? = sid
                 var hops = 0
-                while (hops < 12) {
+                while (hops < 20) {
                     hops++
                     Log.i(TAG, "followChain try$i hop$hops: GET $current")
                     val resp = app.get(current, headers = head, referer = referer, allowRedirects = false)
@@ -645,7 +645,10 @@ class MoviesModProvider(private val prefs: SharedPreferences? = null) : MainAPI(
                             "${base.scheme}://${base.host}${if (base.port != -1 && base.port != 80 && base.port != 443) ":${base.port}" else ""}$loc"
                         }
                         Log.i(TAG, "followChain try$i hop$hops: Location -> $nextUrl")
-                        if (nextUrl.contains("driveseed.org") || nextUrl.contains("/file/") || nextUrl.contains("file.php") || nextUrl.contains("download")) {
+                        if (nextUrl.contains("driveseed.org") && (nextUrl.contains("/file/") || nextUrl.contains("/r?") || nextUrl.contains("download"))) {
+                            return if (nextUrl.startsWith("/")) "https://driveseed.org$nextUrl" else nextUrl
+                        }
+                        if (nextUrl.contains("/file/")) {
                             return if (nextUrl.startsWith("/")) "https://driveseed.org$nextUrl" else nextUrl
                         }
                         if (nextUrl.contains("thenaukriadda.in") || nextUrl.contains("modpro.blog") || nextUrl.contains("en.")) {
@@ -660,7 +663,17 @@ class MoviesModProvider(private val prefs: SharedPreferences? = null) : MainAPI(
                     }
                     val body = resp.text
                     Log.i(TAG, "followChain try$i hop$hops: bodyLen=${body.length}")
-                    body.chunked(600).forEachIndexed { idx, chunk -> if (idx < 5) Log.i(TAG, "followChain try$i hop$hops B[$idx]=$chunk") }
+                    if (body.length < 2000) {
+                        body.chunked(600).forEachIndexed { idx, chunk -> if (idx < 10) Log.i(TAG, "followChain try$i hop$hops B[$idx]=$chunk") }
+                    } else {
+                        Log.i(TAG, "followChain try$i hop$hops B[0]=${body.take(400)}")
+                    }
+                    // look for driveseed links directly
+                    Regex("https?://[^\"'\\s<>]*driveseed[^\"'\\s<>/]+/file/[^\"'\\s<>]+").find(body)?.let { return it.value }
+                    Regex("https?://[^\"'\\s<>]*driveseed[^\"'\\s<>]+").find(body)?.let {
+                        val v = it.value
+                        if (v.contains("/file/") || v.contains("/r?")) return v
+                    }
                     // try js redirect
                     jsRedirect(body)?.let { r ->
                         val nextUrl = if (r.startsWith("http")) r else {
@@ -668,7 +681,8 @@ class MoviesModProvider(private val prefs: SharedPreferences? = null) : MainAPI(
                             "${base.scheme}://${base.host}${if (base.port != -1 && base.port != 80 && base.port != 443) ":${base.port}" else ""}$r"
                         }
                         Log.i(TAG, "followChain try$i hop$hops: js -> $nextUrl")
-                        if (nextUrl.contains("driveseed.org") || nextUrl.contains("/file/")) return if (nextUrl.startsWith("/")) "https://driveseed.org$nextUrl" else nextUrl
+                        if (nextUrl.contains("driveseed.org") && (nextUrl.contains("/file/") || nextUrl.contains("/r?"))) return if (nextUrl.startsWith("/")) "https://driveseed.org$nextUrl" else nextUrl
+                        if (nextUrl.contains("/file/")) return if (nextUrl.startsWith("/")) "https://driveseed.org$nextUrl" else nextUrl
                         current = nextUrl
                         referer = current
                         continue
@@ -680,7 +694,8 @@ class MoviesModProvider(private val prefs: SharedPreferences? = null) : MainAPI(
                             "${base.scheme}://${base.host}${if (base.port != -1 && base.port != 80 && base.port != 443) ":${base.port}" else ""}$r"
                         }
                         Log.i(TAG, "followChain try$i hop$hops: meta -> $nextUrl")
-                        if (nextUrl.contains("driveseed.org") || nextUrl.contains("/file/")) return if (nextUrl.startsWith("/")) "https://driveseed.org$nextUrl" else nextUrl
+                        if (nextUrl.contains("driveseed.org") && (nextUrl.contains("/file/") || nextUrl.contains("/r?"))) return if (nextUrl.startsWith("/")) "https://driveseed.org$nextUrl" else nextUrl
+                        if (nextUrl.contains("/file/")) return if (nextUrl.startsWith("/")) "https://driveseed.org$nextUrl" else nextUrl
                         current = nextUrl
                         referer = current
                         continue
