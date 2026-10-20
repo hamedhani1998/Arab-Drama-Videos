@@ -592,7 +592,7 @@ class MoviesModProvider(private val prefs: SharedPreferences? = null) : MainAPI(
             Log.i(TAG, "resolve: direct sid=$sid")
         } else {
             val (body, finalUrl) = try {
-                val r = app.get(archive, headers = head)
+                val r = app.get(archive, headers = head, allowRedirects = true)
                 if (!r.isSuccessful) return emptyList()
                 r.text to r.url.toString()
             } catch (e: Exception) {
@@ -606,6 +606,10 @@ class MoviesModProvider(private val prefs: SharedPreferences? = null) : MainAPI(
                 sid = finalUrl
                 label = serverLabel
                 Log.i(TAG, "resolve: redirected to sid=$sid")
+            } else if (body.contains("lp-land") || body.contains("_lp_http") || body.contains("lp-s1-form")) {
+                sid = finalUrl
+                label = serverLabel
+                Log.i(TAG, "resolve: using lp page as start=$sid")
             } else {
                 val pairs = RE_SID.findAll(body)
                     .map { unescapeText(it.groupValues[1]).replace(RE_WS, "") to stripTags(it.groupValues[2]) }
