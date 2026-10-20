@@ -601,7 +601,9 @@ class MoviesModProvider(private val prefs: SharedPreferences? = null) : MainAPI(
             label = pick.second
         }
 
-        val fileUrl = followChain(sid) ?: return emptyList()
+        Log.i(TAG, "resolve: about to call followChain sidLen=${sid.length}")
+        val fileUrl = followChain(sid) ?: run { Log.i(TAG, "resolve: followChain returned null"); return emptyList() }
+        Log.i(TAG, "resolve: got fileUrl=${fileUrl.take(80)}")
         return mirrorsOf(fileUrl, label ?: serverLabel)
     }
 
@@ -614,6 +616,7 @@ class MoviesModProvider(private val prefs: SharedPreferences? = null) : MainAPI(
      * وأنّ `action` الثاني يأتي من الصفحة لا من ثابتٍ في الكود.
      */
     private suspend fun followChain(sid: String): String? {
+        Log.i(TAG, "followChain ENTRY sidLen=${sid.length}")
         var lastErr: Exception? = null
         for (i in 1..3) {
             try {
