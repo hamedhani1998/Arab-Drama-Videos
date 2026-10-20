@@ -639,28 +639,29 @@ class MoviesModProvider(private val prefs: SharedPreferences? = null) : MainAPI(
                 Log.i(TAG, "followChain try$i: sc $cname len=${cval.length}")
                 val go = "https://en.thenaukriadda.in/?lp_go=$cname"
                 val goBody = app.get(go, headers = head, referer = f2.first, cookies = mapOf(cname to cval)).text
-                Log.i(TAG, "followChain try$i: goBody len=${goBody.length} snip=${goBody.take(200).replace("\n"," ").replace("\r"," ")}")
+                Log.i(TAG, "followChain try$i: goBody len=${goBody.length} snip=${goBody.take(250).replace("\n"," ").replace("\r"," ")}")
 
-                val first = jsRedirect(goBody) ?: run {
-                    Log.i(TAG, "followChain try$i: first jsRedirect null, trying fallback")
-                    // محاولة البحث عن أي رابط في الجسم
-                    val m = Regex("https?://[^\"'\\s<>]+").findAll(goBody).firstOrNull { it.value.contains("driveseed") || it.value.contains("thenaukriadda") || it.value.contains("file") }
-                    if (m != null) {
-                        Log.i(TAG, "followChain try$i: fallback1 ${m.value}")
-                        m.value
-                    } else null
-                } ?: run { Log.i(TAG, "followChain try$i: first jsRedirect null"); return null }
+                fun extractRedirect(html: String): String? {
+                    jsRedirect(html)?.let { return it }
+                    RE_META_REFRESH.find(html)?.groupValues?.getOrNull(1)?.let { return it }
+                    // أي رابط http/https خارجية
+                    Regex("https?://[^\"'\\s<>]+").findAll(html).forEach { m ->
+                        val v = m.value
+                        if (v.contains("driveseed") || v.contains("drive") || v.contains("file") && !v.contains("thenaukriadda.in/?sid=")) return v
+                    }
+                    // أي مسار مطلق
+                    Regex("['\"](/[^\"']+)['\"]").findAll(html).forEach { m ->
+                        val v = m.value.removeSurrounding("'", "'").removeSurrounding("\"", "\"")
+                        if (v.contains("file") || v.contains("download")) return "https://driveseed.org$v"
+                    }
+                    return null
+                }
+
+                val first = extractRedirect(goBody) ?: run { Log.i(TAG, "followChain try$i: first jsRedirect null"); return null }
                 Log.i(TAG, "followChain try$i: first $first")
                 val rBody = app.get(first, headers = head, referer = go).text
-                Log.i(TAG, "followChain try$i: rBody len=${rBody.length} snip=${rBody.take(200).replace("\n"," ").replace("\r"," ")}")
-                val second = jsRedirect(rBody) ?: run {
-                    Log.i(TAG, "followChain try$i: second jsRedirect null, trying fallback")
-                    val m = Regex("https?://[^\"'\\s<>]+").findAll(rBody).firstOrNull { it.value.contains("driveseed") || it.value.contains("file") }
-                    if (m != null) {
-                        Log.i(TAG, "followChain try$i: fallback2 ${m.value}")
-                        if (m.value.startsWith("/")) "https://driveseed.org${m.value}" else m.value
-                    } else null
-                } ?: run { Log.i(TAG, "followChain try$i: second jsRedirect null"); return null }
+                Log.i(TAG, "followChain try$i: rBody len=${rBody.length} snip=${rBody.take(250).replace("\n"," ").replace("\r"," ")}")
+                val second = extractRedirect(rBody) ?: run { Log.i(TAG, "followChain try$i: second jsRedirect null"); return null }
                 Log.i(TAG, "followChain try$i: second $second")
                 val res = if (second.startsWith("/")) "https://driveseed.org$second" else second
                 Log.i(TAG, "followChain try$i: OK $res")
@@ -896,7 +897,9 @@ class MoviesModProvider(private val prefs: SharedPreferences? = null) : MainAPI(
         val RE_SC = Regex("sc\\(\"([^\"]+)\",\"([^\"]+)\",\\d+\\)")
         // البادئة `window.` **اختيارية**: صفحة `?lp_go` تستعمل `window.location`
         // (داخل `setTimeout`)، وصفحة `/r` تستعمل `location` وحدها. الاثنتان مقيسة.
-        val RE_JS_REDIRECT = Regex("(?:window\\.)?location\\.(?:replace|href|assign)\\s*\\(?\\s*[\"']([^\"']+)[\"']\\s*\\)?", RegexOption.IGNORE_CASE)
+        val RE_JS_REDIRECT = Regex("(?:window\\.)?(?:location|document\\.location|top\\.location)\\.(?:replace|href|assign)\\s*\\(?\\s*[\"']([^\"']+)[\"']\\s*\\)?", RegexOption.IGNORE_CASE)
+        val RE_META_REFRESH = Regex("<meta[^>]+http-equiv=[\"']refresh[\"'][^>]+content=[\"'][^\"']*url=([^\"'>\\s]+)[\"']", RegexOption.IGNORE_CASE)
+        val RE_META_REFRESH2 = Regex("url\\s*=\\s*[\"']([^\"']+)[\"']", RegexOption.IGNORE_CASE)
 
         val RE_R2 = Regex("href=\"(https://pub-[^\"]*\\.r2\\.dev/[^\"]+)\"")
         val RE_VG = Regex("href=\"(https://(?:instant|cdn)\\.video-gen\\.xyz/[^\"]+)\"")
