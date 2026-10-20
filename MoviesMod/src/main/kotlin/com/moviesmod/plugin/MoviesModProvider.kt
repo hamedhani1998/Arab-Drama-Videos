@@ -591,25 +591,47 @@ class MoviesModProvider(private val prefs: SharedPreferences? = null) : MainAPI(
             label = serverLabel
             Log.i(TAG, "resolve: direct sid=$sid")
         } else {
-            val body = try {
+            val (body, finalUrl) = try {
                 val r = app.get(archive, headers = head)
                 if (!r.isSuccessful) return emptyList()
-                r.text
+                r.text to r.url.toString()
             } catch (e: Exception) {
                 Log.i(TAG, "resolve archive FAIL ${e::class.simpleName}" +
                     " ${hostOf(archive)}" +
                     if (e is UnknownHostException) " — المضيف لا يُحلّ" else "")
                 return emptyList()
             }
-            val pairs = RE_SID.findAll(body)
-                .map { unescapeText(it.groupValues[1]).replace(RE_WS, "") to stripTags(it.groupValues[2]) }
-                .filterNot { it.second.contains("comment", true) }
-                .toList()
-            if (pairs.isEmpty()) return emptyList()
-            // مرآةٌ واحدة تكفي: المطابقة لاسم المرآة إن طُلب، وإلا الأولى.
-            val pick = serverLabel?.let { want -> pairs.firstOrNull { it.second.contains(want, true) } } ?: pairs.first()
-            sid = pick.first
-            label = pick.second
+            // check if redirected to sid
+            if (finalUrl.contains("?sid=")) {
+                sid = finalUrl
+                label = serverLabel
+                Log.i(TAG, "resolve: redirected to sid=$sid")
+            } else {
+                val pairs = RE_SID.findAll(body)
+                    .map { unescapeText(it.groupValues[1]).replace(RE_WS, "") to stripTags(it.groupValues[2]) }
+                    .filterNot { it.second.contains("comment", true) }
+                    .toList()
+                if (pairs.isEmpty()) {
+                    // try to find any sid in body
+                    val anySid = Regex("https?://[^\"'\\s<>]+en\\.thenaukriadda\\.in/\\?[^\"'\\s<>]*sid=[^\"'\\s<>]+").find(body)
+                    if (anySid != null) {
+                        sid = anySid.value
+                        label = serverLabel
+                        Log.i(TAG, "resolve: found sid in body=$sid")
+                    } else {
+                        // maybe the page itself IS the lp page?
+                        // try to follow from finalUrl
+                        sid = finalUrl
+                        label = serverLabel
+                        Log.i(TAG, "resolve: using finalUrl as start=$sid")
+                    }
+                } else {
+                    // مرآةٌ واحدة تكفي: المطابقة لاسم المرآة إن طُلب، وإلا الأولى.
+                    val pick = serverLabel?.let { want -> pairs.firstOrNull { it.second.contains(want, true) } } ?: pairs.first()
+                    sid = pick.first
+                    label = pick.second
+                }
+            }
         }
 
         Log.i(TAG, "resolve: about to call followChain sidLen=${sid.length}")
