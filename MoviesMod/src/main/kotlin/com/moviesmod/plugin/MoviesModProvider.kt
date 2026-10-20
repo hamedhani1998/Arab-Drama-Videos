@@ -670,9 +670,10 @@ class MoviesModProvider(private val prefs: SharedPreferences? = null) : MainAPI(
                     }
                     // look for driveseed links directly
                     Regex("https?://[^\"'\\s<>]*driveseed[^\"'\\s<>/]+/file/[^\"'\\s<>]+").find(body)?.let { return it.value }
+                    Regex("https?://[^\"'\\s<>]*driveseed[^\"'\\s<>]+/r\\?[^\"'\\s<>]+").find(body)?.let { return it.value }
                     Regex("https?://[^\"'\\s<>]*driveseed[^\"'\\s<>]+").find(body)?.let {
                         val v = it.value
-                        if (v.contains("/file/") || v.contains("/r?")) return v
+                        if (v.contains("/file/") || v.contains("/r?") || v.contains("download")) return v
                     }
                     // try js redirect
                     jsRedirect(body)?.let { r ->
