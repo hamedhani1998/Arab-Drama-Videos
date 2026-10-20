@@ -95,22 +95,22 @@ class MoviesModProvider(private val prefs: SharedPreferences? = null) : MainAPI(
     private fun fixDns() {
         val c = app.baseClient
         val needsDns = c.dns !is PinnedDns
-        val needsTimeout = c.readTimeoutMillis < 60000
+        val needsTimeout = c.readTimeoutMillis < 90000
         if (!needsDns && !needsTimeout) return
         val b = c.newBuilder()
         if (needsDns) b.dns(PinnedDns(c.dns))
         if (needsTimeout) {
-            b.readTimeout(60, TimeUnit.SECONDS)
-            b.connectTimeout(60, TimeUnit.SECONDS)
-            b.writeTimeout(60, TimeUnit.SECONDS)
-            b.callTimeout(90, TimeUnit.SECONDS)
+            b.readTimeout(90, TimeUnit.SECONDS)
+            b.connectTimeout(90, TimeUnit.SECONDS)
+            b.writeTimeout(90, TimeUnit.SECONDS)
+            b.callTimeout(120, TimeUnit.SECONDS)
         }
         app.baseClient = b.build()
         if (needsDns) {
             Log.i(TAG, "fixDns: ثُبِّت $PINNED_HOST على ${PinnedDns.lastIps.joinToString()}")
         }
         if (needsTimeout) {
-            Log.i(TAG, "fixDns: زيدت مهلات الطلبات")
+            Log.i(TAG, "fixDns: زيدت مهلات الطلبات إلى 90-120ث")
         }
     }
 
@@ -612,28 +612,34 @@ class MoviesModProvider(private val prefs: SharedPreferences? = null) : MainAPI(
      * وأنّ `action` الثاني يأتي من الصفحة لا من ثابتٍ في الكود.
      */
     private suspend fun followChain(sid: String): String? {
-        return try {
-            val land = app.get(sid, headers = head).text
-            val f1 = formOf(land, "lp-land") ?: return null
-            val hop1 = app.post(f1.first, data = f1.second, referer = sid, headers = formHead).text
+        var lastErr: Exception? = null
+        for (i in 1..3) {
+            try {
+                val land = app.get(sid, headers = head).text
+                val f1 = formOf(land, "lp-land") ?: return null
+                val hop1 = app.post(f1.first, data = f1.second, referer = sid, headers = formHead).text
 
-            val f2 = formOf(hop1, "lp-s1-form") ?: return null
-            val hop2 = app.post(f2.first, data = f2.second, referer = f2.first, headers = formHead).text
+                val f2 = formOf(hop1, "lp-s1-form") ?: return null
+                val hop2 = app.post(f2.first, data = f2.second, referer = f2.first, headers = formHead).text
 
-            val ck = RE_SC.find(hop2) ?: return null
-            val cname = ck.groupValues[1]
-            val cval = unescapeText(ck.groupValues[2])
-            val go = "https://en.thenaukriadda.in/?lp_go=$cname"
-            val goBody = app.get(go, headers = head, referer = f2.first, cookies = mapOf(cname to cval)).text
+                val ck = RE_SC.find(hop2) ?: return null
+                val cname = ck.groupValues[1]
+                val cval = unescapeText(ck.groupValues[2])
+                val go = "https://en.thenaukriadda.in/?lp_go=$cname"
+                val goBody = app.get(go, headers = head, referer = f2.first, cookies = mapOf(cname to cval)).text
 
-            val first = jsRedirect(goBody) ?: return null
-            val rBody = app.get(first, headers = head, referer = go).text
-            val second = jsRedirect(rBody) ?: return null
-            if (second.startsWith("/")) "https://driveseed.org$second" else second
-        } catch (e: Exception) {
-            Log.i(TAG, "followChain FAIL ${e::class.simpleName} ${e.message}")
-            null
+                val first = jsRedirect(goBody) ?: return null
+                val rBody = app.get(first, headers = head, referer = go).text
+                val second = jsRedirect(rBody) ?: return null
+                return if (second.startsWith("/")) "https://driveseed.org$second" else second
+            } catch (e: Exception) {
+                lastErr = e
+                Log.i(TAG, "followChain try$i FAIL ${e::class.simpleName}")
+                if (i < 3) kotlinx.coroutines.delay(1500)
+            }
         }
+        Log.i(TAG, "followChain FAIL ${lastErr?.javaClass?.simpleName} ${lastErr?.message}")
+        return null
     }
 
     /**
