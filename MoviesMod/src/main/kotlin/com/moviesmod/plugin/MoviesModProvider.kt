@@ -12,9 +12,12 @@ import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
 import org.jsoup.nodes.Document
 import org.jsoup.nodes.Element
+import java.net.InetAddress
 import java.net.URI
 import java.net.URLDecoder
 import java.net.URLEncoder
+import java.net.UnknownHostException
+import okhttp3.Dns
 
 /**
  * MoviesMod — أفلام ومسلسلات مع روابط التحميل والمشاهدة الحقيقية (moviesmod.uk.com).
@@ -68,6 +71,70 @@ class MoviesModProvider(private val prefs: SharedPreferences? = null) : MainAPI(
         "User-Agent" to UA,
         "Content-Type" to "application/x-www-form-urlencoded",
     )
+
+    // ---------- تعويض سجلّ DNS المحذوف ----------
+
+    /**
+     * أرشيف الأفلام على `links.modpro.blog`، وسجلّ DNS لهذا المضيف **محذوف**
+     * (NXDOMAIN من 1.1.1.1 و8.8.8.8 و9.9.9.9 و208.67.222.222 ومن مخدّمات
+     * `.blog` الأربعة)، بينما حافة Cloudflare ما زالت تخدمه — قِيس
+     * `curl --resolve links.modpro.blog:443:104.21.4.20` ⇒ **200** بصفحة
+     * أرشيف كاملة. ولهذا يفشل التطبيق بـ`UnknownHostException` بينما يعمل
+     * المتصفّح عند غيره، ولهذا أيضًا لا يظهر رابط واحد من الأفلام.
+     *
+     * والعلاج أن يُثبَّت اسم المضيف على عنوان الحافة قبل الطلب، لا أن يُعاد
+     * كتابة الرابط إلى `https://<ip>/…`: قِيس أنّ الثاني **يفشل** (‎000‎ بلا
+     * اتصال) لأن `SNI` يصبح عنوانًا خامًّا و`Host` لا يصحّحه، بينما الأول
+     * يترك الرابط و`SNI` والشهادة كما هي فلا يعلم الخادم بشيء.
+     *
+     * والعنوان يُقرأ من `episodes.modpro.blog` (المضيف الحيّ على النطاق نفسه،
+     * وقِيس أن الاثنين يخدمان من العنوانين ذاتهما) — فلا يُثبَّت عنوانٌ في
+     * الكود يشيخ. ولو تعذّرت القراءة بقي العنوانان المقيسان.
+     */
+    private fun fixDns() {
+        val c = app.baseClient
+        if (c.dns is PinnedDns) return
+        app.baseClient = c.newBuilder().dns(PinnedDns(c.dns)).build()
+        Log.i(TAG, "fixDns: ثُبِّت $PINNED_HOST على ${PinnedDns.lastIps.joinToString()}")
+    }
+
+    /** اسم المضيف من رابط، بلا رمي استثناء على رابطٍ مشوّه. */
+    private fun hostOf(url: String): String =
+        try { URI(url).host ?: url } catch (e: Exception) { url }
+
+    /**
+     * مُحلِّلٌ يمرّ كل شيء إلى DNS الحقيقيّ إلا المضيف المعطوب فيُثبَّته.
+     * `base` هو المُحلِّل الأصليّ يُمرَّر في الباني — فالصنف **متداخلٌ لا داخليّ**
+     * ولا سبيل له إلى `app`، ولو مرّرناه لدارت القراءة على نفسه.
+     */
+    private class PinnedDns(private val base: Dns) : Dns {
+        override fun lookup(hostname: String): List<InetAddress> {
+            if (!hostname.equals(PINNED_HOST, ignoreCase = true)) return base.lookup(hostname)
+            val ips = resolveIps() ?: return base.lookup(hostname)
+            return ips.map { InetAddress.getByName(it) }
+        }
+
+        /** العنوان يُقرأ من مضيفٍ حيّ على النطاق نفسه، ولا يُثبَّت في الكود. */
+        private fun resolveIps(): List<String>? {
+            for (host in PINNED_SEEDS) {
+                val got = try {
+                    base.lookup(host).mapNotNull { it.hostAddress }
+                } catch (e: Exception) {
+                    emptyList()
+                }
+                if (got.isNotEmpty()) {
+                    lastIps = got
+                    return got
+                }
+            }
+            return null
+        }
+
+        companion object {
+            /** آخر ما نجح، ليبقى للمضيف عنوانٌ بعد أول قراءة. */
+            @Volatile var lastIps: List<String> = listOf("104.21.4.20", "172.67.131.141")
+        }
+    }
 
     /**
      * صفوف الصفحة الرئيسية.
@@ -170,7 +237,10 @@ class MoviesModProvider(private val prefs: SharedPreferences? = null) : MainAPI(
             if (epRows.isNotEmpty()) {
                 val episodes = buildEpisodes(epRows, if (pref(KEY_INCLUDE_BATCH, false)) batchRows else emptyList())
                 if (episodes.isEmpty()) {
-                    Log.i(TAG, "load: no episodes parsed for $url")
+                    // التشخيص ضروري هنا: الفرع **صامت**، فلا يفرّق المستخدم
+                    // بين «لا حلقات في الصفحة» و«حلقاتها لم تُجلب». والتفصيل
+                    // يُسجَّل في `buildEpisodes` حيث تُعرف الأعداد الحقيقية.
+                    Log.i(TAG, "load: no episodes parsed for $url (صفوف=${epRows.size})")
                     return null
                 }
                 val seasons = episodes.mapNotNull { it.season }.distinct().sorted()
@@ -279,9 +349,13 @@ class MoviesModProvider(private val prefs: SharedPreferences? = null) : MainAPI(
                             val label = stripTags(a.groupValues[2])
                             val n = epNumberOf(label) ?: return@mapNotNull null
                             sid to row.copy(label = label, epNum = n)
-                        }.toList()
+                        }.toList().also { found ->
+                            Log.i(TAG, "archive ${row.href.substringAfterLast('/')}:" +
+                                " sid=${RE_SID.findAll(r.text).count()} بحلقة=${found.size}")
+                        }
                     } catch (e: Exception) {
-                        Log.i(TAG, "archive FAIL ${row.href} ${e::class.simpleName}")
+                        Log.i(TAG, "archive FAIL ${row.href} ${e::class.simpleName}" +
+                            if (e is UnknownHostException) " — المضيف لا يُحلّ" else "")
                         emptyList()
                     }
                 }
@@ -352,6 +426,7 @@ class MoviesModProvider(private val prefs: SharedPreferences? = null) : MainAPI(
         callback: (ExtractorLink) -> Unit
     ): Boolean {
         return try {
+            fixDns()
             val entries = data.split("\n").map { it.trim() }.filter { it.isNotBlank() }
             if (entries.isEmpty()) return false
 
@@ -490,7 +565,9 @@ class MoviesModProvider(private val prefs: SharedPreferences? = null) : MainAPI(
                 if (!r.isSuccessful) return emptyList()
                 r.text
             } catch (e: Exception) {
-                Log.i(TAG, "resolve archive FAIL ${e::class.simpleName}")
+                Log.i(TAG, "resolve archive FAIL ${e::class.simpleName}" +
+                    " ${hostOf(archive)}" +
+                    if (e is UnknownHostException) " — المضيف لا يُحلّ" else "")
                 return emptyList()
             }
             val pairs = RE_SID.findAll(body)
@@ -732,6 +809,12 @@ class MoviesModProvider(private val prefs: SharedPreferences? = null) : MainAPI(
         const val KIND_EP = "EP"
         const val KIND_DL = "DL"
         const val KIND_BATCH = "BATCH"
+
+        /** المضيف الذي حُذف سجلّه — أرشيف الأفلام. */
+        const val PINNED_HOST = "links.modpro.blog"
+
+        /** مضيفاتٌ حيّة على النطاق نفسه، يُقرأ منها عنوان الحافة. */
+        val PINNED_SEEDS = listOf("episodes.modpro.blog")
 
         const val KEY_QUALITY_ORDER = MoviesModSettingsBottomSheet.KEY_QUALITY_ORDER
         const val KEY_SHOW_ALT = MoviesModSettingsBottomSheet.KEY_SHOW_ALT
