@@ -571,14 +571,14 @@ class MoviesModProvider(private val prefs: SharedPreferences? = null) : MainAPI(
      */
     private suspend fun resolve(archive: String, serverLabel: String?): List<Cand> {
         if (archive.isBlank()) return emptyList()
-        Log.i(TAG, "resolve: start ${archive.take(80)} label=$serverLabel")
+        Log.i(TAG, "resolve: start ${archive.take(100)} label=$serverLabel")
 
         val sid: String
         val label: String?
         if (archive.contains("?sid=")) {
             sid = archive
             label = serverLabel
-            Log.i(TAG, "resolve: direct sid")
+            Log.i(TAG, "resolve: direct sid=$sid")
         } else {
             val body = try {
                 val r = app.get(archive, headers = head)
@@ -617,26 +617,39 @@ class MoviesModProvider(private val prefs: SharedPreferences? = null) : MainAPI(
         var lastErr: Exception? = null
         for (i in 1..3) {
             try {
+                Log.i(TAG, "followChain try$i: GET land $sid")
                 val land = app.get(sid, headers = head).text
-                val f1 = formOf(land, "lp-land") ?: return null
+                Log.i(TAG, "followChain try$i: land len=${land.length}")
+                val f1 = formOf(land, "lp-land") ?: run { Log.i(TAG, "followChain try$i: f1 null"); return null }
+                Log.i(TAG, "followChain try$i: POST f1 ${f1.first} fields=${f1.second.size}")
                 val hop1 = app.post(f1.first, data = f1.second, referer = sid, headers = formHead).text
+                Log.i(TAG, "followChain try$i: hop1 len=${hop1.length}")
 
-                val f2 = formOf(hop1, "lp-s1-form") ?: return null
+                val f2 = formOf(hop1, "lp-s1-form") ?: run { Log.i(TAG, "followChain try$i: f2 null"); return null }
+                Log.i(TAG, "followChain try$i: POST f2 ${f2.first} fields=${f2.second.size}")
                 val hop2 = app.post(f2.first, data = f2.second, referer = f2.first, headers = formHead).text
+                Log.i(TAG, "followChain try$i: hop2 len=${hop2.length}")
 
-                val ck = RE_SC.find(hop2) ?: return null
+                val ck = RE_SC.find(hop2) ?: run { Log.i(TAG, "followChain try$i: sc null"); return null }
                 val cname = ck.groupValues[1]
                 val cval = unescapeText(ck.groupValues[2])
+                Log.i(TAG, "followChain try$i: sc $cname len=${cval.length}")
                 val go = "https://en.thenaukriadda.in/?lp_go=$cname"
                 val goBody = app.get(go, headers = head, referer = f2.first, cookies = mapOf(cname to cval)).text
+                Log.i(TAG, "followChain try$i: goBody len=${goBody.length}")
 
-                val first = jsRedirect(goBody) ?: return null
+                val first = jsRedirect(goBody) ?: run { Log.i(TAG, "followChain try$i: first jsRedirect null"); return null }
+                Log.i(TAG, "followChain try$i: first $first")
                 val rBody = app.get(first, headers = head, referer = go).text
-                val second = jsRedirect(rBody) ?: return null
-                return if (second.startsWith("/")) "https://driveseed.org$second" else second
+                Log.i(TAG, "followChain try$i: rBody len=${rBody.length}")
+                val second = jsRedirect(rBody) ?: run { Log.i(TAG, "followChain try$i: second jsRedirect null"); return null }
+                Log.i(TAG, "followChain try$i: second $second")
+                val res = if (second.startsWith("/")) "https://driveseed.org$second" else second
+                Log.i(TAG, "followChain try$i: OK $res")
+                return res
             } catch (e: Exception) {
                 lastErr = e
-                Log.i(TAG, "followChain try$i FAIL ${e::class.simpleName}")
+                Log.i(TAG, "followChain try$i FAIL ${e::class.simpleName} ${e.message}")
                 if (i < 3) kotlinx.coroutines.delay(1500)
             }
         }
