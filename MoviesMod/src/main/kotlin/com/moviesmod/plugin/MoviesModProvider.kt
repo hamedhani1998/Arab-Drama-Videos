@@ -124,10 +124,21 @@ class MoviesModProvider(private val prefs: SharedPreferences? = null) : MainAPI(
      * ولا سبيل له إلى `app`، ولو مرّرناه لدارت القراءة على نفسه.
      */
     private class PinnedDns(private val base: Dns) : Dns {
+        private val pinnedHosts = setOf(
+            "links.modpro.blog",
+            "episodes.modpro.blog",
+            "en.thenaukriadda.in",
+            "thenaukriadda.in",
+            "driveseed.org",
+            "www.driveseed.org",
+        )
+
         override fun lookup(hostname: String): List<InetAddress> {
-            if (!hostname.equals(PINNED_HOST, ignoreCase = true)) return base.lookup(hostname)
-            val ips = resolveIps() ?: return base.lookup(hostname)
-            return ips.map { InetAddress.getByName(it) }
+            if (pinnedHosts.contains(hostname.lowercase())) {
+                val ips = resolveIps() ?: return base.lookup(hostname)
+                return ips.map { InetAddress.getByName(it) }
+            }
+            return base.lookup(hostname)
         }
 
         /** العنوان يُقرأ من مضيفٍ حيّ على النطاق نفسه، ولا يُثبَّت في الكود. */
