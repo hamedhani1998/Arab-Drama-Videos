@@ -62,6 +62,11 @@ jobs:
           cp **/build/*.cs3 $GITHUB_WORKSPACE/builds
           cp build/plugins.json $GITHUB_WORKSPACE/builds
 
+      # Fix plugins.json repositoryUrl, and normalise the file to the house
+      # format: one entry per plugin, fields in the re-3arabi order, 4-space
+      # indent, Arabic kept literal. Gradle's own writer emits whatever key
+      # order the map happens to have, so it differs per plugin; this makes
+      # every entry — and every build — byte-for-byte the same shape.
       - name: Fix plugins.json repositoryUrl
         env:
           WS: ${{ github.workspace }}
@@ -70,14 +75,22 @@ jobs:
           import json, os
           ws = os.environ["WS"]
           p = os.path.join(ws, "builds", "plugins.json")
+          ORDER = ["url", "status", "version", "name", "internalName", "authors",
+                   "description", "fileSize", "repositoryUrl", "language",
+                   "tvTypes", "iconUrl", "apiVersion", "fileHash"]
           with open(p, encoding="utf-8") as fh:
               plugins = json.load(fh)
+          out = []
           for pl in plugins:
               pl["repositoryUrl"] = "https://github.com/${{ github.repository }}"
               pl.setdefault("language", "ar")
+              ordered = {k: pl[k] for k in ORDER if k in pl}
+              ordered.update({k: v for k, v in pl.items() if k not in ordered})
+              out.append(ordered)
           with open(p, "w", encoding="utf-8") as fh:
-              json.dump(plugins, fh, ensure_ascii=False, indent=4)
-          print("plugins:", [x.get("name") for x in plugins])
+              json.dump(out, fh, ensure_ascii=False, indent=4)
+              fh.write("\n")
+          print("plugins:", [x.get("name") for x in out])
           EOF
 
       # Mirror of the root repo.json onto the builds branch. Same values
