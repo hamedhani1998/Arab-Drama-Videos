@@ -671,9 +671,47 @@ class MoviesModProvider(private val prefs: SharedPreferences? = null) : MainAPI(
                     // look for driveseed links directly
                     Regex("https?://[^\"'\\s<>]*driveseed[^\"'\\s<>/]+/file/[^\"'\\s<>]+").find(body)?.let { return it.value }
                     Regex("https?://[^\"'\\s<>]*driveseed[^\"'\\s<>]+/r\\?[^\"'\\s<>]+").find(body)?.let { return it.value }
-                    Regex("https?://[^\"'\\s<>]*driveseed[^\"'\\s<>]+").find(body)?.let {
+                    Regex("https?://[^\"'\\s<>]*driveseed[^\"'\\s<>]+/[^\"'\\s<>]+").find(body)?.let {
                         val v = it.value
-                        if (v.contains("/file/") || v.contains("/r?") || v.contains("download")) return v
+                        if (v.contains("/file/") || v.contains("/r?") || v.contains("download") || v.contains("drive")) return v
+                    }
+                    // also look for lp-s1-form anywhere
+                    Regex("<form[^>]*lp-s1-form[^>]*>(.*?)</form>", RegexOption.DOT_MATCHES_ALL).find(body)?.let { fm ->
+                        Log.i(TAG, "followChain try$i hop$hops: found lp-s1-form by regex")
+                        val action = RE_ACTION.find(fm.groupValues[0])?.groupValues?.get(1)?.let { unescapeText(it) } ?: current
+                        val fields = RE_FIELD.findAll(fm.groupValues[1]).associate { unescapeText(it.groupValues[1]) to unescapeText(it.groupValues[2]) }
+                        if (fields.isNotEmpty()) {
+                            try {
+                                val presp2 = app.post(action, data = fields, referer = current, headers = formHead, allowRedirects = false)
+                                val ploc2 = presp2.headers["Location"] ?: presp2.headers["location"]
+                                if (!ploc2.isNullOrBlank()) {
+                                    val pnu2 = if (ploc2.startsWith("http")) ploc2 else "https://en.thenaukriadda.in$ploc2"
+                                    if (pnu2.contains("driveseed.org") || pnu2.contains("/file/")) return if (pnu2.startsWith("/")) "https://driveseed.org$pnu2" else pnu2
+                                    current = pnu2; referer = action; continue
+                                }
+                                val h2 = presp2.text
+                                Regex("https?://[^\"'\\s<>]*driveseed[^\"'\\s<>/]+/file/[^\"'\\s<>]+").find(h2)?.let { return it.value }
+                                Regex("https?://[^\"'\\s<>]*driveseed[^\"'\\s<>]+/r\\?[^\"'\\s<>]+").find(h2)?.let { return it.value }
+                                val ck = RE_SC.find(h2)
+                                if (ck != null) {
+                                    val cname = ck.groupValues[1]
+                                    val cval = unescapeText(ck.groupValues[2])
+                                    val go = "https://en.thenaukriadda.in/?lp_go=$cname"
+                                    try {
+                                        val goResp = app.get(go, headers = head, referer = action, cookies = mapOf(cname to cval), allowRedirects = false)
+                                        val l = goResp.headers["Location"] ?: goResp.headers["location"]
+                                        if (!l.isNullOrBlank()) {
+                                            val nu = if (l.startsWith("http")) l else if (l.startsWith("/")) "https://driveseed.org$l" else l
+                                            if (nu.contains("driveseed.org") || nu.contains("/file/")) return if (nu.startsWith("/")) "https://driveseed.org$nu" else nu
+                                            current = nu; referer = go; continue
+                                        }
+                                        val gbody = goResp.text
+                                        Regex("https?://[^\"'\\s<>]*driveseed[^\"'\\s<>/]+/file/[^\"'\\s<>]+").find(gbody)?.let { return it.value }
+                                        Regex("https?://[^\"'\\s<>]*driveseed[^\"'\\s<>]+/r\\?[^\"'\\s<>]+").find(gbody)?.let { return it.value }
+                                    } catch (e: Exception) {}
+                                }
+                            } catch (e: Exception) {}
+                        }
                     }
                     // try js redirect
                     jsRedirect(body)?.let { r ->
