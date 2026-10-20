@@ -688,10 +688,61 @@ class MoviesModProvider(private val prefs: SharedPreferences? = null) : MainAPI(
                     // forms
                     formOf(body, "lp-land")?.let { f ->
                         Log.i(TAG, "followChain try$i hop$hops: form lp-land")
-                        val h = app.post(f.first, data = f.second, referer = current, headers = formHead).text
-                        current = f.first
-                        referer = current
-                        // continue loop
+                        try {
+                            val h = app.post(f.first, data = f.second, referer = current, headers = formHead).text
+                            // check if lp-s1-form is in response
+                            formOf(h, "lp-s1-form")?.let { f2 ->
+                                Log.i(TAG, "followChain try$i hop$hops: form lp-s1-form (from lp-land resp)")
+                                val h2 = app.post(f2.first, data = f2.second, referer = f.first, headers = formHead).text
+                                val ck = RE_SC.find(h2)
+                                if (ck != null) {
+                                    val cname = ck.groupValues[1]
+                                    val cval = unescapeText(ck.groupValues[2])
+                                    val go = "https://en.thenaukriadda.in/?lp_go=$cname"
+                                    try {
+                                        val goResp = app.get(go, headers = head, referer = f2.first, cookies = mapOf(cname to cval), allowRedirects = false)
+                                        val l = goResp.headers["Location"] ?: goResp.headers["location"]
+                                        if (!l.isNullOrBlank()) {
+                                            val nu = if (l.startsWith("http")) l else if (l.startsWith("/")) "https://driveseed.org$l" else l
+                                            if (nu.contains("driveseed.org") || nu.contains("/file/")) return if (nu.startsWith("/")) "https://driveseed.org$nu" else nu
+                                        }
+                                        val gbody = goResp.text
+                                        jsRedirect(gbody)?.let { r ->
+                                            val nu = if (r.startsWith("http")) r else if (r.startsWith("/")) "https://driveseed.org$r" else r
+                                            if (nu.contains("driveseed.org") || nu.contains("/file/")) return if (nu.startsWith("/")) "https://driveseed.org$nu" else nu
+                                        }
+                                        Regex("https?://[^\"'\\s<>]*driveseed[^\"'\\s<>/]+/file/[^\"'\\s<>]+").find(gbody)?.let { return it.value }
+                                    } catch (e: Exception) {}
+                                    throw Exception("followChain lp-go failed")
+                                }
+                            }
+                            // also check for sc in response
+                            val ck2 = RE_SC.find(h)
+                            if (ck2 != null) {
+                                val cname = ck2.groupValues[1]
+                                val cval = unescapeText(ck2.groupValues[2])
+                                val go = "https://en.thenaukriadda.in/?lp_go=$cname"
+                                try {
+                                    val goResp = app.get(go, headers = head, referer = f.first, cookies = mapOf(cname to cval), allowRedirects = false)
+                                    val l = goResp.headers["Location"] ?: goResp.headers["location"]
+                                    if (!l.isNullOrBlank()) {
+                                        val nu = if (l.startsWith("http")) l else if (l.startsWith("/")) "https://driveseed.org$l" else l
+                                        if (nu.contains("driveseed.org") || nu.contains("/file/")) return if (nu.startsWith("/")) "https://driveseed.org$nu" else nu
+                                    }
+                                    val gbody = goResp.text
+                                    jsRedirect(gbody)?.let { r ->
+                                        val nu = if (r.startsWith("http")) r else if (r.startsWith("/")) "https://driveseed.org$r" else r
+                                        if (nu.contains("driveseed.org") || nu.contains("/file/")) return if (nu.startsWith("/")) "https://driveseed.org$nu" else nu
+                                    }
+                                    Regex("https?://[^\"'\\s<>]*driveseed[^\"'\\s<>/]+/file/[^\"'\\s<>]+").find(gbody)?.let { return it.value }
+                                } catch (e: Exception) {}
+                            }
+                            current = f.first
+                            referer = current
+                        } catch (e: Exception) {
+                            current = f.first
+                            referer = current
+                        }
                         continue
                     }
                     formOf(body, "lp-s1-form")?.let { f ->
@@ -711,6 +762,7 @@ class MoviesModProvider(private val prefs: SharedPreferences? = null) : MainAPI(
                                 if (!l.isNullOrBlank()) {
                                     val nu = if (l.startsWith("http")) l else "https://driveseed.org$l"
                                     if (nu.contains("driveseed.org")) return if (nu.startsWith("/")) "https://driveseed.org$nu" else nu
+                                    if (nu.contains("/file/")) return if (nu.startsWith("/")) "https://driveseed.org$nu" else nu
                                     current = if (l.startsWith("http")) l else "https://en.thenaukriadda.in$l"
                                     referer = go
                                     continue
@@ -719,10 +771,12 @@ class MoviesModProvider(private val prefs: SharedPreferences? = null) : MainAPI(
                                 jsRedirect(gbody)?.let { r ->
                                     val nu = if (r.startsWith("http")) r else "https://driveseed.org$r"
                                     if (nu.contains("driveseed.org")) return if (nu.startsWith("/")) "https://driveseed.org$nu" else nu
+                                    if (nu.contains("/file/")) return if (nu.startsWith("/")) "https://driveseed.org$nu" else nu
                                     current = if (r.startsWith("http")) r else "https://en.thenaukriadda.in$r"
                                     referer = go
                                     continue
                                 }
+                                Regex("https?://[^\"'\\s<>]*driveseed[^\"'\\s<>/]+/file/[^\"'\\s<>]+").find(gbody)?.let { return it.value }
                             } catch (e: Exception) {}
                             continue
                         }
