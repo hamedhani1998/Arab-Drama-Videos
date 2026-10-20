@@ -647,13 +647,18 @@ class MoviesModProvider(private val prefs: SharedPreferences? = null) : MainAPI(
                         first = locHdr
                     } else {
                         val goBody = goResp.text
-                        Log.i(TAG, "followChain try$i: goBody len=${goBody.length} snip=${goBody.take(300).replace("\n"," ").replace("\r"," ")}")
+                        Log.i(TAG, "followChain try$i: goBody len=${goBody.length}")
+                        goBody.chunked(800).forEachIndexed { idx, chunk -> Log.i(TAG, "followChain try$i: GOBODY[$idx]=$chunk") }
                         fun extractRedirect(html: String): String? {
                             jsRedirect(html)?.let { return it }
                             RE_META_REFRESH.find(html)?.groupValues?.getOrNull(1)?.let { return it }
                             Regex("https?://[^\"'\\s<>]+").findAll(html).forEach { m ->
                                 val v = m.value
-                                if ((v.contains("driveseed") || v.contains("file")) && !v.contains("thenaukriadda.in/?sid=") && !v.contains("lp_go")) return v
+                                if ((v.contains("driveseed")) && !v.contains("thenaukriadda.in/?sid=") && !v.contains("lp_go")) return v
+                            }
+                            Regex("https?://[^\"'\\s<>]+").findAll(html).forEach { m ->
+                                val v = m.value
+                                if ((v.contains("file") || v.contains("r?key=") || v.contains("download")) && !v.contains("thenaukriadda.in/?sid=") && !v.contains("lp_go")) return v
                             }
                             Regex("['\"](/[^\"']+)['\"]").findAll(html).forEach { m ->
                                 val v = m.value.removeSurrounding("'", "'").removeSurrounding("\"", "\"")
@@ -664,7 +669,7 @@ class MoviesModProvider(private val prefs: SharedPreferences? = null) : MainAPI(
                         first = extractRedirect(goBody)
                     }
                 } catch (e: Exception) {
-                    Log.i(TAG, "followChain try$i: go exception ${e::class.simpleName}")
+                    Log.i(TAG, "followChain try$i: go exception ${e::class.simpleName} ${e.message}")
                 }
                 first ?: run { Log.i(TAG, "followChain try$i: first jsRedirect null"); return null }
                 Log.i(TAG, "followChain try$i: first $first")
