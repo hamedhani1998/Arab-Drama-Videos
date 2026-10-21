@@ -604,6 +604,12 @@ class MoviesModProvider(private val prefs: SharedPreferences? = null) : MainAPI(
                 Regex("https?://[^\"'\\s<>]*driveseed[^\"'\\s<>]+/r\\?[^\"'\\s<>]+").find(qt.replace("\\/", "/"))?.let {
                     return mirrorsOf(it.value.replace("\\/", "/"), label ?: serverLabel)
                 }
+                Regex("https?://[^\"'\\s<>]*driveseed[^\"'\\s<>]+/[^\"'\\s<>]+").find(qt.replace("\\/", "/"))?.let { m ->
+                    val v = m.value
+                    if (v.contains("/file/") || v.contains("/r?")) {
+                        return mirrorsOf(v, label ?: serverLabel)
+                    }
+                }
             } catch (e: Exception) {}
         } else if (archive.contains("links.modpro.blog")) {
             Log.i(TAG, "resolve: links.modpro.blog archive")
