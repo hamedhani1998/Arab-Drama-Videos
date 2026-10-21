@@ -3,9 +3,9 @@ package com.anyshort.plugin
 import android.content.SharedPreferences
 import android.util.Log
 import cloudstreamshared.FormatTag
+import com.fasterxml.jackson.annotation.JsonProperty
 import com.fasterxml.jackson.databind.DeserializationFeature
 import com.fasterxml.jackson.databind.ObjectMapper
-import com.fasterxml.jackson.databind.PropertyNamingStrategies
 import com.fasterxml.jackson.module.kotlin.registerKotlinModule
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.ExtractorLink
@@ -14,11 +14,12 @@ import com.lagradost.cloudstream3.utils.getQualityFromName
 import com.lagradost.cloudstream3.utils.newExtractorLink
 import java.net.URLEncoder
 
-// أسماء الحقول في الـAPI كلّها snake_case (title_id, cover_url, episode_no…)،
-// فسماء التسمية على المُحلِّل كلّه أدقّ من صنف تعليق حقلٍ حقل.
+// أسماء الحقول في الـAPI snake_case (title_id, cover_url…) فتُعلَّق حقلًا حقلًا
+// بـ @JsonProperty كما في بقية مصادر المستودع (Drama4All وDramadunyam…) —
+// تسميةٌ عامة على المُحلِّل تُجريبٌ غير مُختبَر مع مُنشئات Kotlin، وخطأُ
+// التسمية يصمت: الحقل يقرأ null ولا يُسقط شيئاً.
 private val mapper = ObjectMapper().registerKotlinModule()
     .configure(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES, false)
-    .setPropertyNamingStrategy(PropertyNamingStrategies.SNAKE_CASE)
 
 private const val TAG = "AnyShort"
 
@@ -33,18 +34,18 @@ private const val EPISODE_MAX = 600
 
 /** بطاقة عملٍ كما تردّ في الرئيسية والبحث والتصفّح — الاسم والمعرّف والغلاف. */
 private data class Card(
-    val titleId: Int? = null,
+    @JsonProperty("title_id") val titleId: Int? = null,
     val name: String? = null,
     val slug: String? = null,
-    val coverUrl: String? = null,
+    @JsonProperty("cover_url") val coverUrl: String? = null,
     val source: String? = null,
-    val totalEpisodes: Int? = null,
+    @JsonProperty("total_episodes") val totalEpisodes: Int? = null,
 )
 
 /** قسمٌ من أقسام `/v1/home` — عناوين تلقائية (`auto`) أو محرّرية (`manual`). */
 private data class Rail(
     val title: String? = null,
-    val titleKey: String? = null,
+    @JsonProperty("title_key") val titleKey: String? = null,
     val kind: String? = null,
     val ref: String? = null,
     val items: List<Card>? = null,
@@ -52,13 +53,30 @@ private data class Rail(
 
 private data class Spotlight(
     val mode: String? = null,
-    val tagId: Int? = null,
+    @JsonProperty("tag_id") val tagId: Int? = null,
     val items: List<Card>? = null,
 )
 
 private data class HomeData(
     val spotlight: Spotlight? = null,
     val rails: List<Rail>? = null,
+)
+
+// كل استجابةٍ ملفوفةٌ `{data, meta}` (قِيس 2026-10-21 على home/title/play/subs
+// وsearch/episodes) — وقوائم الحلقات والبحث تحمل `page` على نفس المستوى.
+// قراءة النماذج من النصّ الأصلي مباشرة تُعطي null في كل حقلٍ (الحقول في
+// `data`)، والواجهة والتفاصيل والبثّ كلّها تصير فارغة.
+private data class HomeResp(val data: HomeData? = null)
+
+private data class TitleResp(val data: TitleDetail? = null)
+
+private data class PlayResp(val data: PlayStreamList? = null)
+
+/** محتوى `data` في `/play` — عائلة المصدر وصيغته ودرجاته. */
+private data class PlayStreamList(
+    val source: String? = null,
+    val protocol: String? = null,
+    val streams: List<PlayStream>? = null,
 )
 
 /** ظرف `data` في البحث والتصفّح — الصفحة خارجه ولا نحتاجها (صفحة واحدة لكلٍّ). */
@@ -69,21 +87,21 @@ private data class TagName(val name: String? = null)
 private data class Gating(val mode: String? = null)
 
 private data class TitleDetail(
-    val titleId: Int? = null,
+    @JsonProperty("title_id") val titleId: Int? = null,
     val name: String? = null,
     val slug: String? = null,
-    val coverUrl: String? = null,
+    @JsonProperty("cover_url") val coverUrl: String? = null,
     val description: String? = null,
     val tags: List<TagName>? = null,
-    val totalEpisodes: Int? = null,
+    @JsonProperty("total_episodes") val totalEpisodes: Int? = null,
     val source: String? = null,
     val gating: Gating? = null,
 )
 
 private data class EpisodeItem(
-    val episodeId: Long? = null,
-    val episodeNo: Int? = null,
-    val hasStreams: Boolean? = null,
+    @JsonProperty("episode_id") val episodeId: Long? = null,
+    @JsonProperty("episode_no") val episodeNo: Int? = null,
+    @JsonProperty("has_streams") val hasStreams: Boolean? = null,
     val access: String? = null,
     val locked: Boolean? = null,
 )
@@ -91,7 +109,7 @@ private data class EpisodeItem(
 private data class PageMeta(
     val limit: Int? = null,
     val offset: Int? = null,
-    val hasMore: Boolean? = null,
+    @JsonProperty("has_more") val hasMore: Boolean? = null,
 )
 
 private data class EpisodesResp(
@@ -107,19 +125,13 @@ private data class PlayStream(
     val width: Int? = null,
     val height: Int? = null,
     val url: String? = null,
-    val expireAt: String? = null,
+    @JsonProperty("expire_at") val expireAt: String? = null,
     val stale: Boolean? = null,
 )
 
-private data class PlayResp(
-    val source: String? = null,
-    val protocol: String? = null,
-    val streams: List<PlayStream>? = null,
-)
-
 private data class SubTrack(
-    val languageCode: String? = null,
-    val languageName: String? = null,
+    @JsonProperty("language_code") val languageCode: String? = null,
+    @JsonProperty("language_name") val languageName: String? = null,
     val format: String? = null,
     val url: String? = null,
 )
@@ -259,7 +271,7 @@ class AnyShortProvider(private val prefs: SharedPreferences? = null) : MainAPI()
         if (page > 1) return null
         return try {
             val text = apiJson("/v1/home?lang=$API_LANG") ?: return null
-            val h = mapper.readValue(text, HomeData::class.java)
+            val h = mapper.readValue(text, HomeResp::class.java).data ?: return null
             val rows = ArrayList<HomePageList>()
             h.spotlight?.items.orEmpty().mapNotNull { card(it) }
                 .takeIf { it.isNotEmpty() }
@@ -307,7 +319,7 @@ class AnyShortProvider(private val prefs: SharedPreferences? = null) : MainAPI()
                 return null
             }
             val tText = apiJson("/v1/titles/$id?lang=$API_LANG") ?: return null
-            val t = mapper.readValue(tText, TitleDetail::class.java)
+            val t = mapper.readValue(tText, TitleResp::class.java).data ?: return null
             val title = t.name?.trim().takeUnless { it.isNullOrBlank() } ?: return null
 
             // الحلقات تأتي مصفوفةً مستقلّة (لا في التفاصيل)، وتُصفَّح ٦٠ً في
@@ -378,7 +390,7 @@ class AnyShortProvider(private val prefs: SharedPreferences? = null) : MainAPI()
             // روابط `/play` موقّعة وتنتهي خلال ساعات (حقل `expire_at` قِيس
             // 2026-10-21: ~16 ساعة) — تُطلب هنا مع كل بثّ ولا تُخزَّن أبداً.
             val pText = apiJson("/v1/episodes/$eid/play?lang=$API_LANG") ?: return false
-            val play = mapper.readValue(pText, PlayResp::class.java)
+            val play = mapper.readValue(pText, PlayResp::class.java).data ?: return false
             val streams = play.streams.orEmpty().filter { !it.url.isNullOrBlank() }
             if (streams.isEmpty()) {
                 Log.e(TAG, "loadLinks no streams eid=$eid ep=$ep")
