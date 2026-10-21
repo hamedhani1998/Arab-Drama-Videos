@@ -588,8 +588,8 @@ class MoviesModProvider(private val prefs: SharedPreferences? = null) : MainAPI(
         if (archive.isBlank()) return emptyList()
         Log.i(TAG, "resolve: start ${archive.take(100)} label=$serverLabel")
 
-        val sid: String
-        val label: String?
+        var sid: String = ""
+        var label: String? = null
         if (archive.contains("?sid=")) {
             sid = archive
             label = serverLabel
@@ -611,15 +611,70 @@ class MoviesModProvider(private val prefs: SharedPreferences? = null) : MainAPI(
                 label = serverLabel
                 Log.i(TAG, "resolve: redirected to sid=$sid")
             } else if (finalUrl.contains("en.thenaukriadda.in")) {
+                // check if there are multiple sid links in body
+                val allSids = RE_SID_ANY.findAll(body).map {
+                    val raw = it.value
+                    if (raw.startsWith("http")) raw.replace("&amp;", "&") else "https://$raw".replace("&amp;", "&")
+                }.distinct().toList()
+                if (allSids.size > 1) {
+                    Log.i(TAG, "resolve: found ${allSids.size} sid links, processing first and will handle others")
+                    // For now process all
+                    val results = ArrayList<Cand>()
+                    for ((idx, s) in allSids.withIndex()) {
+                        try {
+                            val qr = app.get(s, headers = head, referer = archive, allowRedirects = true)
+                            val qt = qr.text
+                            Regex("https?://[^\"'\\s<>]*driveseed[^\"'\\s<>/]+/file/[^\"'\\s<>]+").find(qt.replace("\\/", "/"))?.let { m ->
+                                results.addAll(mirrorsOf(m.value.replace("\\/", "/"), allSids[idx]))
+                                continue
+                            }
+                            Regex("https?://[^\"'\\s<>]*driveseed[^\"'\\s<>]+/r\\?[^\"'\\s<>]+").find(qt.replace("\\/", "/"))?.let { m ->
+                                results.addAll(mirrorsOf(m.value.replace("\\/", "/"), allSids[idx]))
+                                continue
+                            }
+                            val fu = followChain(s)
+                            if (fu != null) {
+                                results.addAll(mirrorsOf(fu, allSids[idx]))
+                            }
+                        } catch (e: Exception) {}
+                    }
+                    if (results.isNotEmpty()) return results.distinctBy { it.url }
+                }
                 sid = finalUrl.replace("&amp;", "&")
                 label = serverLabel
                 Log.i(TAG, "resolve: final is thenaukriadda=$sid")
             } else {
                 // look for direct thenaukriadda sid links first
-                val anySid = RE_SID_ANY.find(body) ?: Regex("https?://[^\"'\\s<>]+en\\.thenaukriadda\\.in/\\?sid=[^\"'\\s<>]+").find(body) ?: Regex("en\\.thenaukriadda\\.in/\\?[^\"'\\s<>]*sid=[^\"'\\s<>]+").find(body)
-                if (anySid != null) {
-                    val raw = anySid.value
-                    sid = if (raw.startsWith("http")) raw.replace("&amp;", "&") else "https://$raw".replace("&amp;", "&")
+                val allSids = RE_SID_ANY.findAll(body).map {
+                    val raw = it.value
+                    if (raw.startsWith("http")) raw.replace("&amp;", "&") else "https://$raw".replace("&amp;", "&")
+                }.distinct().toList()
+                if (allSids.isNotEmpty()) {
+                    if (allSids.size > 1) {
+                        Log.i(TAG, "resolve: found ${allSids.size} sid links in archive page")
+                        val results = ArrayList<Cand>()
+                        for ((idx, s) in allSids.withIndex()) {
+                            try {
+                                val qr = app.get(s, headers = head, referer = archive, allowRedirects = true)
+                                val qt = qr.text
+                                Regex("https?://[^\"'\\s<>]*driveseed[^\"'\\s<>/]+/file/[^\"'\\s<>]+").find(qt.replace("\\/", "/"))?.let { m ->
+                                    results.addAll(mirrorsOf(m.value.replace("\\/", "/"), allSids[idx]))
+                                    continue
+                                }
+                                Regex("https?://[^\"'\\s<>]*driveseed[^\"'\\s<>]+/r\\?[^\"'\\s<>]+").find(qt.replace("\\/", "/"))?.let { m ->
+                                    results.addAll(mirrorsOf(m.value.replace("\\/", "/"), allSids[idx]))
+                                    continue
+                                }
+                                val fu = followChain(s)
+                                if (fu != null) {
+                                    results.addAll(mirrorsOf(fu, allSids[idx]))
+                                }
+                            } catch (e: Exception) {}
+                        }
+                        if (results.isNotEmpty()) return results.distinctBy { it.url }
+                    }
+                    val raw = allSids.first()
+                    sid = raw
                     label = serverLabel
                     Log.i(TAG, "resolve: found sid link in body=$sid")
                     // try quick extraction
@@ -634,18 +689,6 @@ class MoviesModProvider(private val prefs: SharedPreferences? = null) : MainAPI(
                         }
                     } catch (e: Exception) {}
                 } else if (body.contains("lp-land") || body.contains("_lp_http") || body.contains("lp-s1-form") || body.contains("thenaukriadda.in") || body.contains("timed-content")) {
-                    // try to find any sid in body again more aggressively
-                    val anySid2 = Regex("sid=([A-Za-z0-9+/=]+)").find(body)
-                    if (anySid2 != null) {
-                        sid = "https://en.thenaukriadda.in/?sid=${anySid2.groupValues[1]}"
-                        label = serverLabel
-                        Log.i(TAG, "resolve: extracted sid param=$sid")
-                    } else {
-                        sid = finalUrl.replace("&amp;", "&")
-                        label = serverLabel
-                        Log.i(TAG, "resolve: using lp page as start=$sid")
-                    }
-                } else {
                     val pairs = RE_SID.findAll(body)
                         .map { unescapeText(it.groupValues[1]).replace(RE_WS, "") to stripTags(it.groupValues[2]) }
                         .filterNot { it.second.contains("comment", true) }
