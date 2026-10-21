@@ -100,17 +100,17 @@ class MoviesModProvider(private val prefs: SharedPreferences? = null) : MainAPI(
         val b = c.newBuilder()
         if (needsDns) b.dns(PinnedDns(c.dns))
         if (needsTimeout) {
-            b.readTimeout(180, TimeUnit.SECONDS)
-            b.connectTimeout(120, TimeUnit.SECONDS)
-            b.writeTimeout(120, TimeUnit.SECONDS)
-            b.callTimeout(300, TimeUnit.SECONDS)
+            b.readTimeout(60, TimeUnit.SECONDS)
+            b.connectTimeout(30, TimeUnit.SECONDS)
+            b.writeTimeout(30, TimeUnit.SECONDS)
+            b.callTimeout(90, TimeUnit.SECONDS)
         }
         app.baseClient = b.build()
         if (needsDns) {
             Log.i(TAG, "fixDns: ثُبِّت $PINNED_HOST على ${PinnedDns.lastIps.joinToString()}")
         }
         if (needsTimeout) {
-            Log.i(TAG, "fixDns: زيدت مهلات الطلبات إلى 180-300ث")
+            Log.i(TAG, "fixDns: قلصت مهلات الطلبات إلى 30-90ث")
         }
     }
 
