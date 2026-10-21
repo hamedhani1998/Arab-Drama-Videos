@@ -594,6 +594,17 @@ class MoviesModProvider(private val prefs: SharedPreferences? = null) : MainAPI(
             sid = archive
             label = serverLabel
             Log.i(TAG, "resolve: direct sid=$sid")
+            // try fast
+            try {
+                val qr = app.get(sid, headers = head, allowRedirects = true)
+                val qt = qr.text
+                Regex("https?://[^\"'\\s<>]*driveseed[^\"'\\s<>/]+/file/[^\"'\\s<>]+").find(qt.replace("\\/", "/"))?.let {
+                    return mirrorsOf(it.value.replace("\\/", "/"), label ?: serverLabel)
+                }
+                Regex("https?://[^\"'\\s<>]*driveseed[^\"'\\s<>]+/r\\?[^\"'\\s<>]+").find(qt.replace("\\/", "/"))?.let {
+                    return mirrorsOf(it.value.replace("\\/", "/"), label ?: serverLabel)
+                }
+            } catch (e: Exception) {}
         } else {
             val (body, finalUrl) = try {
                 val r = app.get(archive, headers = head, allowRedirects = true, referer = mainUrl)
