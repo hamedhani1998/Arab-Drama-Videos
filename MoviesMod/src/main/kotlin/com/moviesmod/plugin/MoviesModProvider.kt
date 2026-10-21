@@ -605,6 +605,67 @@ class MoviesModProvider(private val prefs: SharedPreferences? = null) : MainAPI(
                     return mirrorsOf(it.value.replace("\\/", "/"), label ?: serverLabel)
                 }
             } catch (e: Exception) {}
+        } else if (archive.contains("links.modpro.blog")) {
+            Log.i(TAG, "resolve: links.modpro.blog archive")
+            val (body, finalUrl) = try {
+                val r = app.get(archive, headers = head, allowRedirects = true, referer = mainUrl)
+                if (!r.isSuccessful) return emptyList()
+                r.text to r.url.toString()
+            } catch (e: Exception) {
+                Log.i(TAG, "resolve archive FAIL ${e::class.simpleName}")
+                return emptyList()
+            }
+            val allSids = RE_SID_ANY.findAll(body).map {
+                val raw = it.value
+                if (raw.startsWith("http")) raw.replace("&amp;", "&") else "https://$raw".replace("&amp;", "&")
+            }.distinct().toList()
+            if (allSids.isNotEmpty()) {
+                Log.i(TAG, "resolve: links.modpro found ${allSids.size} sid links")
+                val results = ArrayList<Cand>()
+                for ((idx, s) in allSids.withIndex()) {
+                    try {
+                        val qr = app.get(s, headers = head, referer = finalUrl, allowRedirects = true)
+                        val qt = qr.text
+                        Regex("https?://[^\"'\\s<>]*driveseed[^\"'\\s<>/]+/file/[^\"'\\s<>]+").find(qt.replace("\\/", "/"))?.let { m ->
+                            results.addAll(mirrorsOf(m.value.replace("\\/", "/"), allSids[idx]))
+                            continue
+                        }
+                        Regex("https?://[^\"'\\s<>]*driveseed[^\"'\\s<>]+/r\\?[^\"'\\s<>]+").find(qt.replace("\\/", "/"))?.let { m ->
+                            results.addAll(mirrorsOf(m.value.replace("\\/", "/"), allSids[idx]))
+                            continue
+                        }
+                        Regex("https?://[^\"'\\s<>]*driveseed[^\"'\\s<>]+/[^\"'\\s<>]+").find(qt.replace("\\/", "/"))?.let { m ->
+                            val v = m.value
+                            if (v.contains("/file/") || v.contains("/r?")) {
+                                results.addAll(mirrorsOf(v, allSids[idx]))
+                                continue
+                            }
+                        }
+                        val fu = followChain(s)
+                        if (fu != null) {
+                            results.addAll(mirrorsOf(fu, allSids[idx]))
+                        }
+                    } catch (e: Exception) {}
+                }
+                if (results.isNotEmpty()) return results.distinctBy { it.url }
+            }
+            // try to extract any sid param
+            Regex("sid=([A-Za-z0-9+/=]+)").find(body)?.let { m ->
+                val s = "https://en.thenaukriadda.in/?sid=${m.groupValues[1]}"
+                try {
+                    val qr = app.get(s, headers = head, referer = finalUrl, allowRedirects = true)
+                    val qt = qr.text
+                    Regex("https?://[^\"'\\s<>]*driveseed[^\"'\\s<>/]+/file/[^\"'\\s<>]+").find(qt.replace("\\/", "/"))?.let { m2 ->
+                        return mirrorsOf(m2.value.replace("\\/", "/"), label ?: serverLabel)
+                    }
+                    Regex("https?://[^\"'\\s<>]*driveseed[^\"'\\s<>]+/r\\?[^\"'\\s<>]+").find(qt.replace("\\/", "/"))?.let { m2 ->
+                        return mirrorsOf(m2.value.replace("\\/", "/"), label ?: serverLabel)
+                    }
+                    val fu = followChain(s)
+                    if (fu != null) return mirrorsOf(fu, label ?: serverLabel)
+                } catch (e: Exception) {}
+            }
+            return emptyList()
         } else {
             val (body, finalUrl) = try {
                 val r = app.get(archive, headers = head, allowRedirects = true, referer = mainUrl)
