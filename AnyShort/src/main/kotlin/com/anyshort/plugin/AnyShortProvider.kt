@@ -13,6 +13,11 @@ import com.lagradost.cloudstream3.utils.ExtractorLinkType
 import com.lagradost.cloudstream3.utils.getQualityFromName
 import com.lagradost.cloudstream3.utils.newExtractorLink
 import java.net.URLEncoder
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeoutOrNull
 
 // أسماء الحقول في الـAPI snake_case (title_id, cover_url…) فتُعلَّق حقلًا حقلًا
 // بـ @JsonProperty كما في بقية مصادر المستودع (Drama4All وDramadunyam…) —
@@ -72,10 +77,13 @@ private data class TitleResp(val data: TitleDetail? = null)
 
 private data class PlayResp(val data: PlayStreamList? = null)
 
-/** محتوى `data` في `/play` — عائلة المصدر وصيغته ودرجاته. */
+/** محتوى `data` في `/play` — عائلة المصدر وصيغته ودرجاته. `sub_langs`
+ * لغات الترجمة المدموجة في الصورة (pinedrama)؛ `[null]` في netshort وreelshort. */
 private data class PlayStreamList(
     val source: String? = null,
     val protocol: String? = null,
+    @JsonProperty("sub_lang") val subLang: String? = null,
+    @JsonProperty("sub_langs") val subLangs: List<String?>? = null,
     val streams: List<PlayStream>? = null,
 )
 
@@ -413,70 +421,172 @@ class AnyShortProvider(private val prefs: SharedPreferences? = null) : MainAPI()
                 return false
             }
 
-            // روابط `/play` موقّعة وتنتهي خلال ساعات (حقل `expire_at` قِيس
-            // 2026-10-21: ~16 ساعة) — تُطلب هنا مع كل بثّ ولا تُخزَّن أبداً.
-            val pText = apiJson("/v1/episodes/$eid/play?lang=$API_LANG") ?: return false
-            val play = mapper.readValue(pText, PlayResp::class.java).data ?: return false
-            val streams = play.streams.orEmpty().filter { !it.url.isNullOrBlank() }
-            if (streams.isEmpty()) {
-                Log.e(TAG, "loadLinks no streams eid=$eid ep=$ep")
-                return false
-            }
+            // رمزٌ واحد قبل الإرسال المتوازي — لا مصافحتان معاً.
+            if (token == null) handshake()
 
-            // الصيغة المُعلَنة: `protocol` في الاستجابة (`mp4` | `hls`). تُمرَّر
-            // إلى الوسم لئلا يُخمَن من رابطٍ موقّعٍ بلا امتداد (روابط tiktokcdn
-            // بلا `.mp4` في المسار إطلاقاً — قِيس 2026-10-21).
-            val declared = when (play.protocol?.lowercase()) {
-                "hls" -> "M3U8"
-                "mp4" -> "MP4"
-                else -> play.protocol?.trim()?.takeIf { it.isNotBlank() }?.uppercase()
-            }
-
-            // الترتيب كما يرتبه موقعه نفسه (`streamSources` في theoplayer.js):
-            // h264 أولاً (توافق)، ثم الأعلى ارتفاعاً — والمشغّل يعكس الترتيب
-            // بـ -priority، فالأول في القائمة أفضل افتراضاً.
-            val sorted = streams.sortedWith(
-                compareBy<PlayStream> { if (it.codec == "h264") 0 else 1 }
-                    .thenByDescending { it.height ?: 0 },
-            )
-
-            for (s in sorted) {
-                val u = s.url ?: continue
-                val isHls = s.protocol.equals("hls", ignoreCase = true) ||
-                    u.contains(".m3u8", ignoreCase = true)
-                val type = if (isHls) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
-                val q = s.quality?.trim().takeUnless { it.isNullOrBlank() }
-                    ?: s.height?.let { "${it}p" }
-                    ?: "Auto"
-                val linkName = if (showFormatTag()) {
-                    FormatTag.tagged(q, u, type, declared)
-                } else {
-                    q
+            coroutineScope {
+                // ملفّات الترجمة تُطلب بالتوازي مع `/play`: السيرفر الأول
+                // لا ينتظرها إطلاقاً.
+                val subsJob = launch {
+                    try {
+                        if (showSubs()) emitSubtitles(eid, ep, subtitleCallback)
+                    } catch (e: kotlinx.coroutines.CancellationException) {
+                        throw e
+                    } catch (e: Exception) {
+                        Log.e(TAG, "subs FAILED eid=$eid", e)
+                    }
                 }
-                Log.d(TAG, "emit eid=$eid ep=$ep q=$q hls=$isHls url=$u")
-                callback(
-                    newExtractorLink(
-                        source = name,
-                        name = linkName,
-                        url = u,
-                        type = type,
-                    ) {
-                        this.quality = getQualityFromName(q)
-                        this.referer = mainUrl
-                        this.headers = mapOf("Referer" to mainUrl)
-                    },
-                )
+
+                // روابط `/play` موقّعة وتنتهي خلال ساعات (حقل `expire_at` قِيس
+                // 2026-10-21: ~16 ساعة) — تُطلب هنا مع كل بثّ ولا تُخزَّن أبداً.
+                val pText = apiJson("/v1/episodes/$eid/play?lang=$API_LANG")
+                val play = pText?.let { mapper.readValue(it, PlayResp::class.java).data }
+                val streams = play?.streams.orEmpty().filter { !it.url.isNullOrBlank() }
+                if (play == null || streams.isEmpty()) {
+                    Log.e(TAG, "loadLinks no streams eid=$eid ep=$ep")
+                    subsJob.cancel()
+                    return@coroutineScope false
+                }
+
+                // السيرفرات الافتراضية تُصدَر فوراً كما في v3 — بدايته لا تتأخر.
+                emitGroup(play, streams, burnedLabel(play), eid, ep, callback)
+
+                // لغات الترجمة المدموجة (pinedrama — ٨ لغات قِيس 2026-10-21):
+                // كل لغةٍ نداء `/play?sub_lang=` خاصٌّ يعيد روابط مختلفة تمامًا
+                // (قِيس حيًّا: ar مقابل id — لا رابطٌ واحد يتقاطع) — تُطلَب
+                // كلّها بالتوازي مع سقفٍ زمنيٍّ ٨ ثوانٍ لكلٍّ منها (نداءٌ واحد
+                // 0.3–1.1 ثانية قِيس) فلا تُطيل الانتظار سبعة أضعاف، وتُصدَر
+                // بعد الافتراضية فالأول في القائمة يبقى أفضل سيرفرات العربية.
+                val others = play.subLangs.orEmpty()
+                    .filterNotNull()
+                    .map { it.trim() }
+                    .filter { it.isNotEmpty() && !it.equals(play.subLang, true) }
+                    .distinct()
+                if (others.isNotEmpty()) {
+                    val base = streams.mapNotNull { it.url }.toSet()
+                    val fetched = others.map { code ->
+                        async {
+                            val t = withTimeoutOrNull(8_000L) {
+                                runCatching {
+                                    apiJson("/v1/episodes/$eid/play?lang=$API_LANG&sub_lang=$code")
+                                }.getOrNull()
+                            }
+                            code to t?.let {
+                                runCatching { mapper.readValue(it, PlayResp::class.java).data }.getOrNull()
+                            }
+                        }
+                    }.awaitAll()
+                    for ((code, p2) in fetched) {
+                        val ss = p2?.streams.orEmpty().filter { !it.url.isNullOrBlank() }
+                        // خادمٌ قد يتجاهل `sub_lang` ويعيد الافتراضي حرفياً — لا نكرّر.
+                        if (p2 == null || ss.isEmpty() || ss.mapNotNull { it.url }.toSet() == base) {
+                            Log.d(TAG, "variant skipped code=$code p2=${p2 != null} n=${ss.size}")
+                            continue
+                        }
+                        emitGroup(p2, ss, langName(code), eid, ep, callback)
+                    }
+                }
+
+                subsJob.join()
+                true
             }
-
-            if (showSubs()) emitSubtitles(eid, ep, subtitleCallback)
-
-            true
         } catch (e: kotlinx.coroutines.CancellationException) {
             throw e
         } catch (e: Exception) {
             Log.e(TAG, "loadLinks FATAL data=$data", e)
             false
         }
+    }
+
+    /**
+     * إخراج مجموعة درجاتٍ واحدة كسيرفرات. الترتيب كما يرتبه موقعه نفسه
+     * (`streamSources` في theoplayer.js): h264 أولاً (توافق) ثم الأعلى
+     * ارتفاعاً — والمشغّل يعكس الترتيب بـ -priority، فالأول في القائمة
+     * أفضل افتراضاً. `langLabel` وسمٌ يُلحق بالاسم حين يعرض الموقع قائمة
+     * لغاتٍ مدموجة.
+     */
+    private suspend fun emitGroup(
+        play: PlayStreamList,
+        streams: List<PlayStream>,
+        langLabel: String?,
+        eid: Long,
+        ep: Int?,
+        callback: (ExtractorLink) -> Unit,
+    ) {
+        // الصيغة المُعلَنة: `protocol` في الاستجابة (`mp4` | `hls`). تُمرَّر
+        // إلى الوسم لئلا يُخمَن من رابطٍ موقّعٍ بلا امتداد (روابط tiktokcdn
+        // بلا `.mp4` في المسار إطلاقاً — قِيس 2026-10-21).
+        val declared = when (play.protocol?.lowercase()) {
+            "hls" -> "M3U8"
+            "mp4" -> "MP4"
+            else -> play.protocol?.trim()?.takeIf { it.isNotBlank() }?.uppercase()
+        }
+
+        val sorted = streams.sortedWith(
+            compareBy<PlayStream> { if (it.codec == "h264") 0 else 1 }
+                .thenByDescending { it.height ?: 0 },
+        )
+
+        for (s in sorted) {
+            val u = s.url ?: continue
+            val isHls = s.protocol.equals("hls", ignoreCase = true) ||
+                u.contains(".m3u8", ignoreCase = true)
+            val type = if (isHls) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
+            val q = s.quality?.trim().takeUnless { it.isNullOrBlank() }
+                ?: s.height?.let { "${it}p" }
+                ?: "Auto"
+            val base = if (showFormatTag()) {
+                FormatTag.tagged(q, u, type, declared)
+            } else {
+                q
+            }
+            val linkName = if (langLabel != null) "$base · $langLabel" else base
+            Log.d(TAG, "emit eid=$eid ep=$ep q=$q hls=$isHls sub=$langLabel url=$u")
+            callback(
+                newExtractorLink(
+                    source = name,
+                    name = linkName,
+                    url = u,
+                    type = type,
+                ) {
+                    this.quality = getQualityFromName(q)
+                    this.referer = mainUrl
+                    this.headers = mapOf("Referer" to mainUrl)
+                },
+            )
+        }
+    }
+
+    /**
+     * وسم اللغة في اسم السيرفر حين فقط يعرض الموقع فعلًا قائمة لغاتٍ
+     * (theoplayer: `burned.options.length > 1`) — و`sub_langs = [null]`
+     * في netshort وreelshort فلا وسم هناك أصلاً.
+     */
+    private fun burnedLabel(play: PlayStreamList): String? {
+        val opts = play.subLangs.orEmpty().filterNotNull()
+            .map { it.trim() }.filter { it.isNotEmpty() }
+        if (opts.size <= 1) return null
+        return play.subLang?.trim()?.takeIf { it.isNotBlank() }?.let { langName(it) }
+    }
+
+    /** أسماء لغات الترجمة المدموجة بالعربية كما تراها في الموقع. */
+    private fun langName(code: String): String = when (code.lowercase()) {
+        "ar" -> "العربية"
+        "bn" -> "البنغالية"
+        "en" -> "الإنجليزية"
+        "id" -> "الإندونيسية"
+        "ja" -> "اليابانية"
+        "ko" -> "الكورية"
+        "ms" -> "الماليزية"
+        "my" -> "البورمية"
+        "pt" -> "البرتغالية"
+        "ru" -> "الروسية"
+        "th" -> "التايلاندية"
+        "tr" -> "التركية"
+        "vi" -> "الفيتنامية"
+        "zh-hans" -> "الصينية المبسطة"
+        "zh-hant", "zh-tw" -> "الصينية التقليدية"
+        else -> code
     }
 
     /**
@@ -490,7 +600,10 @@ class AnyShortProvider(private val prefs: SharedPreferences? = null) : MainAPI()
         ep: Int?,
         subtitleCallback: (SubtitleFile) -> Unit,
     ) {
-        val text = apiJson("/v1/episodes/$eid/subtitles?lang=$API_LANG") ?: return
+        // سقف ٨ ثوانٍ: ملفّات الترجمة لا تُطيل انتظار إغلاق قائمة السيرفرات.
+        val text = withTimeoutOrNull(8_000L) {
+            apiJson("/v1/episodes/$eid/subtitles?lang=$API_LANG")
+        } ?: return
         val subs = mapper.readValue(text, SubsResp::class.java).data.orEmpty()
             .filter { !it.url.isNullOrBlank() }
         for (s in subs) {
