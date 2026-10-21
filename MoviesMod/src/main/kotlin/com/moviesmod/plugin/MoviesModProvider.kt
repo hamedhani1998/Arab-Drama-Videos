@@ -665,6 +665,19 @@ class MoviesModProvider(private val prefs: SharedPreferences? = null) : MainAPI(
         }
 
         Log.i(TAG, "resolve: about to call followChain sidLen=${sid.length}")
+        // Try fast path first
+        try {
+            val fast = app.get(sid, headers = head, referer = archive, allowRedirects = true)
+            val ft = fast.text
+            Regex("https?://[^\"'\\s<>]*driveseed[^\"'\\s<>/]+/file/[^\"'\\s<>]+").find(ft.replace("\\/", "/"))?.let {
+                Log.i(TAG, "resolve: fast got driveseed file")
+                return mirrorsOf(it.value.replace("\\/", "/"), label ?: serverLabel)
+            }
+            Regex("https?://[^\"'\\s<>]*driveseed[^\"'\\s<>]+/r\\?[^\"'\\s<>]+").find(ft.replace("\\/", "/"))?.let {
+                Log.i(TAG, "resolve: fast got driveseed r")
+                return mirrorsOf(it.value.replace("\\/", "/"), label ?: serverLabel)
+            }
+        } catch (e: Exception) {}
         val fileUrl = followChain(sid) ?: run { Log.i(TAG, "resolve: followChain returned null"); return emptyList() }
         Log.i(TAG, "resolve: got fileUrl=${fileUrl.take(80)}")
         return mirrorsOf(fileUrl, label ?: serverLabel)
