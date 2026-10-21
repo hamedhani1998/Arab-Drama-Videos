@@ -251,9 +251,18 @@ class AnyShortProvider(private val prefs: SharedPreferences? = null) : MainAPI()
     private fun queryParam(raw: String, key: String): String? =
         Regex("""[?&]$key=([^&#\s]+)""").find(raw)?.groupValues?.get(1)
 
-    /** معرّف العمل من رابط تفاصيله: آخر رقمٍ في المسار قبل أي استعلام. */
-    private fun titleIdFrom(raw: String): Int? =
-        Regex("""/(\d+)(?:[/?#]|$)""").find(raw.substringBefore('?'))?.groupValues?.get(1)?.toIntOrNull()
+    /**
+     * معرّف العمل من رابط تفاصيله — **آخر أرقامٍ في المسار** كما يقرؤها موقعه
+     * نفسه (`match(/(\d+)$/)` في app.js: المعرّف دائماً آخر جزء).
+     *
+     * القاعدة السابقة `\/(\d+)` اشترطت `/` مباشرة قبل الأرقام، والمسار حقيقيٌّ
+     * `/{slug}-{id}` فالأرقام بعد `-` — قِيس 2026-10-21 على الجهاز: كل
+     * `load` يعود «no title id» والواجهة وحدها تعمل (قائمة الأخطاء logcat).
+     */
+    private fun titleIdFrom(raw: String): Int? {
+        val path = raw.substringBefore('?').substringBefore('#').trim()
+        return Regex("""(\d+)$""").find(path)?.groupValues?.get(1)?.toIntOrNull()
+    }
 
     // ============================== الواجهة الرئيسية ==============================
 
@@ -299,9 +308,26 @@ class AnyShortProvider(private val prefs: SharedPreferences? = null) : MainAPI()
         return try {
             val q = query.trim()
             if (q.isEmpty()) return emptyList()
-            val path = "/v1/search?q=" + URLEncoder.encode(q, "UTF-8") + "&lang=$API_LANG&limit=24"
-            val text = apiJson(path) ?: return null
-            mapper.readValue(text, DataList::class.java).data.orEmpty().mapNotNull { card(it) }
+            val enc = URLEncoder.encode(q, "UTF-8")
+
+            // مرحلتان كما تفعلها واجهة الموقع نفسها: `/search` مطابقةٌ
+            // **بالكلمات الكاملة** (قِيس 2026-10-21: «حرب» و«زوجة» نتائج،
+            // و«جر» و«جرّا» و«انقذ» صِفْر)، فلا ينفع المستخدم الذي يكتب
+            // بادئةَ كلمة. وعند صِفْر النتيجة نعود إلى `/suggest` البادئي
+            // («جر» → ٥ نتائج، «جرّا» → ٢) وهو ما تستعمله الواجهة أثناء
+            // الكتابة. وفشل أيٍّ منهما لا يُسقط الأخرى.
+            val primary = apiJson("/v1/search?q=$enc&lang=$API_LANG&limit=24")
+                ?.let { mapper.readValue(it, DataList::class.java).data.orEmpty() }
+                .orEmpty()
+                .mapNotNull { card(it) }
+            if (primary.isNotEmpty()) return primary
+
+            val suggested = apiJson("/v1/suggest?q=$enc&lang=$API_LANG")
+                ?.let { mapper.readValue(it, DataList::class.java).data.orEmpty() }
+                .orEmpty()
+                .mapNotNull { card(it) }
+            Log.d(TAG, "search q=$q primary=${primary.size} suggest=${suggested.size}")
+            suggested
         } catch (e: kotlinx.coroutines.CancellationException) {
             throw e
         } catch (e: Exception) {
