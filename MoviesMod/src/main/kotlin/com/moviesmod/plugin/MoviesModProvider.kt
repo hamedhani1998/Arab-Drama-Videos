@@ -569,6 +569,10 @@ class MoviesModProvider(private val prefs: SharedPreferences? = null) : MainAPI(
         val u = c.url.lowercase()
         val playlist = u.contains(".m3u8") || u.contains(".mpd") ||
             c.mime?.contains("mpegurl", true) == true || c.mime?.contains("dash+xml", true) == true
+        // For direct file links, always show as download
+        if (u.contains(".mp4") || u.contains(".mkv") || u.contains(".avi") || u.contains(".webm") || u.contains(".zip") || u.contains(".rar")) {
+            return MediaProbe.Use.DOWNLOAD
+        }
         return if (playlist) MediaProbe.Use.WATCH else MediaProbe.Use.DOWNLOAD
     }
 
