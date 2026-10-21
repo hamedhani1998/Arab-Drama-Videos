@@ -1015,9 +1015,15 @@ class MoviesModProvider(private val prefs: SharedPreferences? = null) : MainAPI(
                                 // look for lp-s1 or sc
                                 formOf(ptext, "lp-s1-form")?.let { f2 ->
                                     Log.i(TAG, "followChain try$i hop$hops: form lp-s1-form (from lp-land resp)")
-                                    val presp2 = app.post(f2.first, data = f2.second, referer = presp.url.toString(), headers = formHead, allowRedirects = true)
+                                    val presp2 = app.post(f2.first, data = f2.second, referer = presp.url.toString(), headers = formHead, allowRedirects = false)
+                                    val ploc2 = presp2.headers["Location"] ?: presp2.headers["location"]
+                                    if (!ploc2.isNullOrBlank()) {
+                                        val pnu2 = if (ploc2.startsWith("http")) ploc2 else "https://en.thenaukriadda.in$ploc2"
+                                        if (pnu2.contains("driveseed.org") || pnu2.contains("/file/")) return if (pnu2.startsWith("/")) "https://driveseed.org$pnu2" else pnu2
+                                    }
                                     val h2 = presp2.text
                                     Regex("https?://[^\"'\\s<>]*driveseed[^\"'\\s<>/]+/file/[^\"'\\s<>]+").find(h2)?.let { return it.value }
+                                    Regex("https?://[^\"'\\s<>]*driveseed[^\"'\\s<>]+/r\\?[^\"'\\s<>]+").find(h2)?.let { return it.value }
                                     val ck = RE_SC.find(h2)
                                     if (ck != null) {
                                         val cname = ck.groupValues[1]
@@ -1029,6 +1035,9 @@ class MoviesModProvider(private val prefs: SharedPreferences? = null) : MainAPI(
                                             if (!l.isNullOrBlank()) {
                                                 val nu = if (l.startsWith("http")) l else if (l.startsWith("/")) "https://driveseed.org$l" else l
                                                 if (nu.contains("driveseed.org") || nu.contains("/file/")) return if (nu.startsWith("/")) "https://driveseed.org$nu" else nu
+                                                current = if (l.startsWith("http")) l else "https://en.thenaukriadda.in$l"
+                                                referer = go
+                                                continue
                                             }
                                             val gbody = goResp.text
                                             Regex("https?://[^\"'\\s<>]*driveseed[^\"'\\s<>/]+/file/[^\"'\\s<>]+").find(gbody)?.let { return it.value }
@@ -1050,6 +1059,9 @@ class MoviesModProvider(private val prefs: SharedPreferences? = null) : MainAPI(
                                         if (!l.isNullOrBlank()) {
                                             val nu = if (l.startsWith("http")) l else if (l.startsWith("/")) "https://driveseed.org$l" else l
                                             if (nu.contains("driveseed.org") || nu.contains("/file/")) return if (nu.startsWith("/")) "https://driveseed.org$nu" else nu
+                                            current = if (l.startsWith("http")) l else "https://en.thenaukriadda.in$l"
+                                            referer = go
+                                            continue
                                         }
                                         val gbody = goResp.text
                                         Regex("https?://[^\"'\\s<>]*driveseed[^\"'\\s<>/]+/file/[^\"'\\s<>]+").find(gbody)?.let { return it.value }
