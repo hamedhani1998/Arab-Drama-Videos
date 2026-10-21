@@ -1,4 +1,4 @@
-version = 4
+version = 5
 
 cloudstream {
     description = "AnyShort - آني شورت: دراما قصيرة مترجمة (نت شورت، ريل شورت، باين دراما)"

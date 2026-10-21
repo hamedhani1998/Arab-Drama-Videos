@@ -68,6 +68,7 @@ class AnyShortSettings(private val prefs: SharedPreferences) : BottomSheetDialog
         const val KEY_EPISODE_ORDER = "ash_episode_order" // "as_is" | "desc" — ترتيب الحلقات
         const val KEY_FORMAT_TAG = "ash_format_tag"      // Boolean — وسم الصيغة في اسم السيرفر
         const val KEY_SHOW_SUBS = "ash_show_subs"        // Boolean — إظهار ملفّات الترجمة
+        const val KEY_PROXY = "ash_proxy"                // Boolean — وسيط التشغيل المحلّي
 
         fun show(fm: FragmentManager, prefs: SharedPreferences) {
             AnyShortSettings(prefs).show(fm, "ash_settings")
@@ -150,6 +151,17 @@ class AnyShortSettings(private val prefs: SharedPreferences) : BottomSheetDialog
             }
             playbackCategory.addPreference(showSubsPref)
 
+            // الوسيط المحلّي: يُعيد المحاولة على اتصالٍ طازج حين يتعثّر طور
+            // الرأس (قِيس 2026-10-21: ٢/٥ طلبات tiktokcdn تُصفَّر بلا رؤوس،
+            // و v-mps بلغ 21.8 ث لتقرير الحالة)، ثم يُمرّر الجسم حيّاً.
+            val proxyPref = SwitchPreferenceCompat(ctx).apply {
+                key = KEY_PROXY
+                title = "وسيط التشغيل المحلّي"
+                summary = "يعالج التأخّر والتقطّع: إعادة محاولة عند تعثّر الاتصال. أوقفه لو ظهرت مشكلة"
+                setDefaultValue(true)
+            }
+            playbackCategory.addPreference(proxyPref)
+
             val resetPref = Preference(ctx).apply {
                 key = "ash_reset_prefs"
                 title = "إعادة الضبط"
@@ -161,6 +173,7 @@ class AnyShortSettings(private val prefs: SharedPreferences) : BottomSheetDialog
                         remove(KEY_EPISODE_ORDER)
                         remove(KEY_FORMAT_TAG)
                         remove(KEY_SHOW_SUBS)
+                        remove(KEY_PROXY)
                     }.apply()
                     Toast.makeText(ctx, "تمت إعادة الضبط", Toast.LENGTH_SHORT).show()
                     true

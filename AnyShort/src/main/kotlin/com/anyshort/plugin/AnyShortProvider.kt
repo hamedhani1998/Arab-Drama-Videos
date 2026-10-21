@@ -163,6 +163,9 @@ class AnyShortProvider(private val prefs: SharedPreferences? = null) : MainAPI()
     private fun showSubs(): Boolean =
         prefs?.getBoolean(AnyShortSettings.KEY_SHOW_SUBS, true) != false
 
+    private fun proxyEnabled(): Boolean =
+        prefs?.getBoolean(AnyShortSettings.KEY_PROXY, true) != false
+
     private fun homeRowCap(): Int? = prefs?.getString(AnyShortSettings.KEY_HOME_ROWS, "all")
         ?.toIntOrNull()
         ?.takeIf { it > 0 }
@@ -541,12 +544,17 @@ class AnyShortProvider(private val prefs: SharedPreferences? = null) : MainAPI()
                 q
             }
             val linkName = if (langLabel != null) "$base · $langLabel" else base
+            // الوسيط المحلّي: يُعيد المحاولة على اتصالٍ طازج حين يتعثّر طور
+            // الرأس (٢/٥ طلبات tiktokcdn تُصفَّر، و v-mps سجّل 21.8 ث)، ثم
+            // يُمرّر الجسم حيّاً بلا سقف. لو تعذّر تشغيل الخادم يبقى الرابط
+            // المباشر — أبداً أسوأ من الجلب المباشر.
+            val playbackUrl = if (proxyEnabled()) AnyShortProxy.register(u, isHls) ?: u else u
             Log.d(TAG, "emit eid=$eid ep=$ep q=$q hls=$isHls sub=$langLabel url=$u")
             callback(
                 newExtractorLink(
                     source = name,
                     name = linkName,
-                    url = u,
+                    url = playbackUrl,
                     type = type,
                 ) {
                     this.quality = getQualityFromName(q)
