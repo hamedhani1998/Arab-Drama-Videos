@@ -610,19 +610,31 @@ class MoviesModProvider(private val prefs: SharedPreferences? = null) : MainAPI(
                 sid = finalUrl.replace("&amp;", "&")
                 label = serverLabel
                 Log.i(TAG, "resolve: redirected to sid=$sid")
+                // try fast extraction
+                try {
+                    val qr = app.get(sid, headers = head, referer = archive, allowRedirects = true)
+                    val qt = qr.text
+                    Regex("https?://[^\"'\\s<>]*driveseed[^\"'\\s<>/]+/file/[^\"'\\s<>]+").find(qt.replace("\\/", "/"))?.let {
+                        return mirrorsOf(it.value.replace("\\/", "/"), label ?: serverLabel)
+                    }
+                    Regex("https?://[^\"'\\s<>]*driveseed[^\"'\\s<>]+/r\\?[^\"'\\s<>]+").find(qt.replace("\\/", "/"))?.let {
+                        return mirrorsOf(it.value.replace("\\/", "/"), label ?: serverLabel)
+                    }
+                    val fu = followChain(sid)
+                    if (fu != null) return mirrorsOf(fu, label ?: serverLabel)
+                } catch (e: Exception) {}
             } else if (finalUrl.contains("en.thenaukriadda.in")) {
-                // check if there are multiple sid links in body
+                // look for sid in body
                 val allSids = RE_SID_ANY.findAll(body).map {
                     val raw = it.value
                     if (raw.startsWith("http")) raw.replace("&amp;", "&") else "https://$raw".replace("&amp;", "&")
                 }.distinct().toList()
-                if (allSids.size > 1) {
-                    Log.i(TAG, "resolve: found ${allSids.size} sid links, processing first and will handle others")
-                    // For now process all
+                if (allSids.isNotEmpty()) {
+                    Log.i(TAG, "resolve: found ${allSids.size} sid links in thenaukriadda page")
                     val results = ArrayList<Cand>()
                     for ((idx, s) in allSids.withIndex()) {
                         try {
-                            val qr = app.get(s, headers = head, referer = archive, allowRedirects = true)
+                            val qr = app.get(s, headers = head, referer = finalUrl, allowRedirects = true)
                             val qt = qr.text
                             Regex("https?://[^\"'\\s<>]*driveseed[^\"'\\s<>/]+/file/[^\"'\\s<>]+").find(qt.replace("\\/", "/"))?.let { m ->
                                 results.addAll(mirrorsOf(m.value.replace("\\/", "/"), allSids[idx]))
@@ -639,10 +651,13 @@ class MoviesModProvider(private val prefs: SharedPreferences? = null) : MainAPI(
                         } catch (e: Exception) {}
                     }
                     if (results.isNotEmpty()) return results.distinctBy { it.url }
+                    sid = allSids.first()
+                    label = serverLabel
+                } else {
+                    sid = finalUrl.replace("&amp;", "&")
+                    label = serverLabel
+                    Log.i(TAG, "resolve: final is thenaukriadda=$sid")
                 }
-                sid = finalUrl.replace("&amp;", "&")
-                label = serverLabel
-                Log.i(TAG, "resolve: final is thenaukriadda=$sid")
             } else {
                 // look for direct thenaukriadda sid links first
                 val allSids = RE_SID_ANY.findAll(body).map {
