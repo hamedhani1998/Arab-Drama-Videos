@@ -622,6 +622,17 @@ class MoviesModProvider(private val prefs: SharedPreferences? = null) : MainAPI(
                     sid = if (raw.startsWith("http")) raw.replace("&amp;", "&") else "https://$raw".replace("&amp;", "&")
                     label = serverLabel
                     Log.i(TAG, "resolve: found sid link in body=$sid")
+                    // try quick extraction
+                    try {
+                        val qr = app.get(sid, headers = head, referer = archive, allowRedirects = true)
+                        val qt = qr.text
+                        Regex("https?://[^\"'\\s<>]*driveseed[^\"'\\s<>/]+/file/[^\"'\\s<>]+").find(qt.replace("\\/", "/"))?.let {
+                            return mirrorsOf(it.value.replace("\\/", "/"), label ?: serverLabel)
+                        }
+                        Regex("https?://[^\"'\\s<>]*driveseed[^\"'\\s<>]+/r\\?[^\"'\\s<>]+").find(qt.replace("\\/", "/"))?.let {
+                            return mirrorsOf(it.value.replace("\\/", "/"), label ?: serverLabel)
+                        }
+                    } catch (e: Exception) {}
                 } else if (body.contains("lp-land") || body.contains("_lp_http") || body.contains("lp-s1-form") || body.contains("thenaukriadda.in") || body.contains("timed-content")) {
                     // try to find any sid in body again more aggressively
                     val anySid2 = Regex("sid=([A-Za-z0-9+/=]+)").find(body)
