@@ -616,6 +616,43 @@ class MoviesModProvider(private val prefs: SharedPreferences? = null) : MainAPI(
                     if (e is UnknownHostException) " — المضيف لا يُحلّ" else "")
                 return emptyList()
             }
+            // if it's links.modpro.blog page, extract all sid links directly
+            if (archive.contains("links.modpro.blog") || finalUrl.contains("links.modpro.blog")) {
+                val allSids = RE_SID_ANY.findAll(body).map {
+                    val raw = it.value
+                    if (raw.startsWith("http")) raw.replace("&amp;", "&") else "https://$raw".replace("&amp;", "&")
+                }.distinct().toList()
+                if (allSids.isNotEmpty()) {
+                    Log.i(TAG, "resolve: links.modpro found ${allSids.size} sid links")
+                    val results = ArrayList<Cand>()
+                    for ((idx, s) in allSids.withIndex()) {
+                        try {
+                            val qr = app.get(s, headers = head, referer = finalUrl, allowRedirects = true)
+                            val qt = qr.text
+                            Regex("https?://[^\"'\\s<>]*driveseed[^\"'\\s<>/]+/file/[^\"'\\s<>]+").find(qt.replace("\\/", "/"))?.let { m ->
+                                results.addAll(mirrorsOf(m.value.replace("\\/", "/"), allSids[idx]))
+                                continue
+                            }
+                            Regex("https?://[^\"'\\s<>]*driveseed[^\"'\\s<>]+/r\\?[^\"'\\s<>]+").find(qt.replace("\\/", "/"))?.let { m ->
+                                results.addAll(mirrorsOf(m.value.replace("\\/", "/"), allSids[idx]))
+                                continue
+                            }
+                            Regex("https?://[^\"'\\s<>]*driveseed[^\"'\\s<>]+/[^\"'\\s<>]+").find(qt.replace("\\/", "/"))?.let { m ->
+                                val v = m.value
+                                if (v.contains("/file/") || v.contains("/r?")) {
+                                    results.addAll(mirrorsOf(v, allSids[idx]))
+                                    continue
+                                }
+                            }
+                            val fu = followChain(s)
+                            if (fu != null) {
+                                results.addAll(mirrorsOf(fu, allSids[idx]))
+                            }
+                        } catch (e: Exception) {}
+                    }
+                    if (results.isNotEmpty()) return results.distinctBy { it.url }
+                }
+            }
             // check if redirected to sid
             if (finalUrl.contains("?sid=")) {
                 sid = finalUrl.replace("&amp;", "&")
@@ -630,6 +667,12 @@ class MoviesModProvider(private val prefs: SharedPreferences? = null) : MainAPI(
                     }
                     Regex("https?://[^\"'\\s<>]*driveseed[^\"'\\s<>]+/r\\?[^\"'\\s<>]+").find(qt.replace("\\/", "/"))?.let {
                         return mirrorsOf(it.value.replace("\\/", "/"), label ?: serverLabel)
+                    }
+                    Regex("https?://[^\"'\\s<>]*driveseed[^\"'\\s<>]+/[^\"'\\s<>]+").find(qt.replace("\\/", "/"))?.let { m ->
+                        val v = m.value
+                        if (v.contains("/file/") || v.contains("/r?")) {
+                            return mirrorsOf(v, label ?: serverLabel)
+                        }
                     }
                     val fu = followChain(sid)
                     if (fu != null) return mirrorsOf(fu, label ?: serverLabel)
