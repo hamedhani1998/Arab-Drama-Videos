@@ -467,7 +467,21 @@ class MoviesModProvider(private val prefs: SharedPreferences? = null) : MainAPI(
                     async(Dispatchers.IO) {
                         val link = e.substringBefore("\t").trim()
                         val heading = e.substringAfter("\t", "").trim().ifBlank { null }
-                        resolve(link, heading)
+                        val res = resolve(link, heading)
+                        if (res.isNotEmpty()) res else {
+                            try {
+                                val r = app.get(link, headers = head, allowRedirects = true)
+                                val t = r.text
+                                val out = ArrayList<Cand>()
+                                Regex("https?://[^\"'\\s<>]+\\.(mp4|mkv|avi|webm|mpg|mpeg|ts|zip|rar)(\\?[^\"'\\s<>]*)?").findAll(t.replace("\\/", "/")).forEach { m ->
+                                    out.add(Cand(m.value.replace("\\/", "/"), heading ?: "Direct", qualityOf(heading ?: m.value), null, null, head))
+                                }
+                                Regex("https?://[^\"'\\s<>]+/(download|dl|getfile)/[^\"'\\s<>]+").findAll(t.replace("\\/", "/")).forEach { m ->
+                                    out.add(Cand(m.value.replace("\\/", "/"), heading ?: "Direct", qualityOf(heading ?: m.value), null, null, head))
+                                }
+                                out
+                            } catch (ex: Exception) { emptyList() }
+                        }
                     }
                 }.awaitAll().flatten()
             }
@@ -604,9 +618,15 @@ class MoviesModProvider(private val prefs: SharedPreferences? = null) : MainAPI(
                 Regex("https?://[^\"'\\s<>]*driveseed[^\"'\\s<>]+/r\\?[^\"'\\s<>]+").find(qt.replace("\\/", "/"))?.let {
                     return mirrorsOf(it.value.replace("\\/", "/"), label ?: serverLabel)
                 }
+                Regex("https?://[^\"'\\s<>]+\\.(mp4|mkv|avi|webm|mpg|mpeg|ts|zip|rar)(\\?[^\"'\\s<>]*)?").find(qt.replace("\\/", "/"))?.let {
+                    return listOf(Cand(it.value.replace("\\/", "/"), label ?: serverLabel ?: "Direct", qualityOf(label ?: it.value), null, null, head))
+                }
+                Regex("https?://[^\"'\\s<>]+/(download|dl|getfile)/[^\"'\\s<>]+").find(qt.replace("\\/", "/"))?.let {
+                    return listOf(Cand(it.value.replace("\\/", "/"), label ?: serverLabel ?: "Direct", qualityOf(label ?: it.value), null, null, head))
+                }
                 Regex("https?://[^\"'\\s<>]*driveseed[^\"'\\s<>]+/[^\"'\\s<>]+").find(qt.replace("\\/", "/"))?.let { m ->
                     val v = m.value
-                    if (v.contains("/file/") || v.contains("/r?")) {
+                    if (v.contains("/file/") || v.contains("/r?") || v.contains("download")) {
                         return mirrorsOf(v, label ?: serverLabel)
                     }
                 }
@@ -640,9 +660,17 @@ class MoviesModProvider(private val prefs: SharedPreferences? = null) : MainAPI(
                             results.addAll(mirrorsOf(m.value.replace("\\/", "/"), allSids[idx]))
                             continue
                         }
+                        Regex("https?://[^\"'\\s<>]+\\.(mp4|mkv|avi|webm|mpg|mpeg|ts|zip|rar)(\\?[^\"'\\s<>]*)?").find(qt.replace("\\/", "/"))?.let { m ->
+                            results.add(Cand(m.value.replace("\\/", "/"), allSids[idx], qualityOf(allSids[idx] ?: m.value), null, null, head))
+                            continue
+                        }
+                        Regex("https?://[^\"'\\s<>]+/(download|dl|getfile)/[^\"'\\s<>]+").find(qt.replace("\\/", "/"))?.let { m ->
+                            results.add(Cand(m.value.replace("\\/", "/"), allSids[idx], qualityOf(allSids[idx] ?: m.value), null, null, head))
+                            continue
+                        }
                         Regex("https?://[^\"'\\s<>]*driveseed[^\"'\\s<>]+/[^\"'\\s<>]+").find(qt.replace("\\/", "/"))?.let { m ->
                             val v = m.value
-                            if (v.contains("/file/") || v.contains("/r?")) {
+                            if (v.contains("/file/") || v.contains("/r?") || v.contains("download")) {
                                 results.addAll(mirrorsOf(v, allSids[idx]))
                                 continue
                             }
@@ -855,6 +883,14 @@ class MoviesModProvider(private val prefs: SharedPreferences? = null) : MainAPI(
             Regex("https?://[^\"'\\s<>]*driveseed[^\"'\\s<>]+/r\\?[^\"'\\s<>]+").find(ft.replace("\\/", "/"))?.let {
                 Log.i(TAG, "resolve: fast got driveseed r")
                 return mirrorsOf(it.value.replace("\\/", "/"), label ?: serverLabel)
+            }
+            Regex("https?://[^\"'\\s<>]+\\.(mp4|mkv|avi|webm|mpg|mpeg|ts|zip|rar)(\\?[^\"'\\s<>]*)?").find(ft.replace("\\/", "/"))?.let {
+                Log.i(TAG, "resolve: fast got direct file")
+                return listOf(Cand(it.value.replace("\\/", "/"), label ?: serverLabel ?: "Direct", qualityOf(label ?: it.value), null, null, head))
+            }
+            Regex("https?://[^\"'\\s<>]+/(download|dl|getfile)/[^\"'\\s<>]+").find(ft.replace("\\/", "/"))?.let {
+                Log.i(TAG, "resolve: fast got direct download")
+                return listOf(Cand(it.value.replace("\\/", "/"), label ?: serverLabel ?: "Direct", qualityOf(label ?: it.value), null, null, head))
             }
         } catch (e: Exception) {}
         val fileUrl = followChain(sid) ?: run { Log.i(TAG, "resolve: followChain returned null"); return emptyList() }
