@@ -57,7 +57,7 @@ import okhttp3.Dns
 class MoviesModProvider(private val prefs: SharedPreferences? = null) : MainAPI() {
     private val TAG = "MoviesMod"
 
-    override var mainUrl = "https://moviesmod.uk.com"
+    override var mainUrl = "https://moviesmod.meme"
     override var name = "MoviesMod"
     override val hasMainPage = true
     override var lang = "en"
@@ -1258,11 +1258,40 @@ class MoviesModProvider(private val prefs: SharedPreferences? = null) : MainAPI(
      * غلافان بلا وسائط فلا يدخلان القائمة أصلًا. ورابط `r2.dev` إن وُجد رابط
      * ملفٍّ مباشر — **لكنه ليس حاضرًا دائمًا** (قِيس `r2: []` على صفحةٍ كاملة).
      */
+    /**
+     * صفحات `driveseed.org` نمطين، والفرق بينهما يُكاد يكون سبب كل
+     * «لا روابط» في الإصدارات السابقة:
+     *
+     * - `/l?id=…&key=…` — غلاف Redirect Only: جسمه 92 بايت يحتوي
+     *   `window.location.replace("/list/<id>")` فقط، **لا روابط وسائط**.
+     * - `/list/<id>` — قائمة الملفّات: يحتوي روابط `/file/<id>` لكل جودة.
+     * - `/file/<id>` — **الصفحة الحقيقية**: يحمل رابط `r2.dev` المباشر
+     *   (قِيس: `pub-2fbc…r2.dev/…/Friends.Sex.and.Games.S01.480p…zip`).
+     *
+     * الـ`followChain` كان يُعيد `/l?id=` (الغلاف) فتُستخرَج روابطه
+     * فارغة، والحلّ أن يُكمل الانتقالين剩下的 إلى `/file/<id>`.
+     *
+     * والcookie **غير ضروري**: قِيس `/file/<id>` بعميل جديد بلا كعكة
+     * يُعيد 200 وrapport r2 واحدٌ — أي أنّ页面 تُ servce للجميع.
+     */
     private suspend fun mirrorsOf(fileUrl: String, serverLabel: String?): List<Cand> {
         val page = try {
-            val r = app.get(fileUrl, headers = head)
+            var r = app.get(fileUrl, headers = head)
             if (!r.isSuccessful) return emptyList()
-            r.text
+            var body = r.text
+            // غلاف Redirect Only: تابع الانتقالين المتبقيين
+            for (k in 0..2) {
+                val mv = RE_JS_REDIRECT.find(body)?.groupValues?.getOrNull(1)
+                    ?: RE_LOC.find(body)?.groupValues?.getOrNull(1)
+                    ?: break
+                val nu = if (mv.startsWith("http")) mv else "https://driveseed.org$mv"
+                if (nu == fileUrl || nu == body) break
+                val nr = try { app.get(nu, headers = head) } catch (e: Exception) { break }
+                if (!nr.isSuccessful) break
+                body = nr.text
+                if (RE_R2.containsMatchIn(body) || RE_VG.containsMatchIn(body) || body.contains("/file/")) break
+            }
+            body
         } catch (e: Exception) {
             Log.i(TAG, "mirrorsOf FAIL ${e::class.simpleName}")
             return emptyList()
@@ -1476,6 +1505,13 @@ class MoviesModProvider(private val prefs: SharedPreferences? = null) : MainAPI(
         // البادئة `window.` **اختيارية**: صفحة `?lp_go` تستعمل `window.location`
         // (داخل `setTimeout`)، وصفحة `/r` تستعمل `location` وحدها. الاثنتان مقيسة.
         val RE_JS_REDIRECT = Regex("(?:window\\.)?(?:location|document\\.location|top\\.location)\\.(?:replace|href|assign)\\s*\\(?\\s*[\"']([^\"']+)[\"']\\s*\\)?", RegexOption.IGNORE_CASE)
+        /**
+         * رابط الانتقال المُعَرَّض في غلاف Redirect-Only (92 بايت،
+         * `window.location.replace("/list/<id>")`) — والغلاف `/l?id=…` هو
+         * الأداة التي يُعيد فيها `followChain` وينتهي بها المطاف عند
+         * `mirrorsOf` دون روابط. هذا المُحلِّل يكمل الانتقالين المتبقيين.
+         */
+        val RE_LOC = Regex("location(?:\\.replace|\\.href|\\.assign)\\s*\\(\\s*[\"']([^\"']+)[\"']")
         val RE_META_REFRESH = Regex("<meta[^>]+http-equiv=[\"']refresh[\"'][^>]+content=[\"'][^\"']*url=([^\"'>\\s]+)[\"']", RegexOption.IGNORE_CASE)
         val RE_META_REFRESH2 = Regex("url\\s*=\\s*[\"']([^\"']+)[\"']", RegexOption.IGNORE_CASE)
 
