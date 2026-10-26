@@ -1243,11 +1243,10 @@ class MoviesModProvider(private val prefs: SharedPreferences? = null) : MainAPI(
                     }
                     // look for driveseed links
                     Regex("https?://[^\"'\\s<>]*driveseed[^\"'\\s<>/]+/l\\?[^\"'\\s<>]+").find(body)?.let { m ->
-                        return mirrorsOf(m.value.replace("\\/", "/"), label ?: serverLabel)
+                        return m.value.replace("\\/", "/")
                     }
                     Regex("driveseed[^\"'\\s<> ]+/l\\?[^\"'\\s<> ]+").find(body)?.let { m ->
-                        val v = "https://${m.value.replace("\\/", "/")}"
-                        return mirrorsOf(v, label ?: serverLabel)
+                        return "https://${m.value.replace("\\/", "/")}"
                     }
                     Regex("https?://[^\"'\\s<>]*driveseed[^\"'\\s<>]*").find(body)?.let { m ->
                         return m.value
