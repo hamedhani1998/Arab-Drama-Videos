@@ -618,13 +618,14 @@ class MoviesModProvider(private val prefs: SharedPreferences? = null) : MainAPI(
                 Regex("https?://[^\"'\\s<>]*driveseed[^\"'\\s<>]+/r\\?[^\"'\\s<>]+").find(qt.replace("\\/", "/"))?.let {
                     return mirrorsOf(it.value.replace("\\/", "/"), label ?: serverLabel)
                 }
-                Regex("https?://[^\"'\\s<>]*driveseed[^\"'\\s<>]+/l\\?[^\"'\\s<>]+").find(qt.replace("\\/", "/"))?.let {
-                    val fu = followChain(it.value.replace("\\/", "/")) ?: return mirrorsOf(it.value.replace("\\/", "/"), label ?: serverLabel)
+                Regex("https?://[^\"'\\s<>]*driveseed[^\"'\\s<>]+/l\\?[^\"'\\s<>]+").find(qt.replace("\\/", "/"))?.let { m ->
+                    val v = m.value.replace("\\/", "/")
+                    val fu = followChain(v) ?: v
                     return mirrorsOf(fu, label ?: serverLabel)
                 }
                 Regex("driveseed[^\"'\\s<> ]+/l\\?[^\"'\\s<> ]+").find(qt.replace("\\/", "/"))?.let { m ->
                     val v = "https://${m.value.replace("\\/", "/")}"
-                    val fu = followChain(v) ?: return mirrorsOf(v, label ?: serverLabel)
+                    val fu = followChain(v) ?: v
                     return mirrorsOf(fu, label ?: serverLabel)
                 }
                 Regex("https?://[^\"'\\s<>]+\\.(mp4|mkv|avi|webm|mpg|mpeg|ts|zip|rar)(\\?[^\"'\\s<>]*)?").find(qt.replace("\\/", "/"))?.let {
@@ -1241,8 +1242,15 @@ class MoviesModProvider(private val prefs: SharedPreferences? = null) : MainAPI(
                         continue
                     }
                     // look for driveseed links
-                    Regex("https?://[^\"'\\s<>]*driveseed[^\"'\\s<>/]+/l\\?[^\"'\\s<>]+").find(body)?.let { return it.value }
-                    Regex("driveseed[^\"'\\s<> ]+/l\\?[^\"'\\s<> ]+").find(body)?.let { return "https://${it.value.replace("\\/", "/")}" }
+                    Regex("https?://[^\"'\\s<>]*driveseed[^\"'\\s<>/]+/l\\?[^\"'\\s<>]+").find(body)?.let { m ->
+                        val fu = followChain(m.value.replace("\\/", "/")) ?: return mirrorsOf(m.value.replace("\\/", "/"), label ?: serverLabel)
+                        return mirrorsOf(fu, label ?: serverLabel)
+                    }
+                    Regex("driveseed[^\"'\\s<> ]+/l\\?[^\"'\\s<> ]+").find(body)?.let { m ->
+                        val v = "https://${m.value.replace("\\/", "/")}"
+                        val fu = followChain(v) ?: return mirrorsOf(v, label ?: serverLabel)
+                        return mirrorsOf(fu, label ?: serverLabel)
+                    }
                     Regex("https?://[^\"'\\s<>]*driveseed[^\"'\\s<>]*").find(body)?.let { m ->
                         return m.value
                     }
