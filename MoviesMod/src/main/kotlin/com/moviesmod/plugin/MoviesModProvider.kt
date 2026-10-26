@@ -1243,13 +1243,11 @@ class MoviesModProvider(private val prefs: SharedPreferences? = null) : MainAPI(
                     }
                     // look for driveseed links
                     Regex("https?://[^\"'\\s<>]*driveseed[^\"'\\s<>/]+/l\\?[^\"'\\s<>]+").find(body)?.let { m ->
-                        val fu = followChain(m.value.replace("\\/", "/")) ?: return mirrorsOf(m.value.replace("\\/", "/"), label ?: serverLabel)
-                        return mirrorsOf(fu, label ?: serverLabel)
+                        return mirrorsOf(m.value.replace("\\/", "/"), label ?: serverLabel)
                     }
                     Regex("driveseed[^\"'\\s<> ]+/l\\?[^\"'\\s<> ]+").find(body)?.let { m ->
                         val v = "https://${m.value.replace("\\/", "/")}"
-                        val fu = followChain(v) ?: return mirrorsOf(v, label ?: serverLabel)
-                        return mirrorsOf(fu, label ?: serverLabel)
+                        return mirrorsOf(v, label ?: serverLabel)
                     }
                     Regex("https?://[^\"'\\s<>]*driveseed[^\"'\\s<>]*").find(body)?.let { m ->
                         return m.value
@@ -1300,17 +1298,25 @@ class MoviesModProvider(private val prefs: SharedPreferences? = null) : MainAPI(
             var r = app.get(fileUrl, headers = head)
             if (!r.isSuccessful) return emptyList()
             var body = r.text
+            var current = fileUrl
             // غلاف Redirect Only: تابع الانتقالين المتبقيين
-            for (k in 0..2) {
+            for (k in 0..6) {
                 val mv = RE_JS_REDIRECT.find(body)?.groupValues?.getOrNull(1)
                     ?: RE_LOC.find(body)?.groupValues?.getOrNull(1)
+                    ?: Regex("location\\.href\\s*=\\s*[\"']([^\"']+)[\"']", RegexOption.IGNORE_CASE).find(body)?.groupValues?.getOrNull(1)
+                    ?: Regex("window\\.location\\s*=\\s*[\"']([^\"']+)[\"']", RegexOption.IGNORE_CASE).find(body)?.groupValues?.getOrNull(1)
+                    ?: RE_META_REFRESH.find(body)?.groupValues?.getOrNull(1)
                     ?: break
-                val nu = if (mv.startsWith("http")) mv else "https://driveseed.org$mv"
-                if (nu == fileUrl || nu == body) break
-                val nr = try { app.get(nu, headers = head) } catch (e: Exception) { break }
+                val nu = if (mv.startsWith("http")) mv else if (mv.startsWith("//")) "https:$mv" else if (mv.startsWith("/")) {
+                    val base = try { java.net.URI(current) } catch (e: Exception) { null }
+                    if (base?.host?.contains("driveseed") == true) "https://driveseed.org$mv" else if (base != null) "${base.scheme}://${base.host}$mv" else "https://driveseed.org$mv"
+                } else mv
+                if (nu == current || nu.isBlank()) break
+                current = nu
+                val nr = try { app.get(nu, headers = head, referer = current) } catch (e: Exception) { break }
                 if (!nr.isSuccessful) break
                 body = nr.text
-                if (RE_R2.containsMatchIn(body) || RE_VG.containsMatchIn(body) || body.contains("/file/")) break
+                if (RE_R2.containsMatchIn(body) || RE_VG.containsMatchIn(body) || body.contains("/file/") || body.contains("CLOUD DOWNLOAD") || body.contains("INSTANT DOWNLOAD")) break
             }
             body
         } catch (e: Exception) {
