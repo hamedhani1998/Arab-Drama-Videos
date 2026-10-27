@@ -965,6 +965,57 @@ class MoviesModProvider(private val prefs: SharedPreferences? = null) : MainAPI(
         return null
     }
 
+    /** نتيجة طلبٍ خامّ: الرمز والجسم وترويسة التحويل. */
+    private data class Raw(val code: Int, val body: String, val location: String?)
+
+    /**
+     * طلب GET خامّ عبر `HttpURLConnection` **بلا أي كعك من جار التطبيق**.
+     *
+     * لِمَ لا `app.get`؟ لأنّ OkHttp يعيد بناء ترويسة `Cookie` من جار
+     * التطبيق ويتجاهل الترويسة اليدوية حين يكون الجار غير فارغ (وفيه
+     * `__cf_bm` من Cloudflare)، فيضيع كعك `lp-*` ويردّ الخادم
+     * **«Session expired»** — وهو ما قِيس على الجهاز فعلًا: 1449 بايت،
+     * بينما الكمبيوتر (بلا جار ملوّث) يحصل على صفحة التحويل 1425 بايت.
+     *
+     * هنا لا جار ولا كعك تلقائي: ما نمرّره فقط.
+     */
+    private suspend fun rawGet(
+        url: String,
+        cookie: String?,
+        referer: String?,
+    ): Raw? = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+        var c: java.net.HttpURLConnection? = null
+        try {
+            c = (java.net.URL(url).openConnection() as java.net.HttpURLConnection)
+            c.instanceFollowRedirects = false
+            c.connectTimeout = 20000
+            c.readTimeout = 20000
+            c.requestMethod = "GET"
+            c.setRequestProperty("User-Agent", UA)
+            c.setRequestProperty(
+                "Accept",
+                "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            )
+            c.setRequestProperty("Accept-Language", "en-US,en;q=0.9")
+            if (!referer.isNullOrBlank()) c.setRequestProperty("Referer", referer)
+            if (!cookie.isNullOrBlank()) c.setRequestProperty("Cookie", cookie)
+            val code = c.responseCode
+            val loc = c.getHeaderField("Location")
+            val stream = if (code in 200..299) c.inputStream else c.errorStream
+            val text = stream?.bufferedReader(Charsets.UTF_8)?.use { it.readText() } ?: ""
+            Log.i(TAG, "rawGet $code len=${text.length} loc=${loc?.take(90)}")
+            Raw(code, text, loc)
+        } catch (e: Throwable) {
+            Log.i(TAG, "rawGet FAIL ${e::class.simpleName} ${e.message}")
+            null
+        } finally {
+            try {
+                c?.disconnect()
+            } catch (e: Throwable) {
+            }
+        }
+    }
+
     /**
      * يكتب تشخيصًا خامًّا في مجلّد التطبيق الخارجي ليُسحب بـ`adb pull`
      * (`/sdcard/Android/data/com.lagradost.cloudstream3/files/mmdbg/`).
@@ -1112,13 +1163,52 @@ class MoviesModProvider(private val prefs: SharedPreferences? = null) : MainAPI(
                         Log.i(TAG, "followChain try$attempt hop$hops: sc=${sc.first} -> lp_go")
                         var lastBody: String? = null
                         var moved: String? = null
+                        // (أ) طلبٌ خامّ بلا جار كعك: الكعكة وحدها، لا `__cf_bm`
+                        val ck = "${sc.first}=${sc.second}"
+                        Log.i(
+                            TAG,
+                            "followChain lp_go cookie len=${sc.second.length}" +
+                                " head=${sc.second.take(6)} tail=${sc.second.takeLast(6)}",
+                        )
+                        val raw = rawGet(go, ck, pageUrl)
+                        if (raw != null) {
+                            if (!raw.location.isNullOrBlank()) {
+                                val next = absUrl(go, raw.location)
+                                Log.i(TAG, "followChain lp_go raw Location -> ${next.take(110)}")
+                                if (isFinal(next)) return next
+                                moved = next
+                            } else if (raw.code in 200..299) {
+                                lastBody = raw.body
+                                driveseedLink(raw.body)?.let {
+                                    Log.i(TAG, "followChain lp_go raw driveseed -> ${it.take(110)}")
+                                    return it
+                                }
+                                jsTarget(raw.body)?.let { mv ->
+                                    val next = absUrl(go, mv)
+                                    Log.i(TAG, "followChain lp_go raw JS -> ${next.take(110)}")
+                                    if (isFinal(next)) return next
+                                    moved = next
+                                }
+                                if (moved == null) {
+                                    Log.i(
+                                        TAG,
+                                        "followChain lp_go raw بلا انتقال (${raw.body.length})" +
+                                            " expired=${raw.body.contains("Session expired")}" +
+                                            " wait=${raw.body.contains("Please wait")}",
+                                    )
+                                }
+                            }
+                        }
+                        if (moved != null) {
+                            current = moved
+                            referer = go
+                            continue
+                        }
                         for (g in 1..3) {
                             val gr = try {
                                 app.get(
                                     go,
-                                    // الكعكة تُرسَل في الترويسة أيضًا: بعض إصدارات
-                                    // CloudStream تتجاهل معامل `cookies`، والترويسة
-                                    // تعمل دائمًا (OkHttp لا يضيف كعكًا إن وُجدت).
+                                    // احتياط: لو فشل الطلب الخامّ لأي سبب.
                                     headers = head + mapOf("Cookie" to "${sc.first}=${sc.second}"),
                                     referer = pageUrl,
                                     cookies = mapOf(sc.first to sc.second),
