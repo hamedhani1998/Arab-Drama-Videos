@@ -1016,6 +1016,156 @@ class MoviesModProvider(private val prefs: SharedPreferences? = null) : MainAPI(
         }
     }
 
+    /** يفكّ قيمة كعكة `sc(...)`: base64 ثم zlib → نصّ (هو معرّف الجلسة عادةً). */
+    private fun decodeSc(v: String): String? = try {
+        val bytes = android.util.Base64.decode(v, android.util.Base64.DEFAULT)
+        val inf = java.util.zip.Inflater()
+        inf.setInput(bytes)
+        val out = java.io.ByteArrayOutputStream()
+        val buf = ByteArray(4096)
+        while (!inf.finished()) {
+            val n = inf.inflate(buf)
+            if (n <= 0) break
+            out.write(buf, 0, n)
+        }
+        inf.end()
+        String(out.toByteArray(), Charsets.UTF_8)
+    } catch (e: Throwable) {
+        null
+    }
+
+    /** يبني قيمة كعكة `sc(...)` من sid: zlib ثم base64 (عكس [decodeSc]). */
+    private fun encodeSc(sid: String): String? = try {
+        val def = java.util.zip.Deflater()
+        def.setInput(sid.toByteArray(Charsets.UTF_8))
+        def.finish()
+        val out = java.io.ByteArrayOutputStream()
+        val buf = ByteArray(4096)
+        while (!def.finished()) {
+            val n = def.deflate(buf)
+            if (n <= 0) break
+            out.write(buf, 0, n)
+        }
+        def.end()
+        android.util.Base64.encodeToString(out.toByteArray(), android.util.Base64.NO_WRAP)
+    } catch (e: Throwable) {
+        null
+    }
+
+    /** محاولة واحدة لكعكةٍ ما: طلبٌ خامّ (بلا جار كعك) ثم `app.get`. */
+    private suspend fun lpGoTry(name: String, value: String, referer: String?): String? {
+        val go = "https://en.thenaukriadda.in/?lp_go=$name"
+        val ck = "$name=$value"
+        // 1) خام: الكعكة وحدها
+        val raw = rawGet(go, ck, referer)
+        if (raw != null) {
+            if (!raw.location.isNullOrBlank()) {
+                val n = absUrl(go, raw.location)
+                Log.i(TAG, "lpGo raw Location -> ${n.take(110)}")
+                return n
+            }
+            if (raw.code in 200..299) {
+                driveseedLink(raw.body)?.let {
+                    Log.i(TAG, "lpGo raw driveseed -> ${it.take(110)}")
+                    return it
+                }
+                jsTarget(raw.body)?.let {
+                    val n = absUrl(go, it)
+                    Log.i(TAG, "lpGo raw JS -> ${n.take(110)}")
+                    return n
+                }
+                Log.i(
+                    TAG,
+                    "lpGo raw بلا انتقال (${raw.body.length})" +
+                        " expired=${raw.body.contains("Session expired")}" +
+                        " wait=${raw.body.contains("Please wait")}",
+                )
+                dbg("lp_go_fail_${System.currentTimeMillis()}.html", raw.body)
+            }
+        }
+        // 2) احتياط عبر CloudStream
+        for (g in 1..2) {
+            val gr = try {
+                app.get(
+                    go,
+                    headers = head + mapOf("Cookie" to ck),
+                    referer = referer,
+                    cookies = mapOf(name to value),
+                    allowRedirects = false,
+                )
+            } catch (e: Exception) {
+                Log.i(TAG, "lpGo app[$g] EX ${e::class.simpleName}")
+                null
+            }
+            if (gr == null) {
+                if (g < 2) kotlinx.coroutines.delay(800)
+                continue
+            }
+            val gloc = gr.headers["Location"] ?: gr.headers["location"]
+            if (!gloc.isNullOrBlank()) {
+                val n = absUrl(go, gloc)
+                Log.i(TAG, "lpGo app[$g] Location -> ${n.take(110)}")
+                return n
+            }
+            if (gr.isSuccessful) {
+                driveseedLink(gr.text)?.let {
+                    Log.i(TAG, "lpGo app[$g] driveseed -> ${it.take(110)}")
+                    return it
+                }
+                jsTarget(gr.text)?.let {
+                    val n = absUrl(go, it)
+                    Log.i(TAG, "lpGo app[$g] JS -> ${n.take(110)}")
+                    return n
+                }
+                Log.i(
+                    TAG,
+                    "lpGo app[$g] بلا انتقال (${gr.text.length})" +
+                        " expired=${gr.text.contains("Session expired")}",
+                )
+            } else {
+                Log.i(TAG, "lpGo app[$g] HTTP ${gr.code}")
+            }
+            if (g < 2) kotlinx.coroutines.delay(800)
+        }
+        return null
+    }
+
+    /**
+     * خطوة `?lp_go=<name>`.
+     *
+     * تُسجّل **فكّ تشفير** القيمة ومقارنتها بـ`sid`: قيمة `sc(...)` هي
+     * `zlib(sid)`، فإن اختلفت فالكعكة من جلسةٍ أخرى — وهذا سبب
+     * «Session expired» بلا لبس. وحينها يُعاد بناء القيمة من الـ`sid`
+     * الحالي (`encodeSc`) وتُجرَّب، فلا يهمّ من أين جاءت القيمة الفاسدة.
+     */
+    private suspend fun lpGoStep(sc: Pair<String, String>, referer: String?, sid: String): String? {
+        val sidVal = sid.substringAfter("?sid=", sid).substringBefore("&")
+        val dec = decodeSc(sc.second)
+        val matches = dec != null && sidVal.isNotEmpty() && dec.contains(sidVal.take(40))
+        Log.i(
+            TAG,
+            "lpGo name=${sc.first} len=${sc.second.length}" +
+                " head=${sc.second.take(6)} tail=${sc.second.takeLast(6)}" +
+                " decoded=${dec?.take(28)} sidMatch=$matches",
+        )
+        val values = ArrayList<String>(2)
+        values.add(sc.second)
+        if (!matches) {
+            encodeSc(sidVal)?.let {
+                values.add(it)
+                Log.i(TAG, "lpGo: قيمة بديلة من sid len=${it.length} head=${it.take(6)}")
+            }
+        }
+        for ((vi, v) in values.withIndex()) {
+            val r = lpGoTry(sc.first, v, referer)
+            if (r != null) {
+                if (vi > 0) Log.i(TAG, "lpGo: نجحت القيمة البديلة")
+                return r
+            }
+        }
+        return null
+    }
+
     /**
      * يكتب تشخيصًا خامًّا في مجلّد التطبيق الخارجي ليُسحب بـ`adb pull`
      * (`/sdcard/Android/data/com.lagradost.cloudstream3/files/mmdbg/`).
@@ -1148,6 +1298,7 @@ class MoviesModProvider(private val prefs: SharedPreferences? = null) : MainAPI(
                         }
                         if (!pr.isSuccessful) throw Exception("POST HTTP ${pr.code}")
                         val pbody = pr.text
+                        Log.i(TAG, "followChain hop$hops: POST ${pr.code} len=${pbody.length} setCookie=${pr.headers["set-cookie"]}")
                         driveseedLink(pbody)?.let { return it }
                         // حلّل ردّ الـPOST كما هو بلا طلبٍ ثانٍ
                         pendingBody = pbody
@@ -1158,113 +1309,30 @@ class MoviesModProvider(private val prefs: SharedPreferences? = null) : MainAPI(
                     }
 
                     // 3) كعكة `sc(...)` → `?lp_go=`
-                    scOf(body)?.let { sc ->
-                        val go = "https://en.thenaukriadda.in/?lp_go=${sc.first}"
-                        Log.i(TAG, "followChain try$attempt hop$hops: sc=${sc.first} -> lp_go")
-                        var lastBody: String? = null
-                        var moved: String? = null
-                        // (أ) طلبٌ خامّ بلا جار كعك: الكعكة وحدها، لا `__cf_bm`
-                        val ck = "${sc.first}=${sc.second}"
-                        Log.i(
-                            TAG,
-                            "followChain lp_go cookie len=${sc.second.length}" +
-                                " head=${sc.second.take(6)} tail=${sc.second.takeLast(6)}",
-                        )
-                        val raw = rawGet(go, ck, pageUrl)
-                        if (raw != null) {
-                            if (!raw.location.isNullOrBlank()) {
-                                val next = absUrl(go, raw.location)
-                                Log.i(TAG, "followChain lp_go raw Location -> ${next.take(110)}")
-                                if (isFinal(next)) return next
-                                moved = next
-                            } else if (raw.code in 200..299) {
-                                lastBody = raw.body
-                                driveseedLink(raw.body)?.let {
-                                    Log.i(TAG, "followChain lp_go raw driveseed -> ${it.take(110)}")
-                                    return it
-                                }
-                                jsTarget(raw.body)?.let { mv ->
-                                    val next = absUrl(go, mv)
-                                    Log.i(TAG, "followChain lp_go raw JS -> ${next.take(110)}")
-                                    if (isFinal(next)) return next
-                                    moved = next
-                                }
-                                if (moved == null) {
-                                    Log.i(
-                                        TAG,
-                                        "followChain lp_go raw بلا انتقال (${raw.body.length})" +
-                                            " expired=${raw.body.contains("Session expired")}" +
-                                            " wait=${raw.body.contains("Please wait")}",
-                                    )
-                                }
-                            }
-                        }
-                        if (moved != null) {
-                            current = moved
-                            referer = go
-                            continue
-                        }
-                        for (g in 1..3) {
-                            val gr = try {
-                                app.get(
-                                    go,
-                                    // احتياط: لو فشل الطلب الخامّ لأي سبب.
-                                    headers = head + mapOf("Cookie" to "${sc.first}=${sc.second}"),
-                                    referer = pageUrl,
-                                    cookies = mapOf(sc.first to sc.second),
-                                    allowRedirects = false,
-                                )
-                            } catch (e: Exception) {
-                                Log.i(TAG, "followChain lp_go[$g] EX ${e::class.simpleName}")
-                                null
-                            }
-                            if (gr == null) {
-                                if (g < 3) kotlinx.coroutines.delay(900)
+                    val scs = RE_SC.findAll(body)
+                        .map { it.groupValues[1] to unescapeText(it.groupValues[2]) }
+                        .distinctBy { it.first }
+                        .toList()
+                    if (scs.isNotEmpty()) {
+                        dbg("sc_page_${attempt}_${System.currentTimeMillis()}.html", body)
+                        Log.i(TAG, "followChain try$attempt hop$hops: sc matches=${scs.size}")
+                        var resolved: String? = null
+                        for ((si, sc) in scs.withIndex()) {
+                            val next = lpGoStep(sc, pageUrl, sid)
+                            if (next == null) {
+                                Log.i(TAG, "followChain sc[$si] فشلت")
                                 continue
                             }
-                            val gloc = gr.headers["Location"] ?: gr.headers["location"]
-                            if (!gloc.isNullOrBlank()) {
-                                val next = absUrl(go, gloc)
-                                Log.i(TAG, "followChain lp_go[$g] Location -> ${next.take(110)}")
-                                if (isFinal(next)) return next
-                                moved = next
-                                break
-                            }
-                            if (!gr.isSuccessful) {
-                                Log.i(TAG, "followChain lp_go[$g] HTTP ${gr.code}")
-                            } else {
-                                val b = gr.text
-                                lastBody = b
-                                driveseedLink(b)?.let {
-                                    Log.i(TAG, "followChain lp_go[$g] driveseed -> ${it.take(110)}")
-                                    return it
-                                }
-                                jsTarget(b)?.let { mv ->
-                                    val next = absUrl(go, mv)
-                                    Log.i(TAG, "followChain lp_go[$g] JS -> ${next.take(110)}")
-                                    if (isFinal(next)) return next
-                                    moved = next
-                                }
-                                if (moved != null) break
-                                Log.i(
-                                    TAG,
-                                    "followChain lp_go[$g] بلا انتقال (${b.length} بايت)" +
-                                        " wait=${b.contains("Please wait")}" +
-                                        " expired=${b.contains("Session expired")}" +
-                                        " tail=${b.takeLast(260).replace('\n', ' ').replace('\r', ' ')}",
-                                )
-                            }
-                            if (g < 3) kotlinx.coroutines.delay(900)
+                            if (isFinal(next)) return next
+                            resolved = next
+                            break
                         }
-                        if (lastBody != null) {
-                            dbg("lp_go_fail_${attempt}_${System.currentTimeMillis()}.html", lastBody!!)
-                        }
-                        if (moved != null) {
-                            current = moved
-                            referer = go
+                        if (resolved != null) {
+                            current = resolved
+                            referer = resolved
                             continue
                         }
-                        throw Exception("lp_go بلا انتقال (${lastBody?.length ?: 0} بايت)")
+                        throw Exception("lp_go بلا انتقال (${scs.size} كعكة)")
                     }
 
                     // 4) انتقال JS / meta
