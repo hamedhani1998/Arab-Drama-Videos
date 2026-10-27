@@ -108,9 +108,9 @@ class MoviesModSettingsBottomSheet(private val prefs: SharedPreferences) : Botto
 
             val batchPref = SwitchPreferenceCompat(ctx).apply {
                 key = KEY_INCLUDE_BATCH
-                title = "إظهار حلقة «الكل (دفعة)»"
-                summary = "تُضيف ملف الحلقات الكامل (Batch/Zip) كحلقةٍ واحدة داخل المسلسل — معطّلة في الأصل"
-                setDefaultValue(false)
+                title = "إظهار حلقة «كل الحلقات»"
+                summary = "تُضيف مدخلةً واحدة تجمع روابط كل حلقات الموسم بكل جوداتها — ملفّ الـZIP نفسه محجوب بتسجيل الدخول على الموقع"
+                setDefaultValue(true)
             }
             playbackCategory.addPreference(batchPref)
 

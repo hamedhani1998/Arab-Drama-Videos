@@ -263,7 +263,7 @@ class MoviesModProvider(private val prefs: SharedPreferences? = null) : MainAPI(
             val batchRows = rows.filter { it.kind == KIND_BATCH && it.href.startsWith("http") }
 
             if (epRows.isNotEmpty()) {
-                val episodes = buildEpisodes(epRows, if (pref(KEY_INCLUDE_BATCH, false)) batchRows else emptyList())
+                val episodes = buildEpisodes(epRows, if (pref(KEY_INCLUDE_BATCH, true)) batchRows else emptyList())
                 if (episodes.isEmpty()) {
                     // التشخيص ضروري هنا: الفرع **صامت**، فلا يفرّق المستخدم
                     // بين «لا حلقات في الصفحة» و«حلقاتها لم تُجلب». والتفصيل
@@ -361,63 +361,96 @@ class MoviesModProvider(private val prefs: SharedPreferences? = null) : MainAPI(
      * `Episode 1` يبتلع `Episode 10`…`Episode 16` فتُبنى الحلقات كلّها على رابط
      * واحد — وهذا بالضبط شكل «حلقة واحدة» الذي ظهر في الإصدار الأول.
      *
-     * وعند تكرار الحلقة عبر جوداتٍ مختلفة تُبقى الأعلى جودةً: صفّ
-     * «Korean 1080p x264 Esubs [1.1GB]» هو المقصود، لا ‎720p‎ ولا ‎10bit‎.
+     * وعند تكرار الحلقة عبر جوداتٍ مختلفة **تُحفظ كلّها**: لكل جودةٍ ملفٌّ
+     * مستقلّ على `driveseed` (‎720p‎ و‎1080p‎ مثلًا)، وحصرُ الأعلى كان يُخفي
+     * بقيّة روابط التحميل. السطور تُجمع بـ`\n` و`loadLinks` يحلّ كلًّا منها.
      */
     private suspend fun buildEpisodes(epRows: List<Row>, batchRows: List<Row>): List<Episode> {
         fixDns()
         val archives = epRows.distinctBy { it.href }
+        // كل أرشيفٍ يُعيد: حلقاته، ورابط «All Episodes Batch» الذي يفتح
+        // `/list/` على driveseed بقائمة الموسم كاملًا (قِيس: ٩ ملفّات لـ٩ حلقات).
+        data class Scan(val eps: List<Pair<String, Row>>, val batches: List<Pair<String, Row>>)
+
         val fetched = coroutineScope {
             archives.map { row ->
                 async(Dispatchers.IO) {
                     try {
                         val r = app.get(row.href, headers = head)
-                        if (!r.isSuccessful) return@async emptyList<Pair<String, Row>>()
-                        RE_SID.findAll(r.text).mapNotNull { a ->
+                        if (!r.isSuccessful) return@async Scan(emptyList(), emptyList())
+                        val eps = ArrayList<Pair<String, Row>>(16)
+                        val batches = ArrayList<Pair<String, Row>>(2)
+                        for (a in RE_SID.findAll(r.text)) {
                             val sid = unescapeText(a.groupValues[1]).replace(RE_WS, "")
                             val label = stripTags(a.groupValues[2])
-                            val n = epNumberOf(label) ?: return@mapNotNull null
-                            sid to row.copy(label = label, epNum = n)
-                        }.toList().also { found ->
-                            Log.i(TAG, "archive ${row.href.substringAfterLast('/')}:" +
-                                " sid=${RE_SID.findAll(r.text).count()} بحلقة=${found.size}")
+                            if (label.contains("batch", true) || label.contains("all episodes", true)) {
+                                batches.add(sid to row.copy(label = label))
+                                continue
+                            }
+                            val n = epNumberOf(label) ?: continue
+                            eps.add(sid to row.copy(label = label, epNum = n))
                         }
+                        Log.i(TAG, "archive ${row.href.substringAfterLast('/')}:" +
+                            " حلقات=${eps.size} دفعات=${batches.size}")
+                        Scan(eps, batches)
                     } catch (e: Exception) {
                         Log.i(TAG, "archive FAIL ${row.href} ${e::class.simpleName}" +
                             if (e is UnknownHostException) " — المضيف لا يُحلّ" else "")
-                        emptyList()
+                        Scan(emptyList(), emptyList())
                     }
                 }
             }.awaitAll()
         }
 
-        val bySeasonEp = HashMap<Pair<Int, Int>, Pair<String, Row>>()
-        for (list in fetched) {
-            for ((sid, row) in list) {
+        // مفتاح الحلقة → كل جوداتها (لا الأعلى فقط). `LinkedHashMap` ليبقى
+        // الترتيب الذي وردت به الأرشيفات، والفرز النهائي يضمن الثبات.
+        val bySeasonEp = LinkedHashMap<Pair<Int, Int>, MutableList<Pair<String, Row>>>()
+        val seenSids = HashSet<String>()
+        for (scan in fetched) {
+            for ((sid, row) in scan.eps) {
                 if (row.epNum <= 0) continue
+                // الرابط نفسه قد يتكرّر في أرشيفين (جودة/مرآة) فلا يُحلّ مرّتين.
+                if (!seenSids.add(sid)) continue
                 val key = (seasonOf(row.heading) ?: 1) to row.epNum
-                val prev = bySeasonEp[key]
-                if (prev == null || qualityOf(row.heading) > qualityOf(prev.second.heading)) {
-                    bySeasonEp[key] = sid to row
-                }
+                bySeasonEp.getOrPut(key) { ArrayList(2) }.add(sid to row)
             }
         }
 
         val showSeasons = pref(KEY_SHOW_SEASONS, true)
         val eps = ArrayList<Episode>(bySeasonEp.size + 1)
-        for ((key, payload) in bySeasonEp.entries.sortedWith(compareBy({ it.key.first }, { it.key.second }))) {
+        for ((key, list) in bySeasonEp.entries.sortedWith(compareBy({ it.key.first }, { it.key.second }))) {
             val (season, num) = key
-            // العنوان يُمرَّر مع الرابط (مفصولًا بـtab) ليختار `mirrorsOf`
-            // الحلقة الصحيحة من صفحة `/list/` على driveseed.
-            eps.add(newEpisode(payload.first + "\t" + payload.second.heading) {
+            // كل جودةٍ سطرٌ مستقلّ: `<sid>	<عنوان الجودة> · SxxExx`.
+            // رقم الحلقة في العنوان يلزم لاختيار الملفّ الصحيح من صفحات `/list/`.
+            val payload = list
+                .sortedByDescending { qualityOf(it.second.heading) }
+                .joinToString("\n") { (sid, row) -> sid + "\t" + epHeading(row.heading, season, num) }
+            eps.add(newEpisode(payload) {
                 this.name = if (showSeasons) "الموسم $season · الحلقة $num" else "الحلقة $num"
                 this.season = season
                 this.episode = num
             })
         }
+
+        // «كل الحلقات»: ملفّ الـZIP على الموقع محجوبٌ بتسجيل الدخول (قِيس:
+        // `/file/` يعرض «Login to download» وحدها، ومرآة `/zfile/` تشير إلى
+        // مضيف `workers.dev` لا يُحلّ)، فرابط «All Episodes Batch» في صفحة
+        // الحلقات هو الطريق العامل: يفتح `/list/` بقائمة ملفّات الموسم كاملة.
+        // سطرٌ لكل جودة، ثم أرشيف الـZIP احتياطًا إن كان متاحًا.
+        val batchSeasons = HashSet<Int>()
         for (b in batchRows) {
             val season = seasonOf(b.heading) ?: 1
-            eps.add(newEpisode(b.href + "\t" + b.heading) {
+            if (!batchSeasons.add(season)) continue
+            val lines = ArrayList<String>(4)
+            val qualityLines = fetched
+                .flatMap { it.batches }
+                .filter { (seasonOf(it.second.heading) ?: 1) == season }
+                .sortedByDescending { qualityOf(it.second.heading) }
+                .distinctBy { it.first }
+            for ((sid, row) in qualityLines) lines.add(sid + "\t" + row.heading.trim())
+            lines.add(b.href + "\t" + b.heading)
+            Log.i(TAG, "batch S$season: qualityLists=${qualityLines.size}")
+            eps.add(newEpisode(lines.joinToString("\n")) {
                 this.name = if (showSeasons) "الموسم $season · كل الحلقات" else "كل الحلقات"
                 this.season = season
                 this.episode = 0
@@ -425,6 +458,11 @@ class MoviesModProvider(private val prefs: SharedPreferences? = null) : MainAPI(
         }
         return eps
     }
+
+    /** عنوان سطر الحلقة: عنوان الجودة ثم `SxxExx` (يُقرأ منه الاسم والجودة والمطابقة). */
+    private fun epHeading(heading: String, season: Int, ep: Int): String =
+        heading.trim() + " · S%02dE%02d".format(season, ep)
+
 
     // ---------- روابط التشغيل ----------
 
@@ -485,7 +523,7 @@ class MoviesModProvider(private val prefs: SharedPreferences? = null) : MainAPI(
                             } catch (ex: Exception) { emptyList() }
                         }
                     }
-                }.awaitAll().flatten()
+                }.awaitAll().flatten().distinctBy { it.url }
             }
             if (resolved.isEmpty()) {
                 Log.i(TAG, "loadLinks: resolved nothing from ${entries.size} entries (dns fixed)")
@@ -525,31 +563,44 @@ class MoviesModProvider(private val prefs: SharedPreferences? = null) : MainAPI(
                 // متوقّع) كان يُسقط القائمة بأكملها لأن الاستثناء يصعد إلى
                 // `catch` الخارجي فيعود `false` ولو كان قبله ما أُرسل. الآن
                 // يسقط المرشّح وحده ويُسجَّل، وتبقى بقيّة القائمة.
-                try {
-                    val label = MediaProbe.label(
-                        c.server,
-                        MediaProbe.qualityLabel(heightOf(c.quality)),
-                        c.bytes,
-                        c.url,
-                        ExtractorLinkType.VIDEO,
-                        c.note,
-                        useOf(c),
-                        FormatTag.fromMime(c.mime),
-                    )
-                    callback(
-                        newExtractorLink(source = name, name = label, url = c.url, type = ExtractorLinkType.VIDEO) {
-                            this.referer = c.referer ?: ""
-                            this.headers = c.headers
-                            this.quality = c.quality
-                        }
-                    )
-                    emitted++
-                } catch (e: kotlinx.coroutines.CancellationException) {
-                    // الإلغاء ليس خطأ مصدر: يُعاد إطلاقه وإلا بدا للمستخدم
-                    // «لا نتائج» بدل «أُلغيت العملية».
-                    throw e
-                } catch (e: Exception) {
-                    Log.i(TAG, "loadLinks: skip ${c.server} ${e::class.simpleName} ${e.message}")
+                //
+                // ولكل ملفٍّ وسائط **مدخلتان**: «مشاهدة» و«تحميل» بالرابط نفسه.
+                // الموقع لا يقدّم مشغّلًا (قِيس: صفر `iframe` وصفر `video` في
+                // صفحة العمل) فالبثّ والتنزيل كلاهما من الملفّ ذاته؛ ووسمٌ واحد
+                // كان يوهم المستخدم أنّ مشاهدة الحلقة غير متاحة. ملفّات
+                // الأرشيف (`zip`/`rar`) تحمل وسم التحميل وحده.
+                val uses = if (isArchive(c)) {
+                    listOf(MediaProbe.Use.DOWNLOAD)
+                } else {
+                    listOf(MediaProbe.Use.WATCH, MediaProbe.Use.DOWNLOAD)
+                }
+                for (use in uses) {
+                    try {
+                        val label = MediaProbe.label(
+                            c.server,
+                            MediaProbe.qualityLabel(heightOf(c.quality)),
+                            c.bytes,
+                            c.url,
+                            ExtractorLinkType.VIDEO,
+                            c.note,
+                            use,
+                            FormatTag.fromMime(c.mime),
+                        )
+                        callback(
+                            newExtractorLink(source = name, name = label, url = c.url, type = ExtractorLinkType.VIDEO) {
+                                this.referer = c.referer ?: ""
+                                this.headers = c.headers
+                                this.quality = c.quality
+                            }
+                        )
+                        emitted++
+                    } catch (e: kotlinx.coroutines.CancellationException) {
+                        // الإلغاء ليس خطأ مصدر: يُعاد إطلاقه وإلا بدا للمستخدم
+                        // «لا نتائج» بدل «أُلغيت العملية».
+                        throw e
+                    } catch (e: Exception) {
+                        Log.i(TAG, "loadLinks: skip ${c.server} ${e::class.simpleName} ${e.message}")
+                    }
                 }
             }
             // ★ «لا شيء» ليس حالة واحدة: هنا نُفرّق بين «الموقع لا يملك مرآة
@@ -572,24 +623,17 @@ class MoviesModProvider(private val prefs: SharedPreferences? = null) : MainAPI(
     }
 
     /**
-     * وسم مشاهدة/تحميل من **طبيعة الرابط نفسه** لا من ادّعاء.
+     * هل الرابط أرشيفٌ (`zip`/`rar`) لا يُبَثّ؟ الأرشيف يُوسم «تحميل» وحده،
+     * وما عداه ملفٌّ قابلٌ للمشاهدة والتنزيل معًا فتُعرض له مدخلتان.
      *
-     * قائمة تشغيل (`m3u8`/`mpd`) بثٌّ يُشاهد ولا يُنزَّل ملفًّا واحدًا ⇒ «مشاهدة».
-     * وما عداه ملفٌّ مباشر — وهو ما يقدّمه الموقع فعلًا: زرُّه «Download» على
-     * `driveseed`، وقِيس أنّ صفحة العمل لا تحمل ولا `iframe` واحدًا (‎0‎ إطارًا
-     * و‎0‎ وسم `video` في ‎81764‎ بايتًا من `entry-content`) ⇒ لا مسار مشاهدة
-     * أصلًا، فوسم «تحميل» هو الصدق لا التقليل. والملفّ يُشغَّل في المشغّل أيضًا
-     * — الوسم يوضّح مصدره لا يمنع تشغيله.
+     * ولماذا لم يُعتمد على ادّعاء الموقع: صفحة العمل لا تحمل `iframe` ولا
+     * `video` (قِيس: ‎0‎ و‎0‎ في ‎81764‎ بايتًا من `entry-content`) — أي لا مسار
+     * مشاهدةٍ منفصل أصلًا، والبثّ يجري من ملفّ `driveseed` نفسه.
      */
-    private fun useOf(c: Cand): MediaProbe.Use {
+    private fun isArchive(c: Cand): Boolean {
         val u = c.url.lowercase()
-        val playlist = u.contains(".m3u8") || u.contains(".mpd") ||
-            c.mime?.contains("mpegurl", true) == true || c.mime?.contains("dash+xml", true) == true
-        // For direct file links, always show as download
-        if (u.contains(".mp4") || u.contains(".mkv") || u.contains(".avi") || u.contains(".webm") || u.contains(".zip") || u.contains(".rar")) {
-            return MediaProbe.Use.DOWNLOAD
-        }
-        return if (playlist) MediaProbe.Use.WATCH else MediaProbe.Use.DOWNLOAD
+        if (u.contains(".zip") || u.contains(".rar") || u.contains(".7z")) return true
+        return c.mime?.let { it.contains("zip", true) || it.contains("rar", true) } == true
     }
 
     /**
@@ -600,285 +644,140 @@ class MoviesModProvider(private val prefs: SharedPreferences? = null) : MainAPI(
      * فالأرشيف يردّ 200 وجسمه يتغيّر حجمًا بين جلبٍ وجلب (قِيس: ‎38 KB‎ ثم
      * ‎42 KB‎ للصفحة نفسها).
      */
+    /**
+     * حلّ مدخلةٍ واحدة إلى ملفّات وسائط.
+     *
+     * المدخلة إمّا:
+     * - رابط `?sid=` مباشر (ما تبنيه `buildEpisodes` لكل جودة) — سلسلة واحدة فقط.
+     * - صفحة أرشيف (`episodes.modpro.blog/archives/…`) فيها رابط `?sid=` لكل
+     *   حلقة؛ **تُختار الحلقة المطلوبة** من نصّ الرابط (`Episode 5` أو `S01E05`)
+     *   أو رابط «All Episodes Batch» للدفعة. الإصدار السابق كان يجرّب **كل**
+     *   روابط الصفحة بالترتيب حتى ينجح أوّلُها، فتعود كل الحلقات إلى ملفّ
+     *   الحلقة الأولى — وهذا سبب «نفس الرابط لكل الحلقات».
+     * - رابط `driveseed` أو ملفّ وسائط مباشر.
+     *
+     * قراءة الصفحة تبحث عن `?sid=` بعلامةٍ ثابتة لا بموضع، فالأرشيف يردّ 200
+     * وجسمه يتغيّر حجمًا بين جلبٍ وجلب (قِيس: ‎38 KB‎ ثم ‎42 KB‎).
+     */
     private suspend fun resolve(archive: String, serverLabel: String?): List<Cand> {
         if (archive.isBlank()) return emptyList()
         Log.i(TAG, "resolve: start ${archive.take(100)} label=$serverLabel")
 
-        var sid: String = ""
-        var label: String? = null
+        // 1) رابط `?sid=` جاهز: لا طلبَ استكشافي، `followChain` تكفيه.
         if (archive.contains("?sid=")) {
-            sid = archive
-            label = serverLabel
-            // لا طلبَ استكشافي هنا: صفحة `?sid=` هي نموذج `lp-land` دائمًا،
-            // و`followChain` تُكملها في طلبٍ واحد بلا قراءةٍ مزدوجة.
             Log.i(TAG, "resolve: direct sid")
-        } else if (archive.contains("links.modpro.blog")) {
-            Log.i(TAG, "resolve: links.modpro.blog archive")
-            val (body, finalUrl) = try {
-                val r = app.get(archive, headers = head, allowRedirects = true, referer = mainUrl)
-                if (!r.isSuccessful) return emptyList()
-                r.text to r.url.toString()
-            } catch (e: Exception) {
-                Log.i(TAG, "resolve archive FAIL ${e::class.simpleName}")
-                return emptyList()
-            }
-            val allSids = RE_SID_ANY.findAll(body).map {
-                val raw = it.value
-                if (raw.startsWith("http")) raw.replace("&amp;", "&") else "https://$raw".replace("&amp;", "&")
-            }.distinct().toList()
-            if (allSids.isNotEmpty()) {
-                Log.i(TAG, "resolve: links.modpro found ${allSids.size} sid links")
-                val results = ArrayList<Cand>()
-                for ((idx, s) in allSids.withIndex()) {
-                    try {
-                        val qr = app.get(s, headers = head, referer = finalUrl, allowRedirects = true)
-                        val qt = qr.text
-                        Regex("https?://[^\"'\\s<>]*driveseed[^\"'\\s<>/]+/file/[^\"'\\s<>]+").find(qt.replace("\\/", "/"))?.let { m ->
-                            results.addAll(mirrorsOf(m.value.replace("\\/", "/"), allSids[idx]))
-                            continue
-                        }
-                        Regex("https?://[^\"'\\s<>]*driveseed[^\"'\\s<>]+/r\\?[^\"'\\s<>]+").find(qt.replace("\\/", "/"))?.let { m ->
-                            results.addAll(mirrorsOf(m.value.replace("\\/", "/"), allSids[idx]))
-                            continue
-                        }
-                        Regex("https?://[^\"'\\s<>]+\\.(mp4|mkv|avi|webm|mpg|mpeg|ts|zip|rar)(\\?[^\"'\\s<>]*)?").find(qt.replace("\\/", "/"))?.let { m ->
-                            results.add(Cand(m.value.replace("\\/", "/"), allSids[idx], qualityOf(allSids[idx] ?: m.value), null, null, head))
-                            continue
-                        }
-                        Regex("https?://[^\"'\\s<>]+/(download|dl|getfile)/[^\"'\\s<>]+").find(qt.replace("\\/", "/"))?.let { m ->
-                            results.add(Cand(m.value.replace("\\/", "/"), allSids[idx], qualityOf(allSids[idx] ?: m.value), null, null, head))
-                            continue
-                        }
-                        Regex("https?://[^\"'\\s<>]*driveseed[^\"'\\s<>]+/[^\"'\\s<>]+").find(qt.replace("\\/", "/"))?.let { m ->
-                            val v = m.value
-                            if (v.contains("/file/") || v.contains("/r?") || v.contains("download")) {
-                                results.addAll(mirrorsOf(v, allSids[idx]))
-                                continue
-                            }
-                        }
-                        val fu = followChain(s)
-                        if (fu != null) {
-                            results.addAll(mirrorsOf(fu, allSids[idx]))
-                        }
-                    } catch (e: Exception) {}
-                }
-                if (results.isNotEmpty()) return results.distinctBy { it.url }
-            }
-            // try to extract any sid param
-            Regex("sid=([A-Za-z0-9+/=]+)").find(body)?.let { m ->
-                val s = "https://en.thenaukriadda.in/?sid=${m.groupValues[1]}"
-                try {
-                    val qr = app.get(s, headers = head, referer = finalUrl, allowRedirects = true)
-                    val qt = qr.text
-                    Regex("https?://[^\"'\\s<>]*driveseed[^\"'\\s<>/]+/file/[^\"'\\s<>]+").find(qt.replace("\\/", "/"))?.let { m2 ->
-                        return mirrorsOf(m2.value.replace("\\/", "/"), label ?: serverLabel)
-                    }
-                    Regex("https?://[^\"'\\s<>]*driveseed[^\"'\\s<>]+/r\\?[^\"'\\s<>]+").find(qt.replace("\\/", "/"))?.let { m2 ->
-                        return mirrorsOf(m2.value.replace("\\/", "/"), label ?: serverLabel)
-                    }
-                    val fu = followChain(s)
-                    if (fu != null) return mirrorsOf(fu, label ?: serverLabel)
-                } catch (e: Exception) {}
-            }
-            return emptyList()
-        } else {
-            val (body, finalUrl) = try {
-                val r = app.get(archive, headers = head, allowRedirects = true, referer = mainUrl)
-                if (!r.isSuccessful) return emptyList()
-                r.text to r.url.toString()
-            } catch (e: Exception) {
-                Log.i(TAG, "resolve archive FAIL ${e::class.simpleName}" +
-                    " ${hostOf(archive)}" +
-                    if (e is UnknownHostException) " — المضيف لا يُحلّ" else "")
-                return emptyList()
-            }
-            // if it's links.modpro.blog page, extract all sid links directly
-            if (archive.contains("links.modpro.blog") || finalUrl.contains("links.modpro.blog")) {
-                val allSids = RE_SID_ANY.findAll(body).map {
-                    val raw = it.value
-                    if (raw.startsWith("http")) raw.replace("&amp;", "&") else "https://$raw".replace("&amp;", "&")
-                }.distinct().toList()
-                if (allSids.isNotEmpty()) {
-                    Log.i(TAG, "resolve: links.modpro found ${allSids.size} sid links")
-                    val results = ArrayList<Cand>()
-                    for ((idx, s) in allSids.withIndex()) {
-                        try {
-                            val qr = app.get(s, headers = head, referer = finalUrl, allowRedirects = true)
-                            val qt = qr.text
-                            Regex("https?://[^\"'\\s<>]*driveseed[^\"'\\s<>/]+/file/[^\"'\\s<>]+").find(qt.replace("\\/", "/"))?.let { m ->
-                                results.addAll(mirrorsOf(m.value.replace("\\/", "/"), allSids[idx]))
-                                continue
-                            }
-                            Regex("https?://[^\"'\\s<>]*driveseed[^\"'\\s<>]+/r\\?[^\"'\\s<>]+").find(qt.replace("\\/", "/"))?.let { m ->
-                                results.addAll(mirrorsOf(m.value.replace("\\/", "/"), allSids[idx]))
-                                continue
-                            }
-                            Regex("https?://[^\"'\\s<>]*driveseed[^\"'\\s<>]+/[^\"'\\s<>]+").find(qt.replace("\\/", "/"))?.let { m ->
-                                val v = m.value
-                                if (v.contains("/file/") || v.contains("/r?")) {
-                                    results.addAll(mirrorsOf(v, allSids[idx]))
-                                    continue
-                                }
-                            }
-                            val fu = followChain(s)
-                            if (fu != null) {
-                                results.addAll(mirrorsOf(fu, allSids[idx]))
-                            }
-                        } catch (e: Exception) {}
-                    }
-                    if (results.isNotEmpty()) return results.distinctBy { it.url }
-                }
-            }
-            // check if redirected to sid
-            if (finalUrl.contains("?sid=")) {
-                sid = finalUrl.replace("&amp;", "&")
-                label = serverLabel
-                Log.i(TAG, "resolve: redirected to sid=$sid")
-                // try fast extraction
-                try {
-                    val qr = app.get(sid, headers = head, referer = archive, allowRedirects = true)
-                    val qt = qr.text
-                    Regex("https?://[^\"'\\s<>]*driveseed[^\"'\\s<>/]+/file/[^\"'\\s<>]+").find(qt.replace("\\/", "/"))?.let {
-                        return mirrorsOf(it.value.replace("\\/", "/"), label ?: serverLabel)
-                    }
-                    Regex("https?://[^\"'\\s<>]*driveseed[^\"'\\s<>]+/r\\?[^\"'\\s<>]+").find(qt.replace("\\/", "/"))?.let {
-                        return mirrorsOf(it.value.replace("\\/", "/"), label ?: serverLabel)
-                    }
-                    Regex("https?://[^\"'\\s<>]*driveseed[^\"'\\s<>]+/[^\"'\\s<>]+").find(qt.replace("\\/", "/"))?.let { m ->
-                        val v = m.value
-                        if (v.contains("/file/") || v.contains("/r?")) {
-                            return mirrorsOf(v, label ?: serverLabel)
-                        }
-                    }
-                    val fu = followChain(sid)
-                    if (fu != null) return mirrorsOf(fu, label ?: serverLabel)
-                } catch (e: Exception) {}
-            } else if (finalUrl.contains("en.thenaukriadda.in")) {
-                // look for sid in body
-                val allSids = RE_SID_ANY.findAll(body).map {
-                    val raw = it.value
-                    if (raw.startsWith("http")) raw.replace("&amp;", "&") else "https://$raw".replace("&amp;", "&")
-                }.distinct().toList()
-                if (allSids.isNotEmpty()) {
-                    Log.i(TAG, "resolve: found ${allSids.size} sid links in thenaukriadda page")
-                    val results = ArrayList<Cand>()
-                    for ((idx, s) in allSids.withIndex()) {
-                        try {
-                            val qr = app.get(s, headers = head, referer = finalUrl, allowRedirects = true)
-                            val qt = qr.text
-                            Regex("https?://[^\"'\\s<>]*driveseed[^\"'\\s<>/]+/file/[^\"'\\s<>]+").find(qt.replace("\\/", "/"))?.let { m ->
-                                results.addAll(mirrorsOf(m.value.replace("\\/", "/"), allSids[idx]))
-                                continue
-                            }
-                            Regex("https?://[^\"'\\s<>]*driveseed[^\"'\\s<>]+/r\\?[^\"'\\s<>]+").find(qt.replace("\\/", "/"))?.let { m ->
-                                results.addAll(mirrorsOf(m.value.replace("\\/", "/"), allSids[idx]))
-                                continue
-                            }
-                            val fu = followChain(s)
-                            if (fu != null) {
-                                results.addAll(mirrorsOf(fu, allSids[idx]))
-                            }
-                        } catch (e: Exception) {}
-                    }
-                    if (results.isNotEmpty()) return results.distinctBy { it.url }
-                    sid = allSids.first()
-                    label = serverLabel
-                } else {
-                    sid = finalUrl.replace("&amp;", "&")
-                    label = serverLabel
-                    Log.i(TAG, "resolve: final is thenaukriadda=$sid")
-                }
-            } else {
-                // look for direct thenaukriadda sid links first
-                val allSids = RE_SID_ANY.findAll(body).map {
-                    val raw = it.value
-                    if (raw.startsWith("http")) raw.replace("&amp;", "&") else "https://$raw".replace("&amp;", "&")
-                }.distinct().toList()
-                if (allSids.isNotEmpty()) {
-                    if (allSids.size > 1) {
-                        Log.i(TAG, "resolve: found ${allSids.size} sid links in archive page")
-                        val results = ArrayList<Cand>()
-                        for ((idx, s) in allSids.withIndex()) {
-                            try {
-                                val qr = app.get(s, headers = head, referer = archive, allowRedirects = true)
-                                val qt = qr.text
-                                Regex("https?://[^\"'\\s<>]*driveseed[^\"'\\s<>/]+/file/[^\"'\\s<>]+").find(qt.replace("\\/", "/"))?.let { m ->
-                                    results.addAll(mirrorsOf(m.value.replace("\\/", "/"), allSids[idx]))
-                                    continue
-                                }
-                                Regex("https?://[^\"'\\s<>]*driveseed[^\"'\\s<>]+/r\\?[^\"'\\s<>]+").find(qt.replace("\\/", "/"))?.let { m ->
-                                    results.addAll(mirrorsOf(m.value.replace("\\/", "/"), allSids[idx]))
-                                    continue
-                                }
-                                val fu = followChain(s)
-                                if (fu != null) {
-                                    results.addAll(mirrorsOf(fu, allSids[idx]))
-                                }
-                            } catch (e: Exception) {}
-                        }
-                        if (results.isNotEmpty()) return results.distinctBy { it.url }
-                    }
-                    val raw = allSids.first()
-                    sid = raw
-                    label = serverLabel
-                    Log.i(TAG, "resolve: found sid link in body=$sid")
-                    // try quick extraction
-                    try {
-                        val qr = app.get(sid, headers = head, referer = archive, allowRedirects = true)
-                        val qt = qr.text
-                        Regex("https?://[^\"'\\s<>]*driveseed[^\"'\\s<>/]+/file/[^\"'\\s<>]+").find(qt.replace("\\/", "/"))?.let {
-                            return mirrorsOf(it.value.replace("\\/", "/"), label ?: serverLabel)
-                        }
-                        Regex("https?://[^\"'\\s<>]*driveseed[^\"'\\s<>]+/r\\?[^\"'\\s<>]+").find(qt.replace("\\/", "/"))?.let {
-                            return mirrorsOf(it.value.replace("\\/", "/"), label ?: serverLabel)
-                        }
-                    } catch (e: Exception) {}
-                } else if (body.contains("lp-land") || body.contains("_lp_http") || body.contains("lp-s1-form") || body.contains("thenaukriadda.in") || body.contains("timed-content")) {
-                    val pairs = RE_SID.findAll(body)
-                        .map { unescapeText(it.groupValues[1]).replace(RE_WS, "") to stripTags(it.groupValues[2]) }
-                        .filterNot { it.second.contains("comment", true) }
-                        .toList()
-                    if (pairs.isEmpty()) {
-                        sid = finalUrl
-                        label = serverLabel
-                        Log.i(TAG, "resolve: using finalUrl as start=$sid")
-                    } else {
-                        // مرآةٌ واحدة تكفي: المطابقة لاسم المرآة إن طُلب، وإلا الأولى.
-                        val pick = serverLabel?.let { want -> pairs.firstOrNull { it.second.contains(want, true) } } ?: pairs.first()
-                        sid = pick.first
-                        label = pick.second
-                    }
-                }
-            }
+            return chainToMirrors(archive, serverLabel)
         }
 
-        Log.i(TAG, "resolve: about to call followChain sidLen=${sid.length}")
-        // مسارٌ سريع للروابط المباشرة فقط (ملفٌّ أو صفحة تنزيل بلا سلسلة `?sid=`).
-        if (!sid.contains("?sid=")) {
-            try {
-                val fast = app.get(sid, headers = head, referer = archive, allowRedirects = true)
-                val ft = fast.text.replace("\\/", "/")
-                Regex("https?://[^\"'\\s<>]*driveseed[^\"'\\s<>/]+/file/[^\"'\\s<>]+").find(ft)?.let {
-                    Log.i(TAG, "resolve: fast got driveseed file")
-                    return mirrorsOf(it.value, label ?: serverLabel)
-                }
-                Regex("https?://[^\"'\\s<>]*driveseed[^\"'\\s<>]+/r\\?[^\"'\\s<>]+").find(ft)?.let {
-                    Log.i(TAG, "resolve: fast got driveseed r")
-                    return mirrorsOf(it.value, label ?: serverLabel)
-                }
-                Regex("https?://[^\"'\\s<>]+\\.(mp4|mkv|avi|webm|mpg|mpeg|ts|zip|rar)(\\?[^\"'\\s<>]*)?").find(ft)?.let {
-                    Log.i(TAG, "resolve: fast got direct file")
-                    return listOf(Cand(it.value, label ?: serverLabel ?: "Direct", qualityOf(label ?: it.value), null, null, head))
-                }
-                Regex("https?://[^\"'\\s<>]+/(download|dl|getfile)/[^\"'\\s<>]+").find(ft)?.let {
-                    Log.i(TAG, "resolve: fast got direct download")
-                    return listOf(Cand(it.value, label ?: serverLabel ?: "Direct", qualityOf(label ?: it.value), null, null, head))
-                }
-            } catch (e: Exception) {}
+        // 2) صفحة أرشيف (أو صفحة عملٍ لفيلم).
+        val body: String
+        val finalUrl: String
+        try {
+            val r = app.get(archive, headers = head, allowRedirects = true, referer = mainUrl)
+            if (!r.isSuccessful) {
+                Log.i(TAG, "resolve: HTTP ${r.code} ${archive.take(80)}")
+                return emptyList()
+            }
+            body = r.text
+            finalUrl = r.url.toString()
+        } catch (e: Exception) {
+            Log.i(TAG, "resolve archive FAIL ${e::class.simpleName}" +
+                " ${hostOf(archive)}" +
+                if (e is UnknownHostException) " — المضيف لا يُحلّ" else "")
+            return emptyList()
         }
-        val fileUrl = followChain(sid) ?: run { Log.i(TAG, "resolve: followChain returned null"); return emptyList() }
+
+        // 3) رابط `driveseed` مباشر في الصفحة.
+        driveseedLink(body)?.let {
+            Log.i(TAG, "resolve: driveseed in page -> ${it.take(80)}")
+            return mirrorsOf(it, serverLabel)
+        }
+
+        // 4) أزواج `?sid=` مع نصّها — القلب: اختيار الحلقة الصحيحة.
+        val pairs = RE_SID.findAll(body)
+            .map { unescapeText(it.groupValues[1]).replace(RE_WS, "") to stripTags(it.groupValues[2]) }
+            .filterNot { it.second.contains("comment", true) }
+            .distinctBy { it.first }
+            .toList()
+        if (pairs.isNotEmpty()) {
+            val pick = pickSid(pairs, serverLabel)
+            Log.i(TAG, "resolve: sids=${pairs.size} wantEp=${epFromText(serverLabel ?: "")}" +
+                " picked=${pick.second.take(40)}")
+            return chainToMirrors(pick.first, serverLabel)
+        }
+
+        // 5) الصفحة نفسها صارت `?sid=` بعد التحويل.
+        if (finalUrl.contains("?sid=")) {
+            Log.i(TAG, "resolve: redirected to sid")
+            return chainToMirrors(finalUrl, serverLabel)
+        }
+
+        // 6) صفحات بلا نصوص مطابقة: تُحلّ كل روابط `?sid=` القليلة وتُجمع مراياها.
+        val all = RE_SID_ANY.findAll(body)
+            .map { it.value.replace("&amp;", "&") }
+            .distinct()
+            .toList()
+        if (all.isNotEmpty()) {
+            Log.i(TAG, "resolve: ${all.size} sid links (no labels)")
+            val out = ArrayList<Cand>()
+            for (s in all) out.addAll(chainToMirrors(s, serverLabel))
+            if (out.isNotEmpty()) return out.distinctBy { it.url }
+        }
+
+        // 7) ملفّ وسائط مباشر في الصفحة.
+        directMedia(body)?.let { return it }
+
+        // 8) صفحة نموذج `lp-land`: السلسلة تبدأ من عنوانها النهائي.
+        if (body.contains("lp-land") || body.contains("_lp_http") ||
+            body.contains("lp-s1-form") || body.contains("timed-content")
+        ) {
+            Log.i(TAG, "resolve: form page -> chain from ${finalUrl.take(80)}")
+            return chainToMirrors(finalUrl, serverLabel)
+        }
+
+        Log.i(TAG, "resolve: no route in ${archive.take(80)} (${body.length} بايت)")
+        return emptyList()
+    }
+
+    /** سلسلة `?sid=` واحدة حتى مرايا الملفّ. */
+    private suspend fun chainToMirrors(sidUrl: String, label: String?): List<Cand> {
+        val fileUrl = followChain(sidUrl)
+        if (fileUrl == null) {
+            Log.i(TAG, "resolve: followChain returned null for ${sidUrl.take(70)}")
+            return emptyList()
+        }
         Log.i(TAG, "resolve: got fileUrl=${fileUrl.take(80)}")
-        return mirrorsOf(fileUrl, label ?: serverLabel)
+        return mirrorsOf(fileUrl, label)
+    }
+
+    /**
+     * اختيار رابط `?sid=` المطلوب من صفحة أرشيف:
+     * 1) رقم الحلقة من نصّ المدخلة (`S01E05`/`E05`/`Episode 5`) — مطابقة تامّة.
+     * 2) وإلا «All Episodes Batch» (دفعة الموسم).
+     * 3) وإلا الأوّل.
+     */
+    private fun pickSid(pairs: List<Pair<String, String>>, serverLabel: String?): Pair<String, String> {
+        val wantEp = epFromText(serverLabel ?: "")
+        if (wantEp != null) {
+            pairs.firstOrNull { epFromText(it.second) == wantEp }?.let { return it }
+        }
+        pairs.firstOrNull {
+            it.second.contains("batch", true) || it.second.contains("all episodes", true)
+        }?.let { return it }
+        return pairs.first()
+    }
+
+    /** أوّل ملفّ وسائط مباشر في صفحة (بلا سلسلة تحويلات). */
+    private fun directMedia(body: String): List<Cand>? {
+        val b = normBody(body)
+        Regex("https?://[^\"'\\s<>]+\\.(mp4|mkv|avi|webm|mpg|mpeg|ts|zip|rar)(\\?[^\"'\\s<>]*)?")
+            .find(b)?.let {
+                return listOf(Cand(it.value, "Direct", qualityOf(it.value), null, null, head))
+            }
+        Regex("https?://[^\"'\\s<>]+/(download|dl|getfile)/[^\"'\\s<>]+").find(b)?.let {
+            return listOf(Cand(it.value, "Direct", qualityOf(it.value), null, null, head))
+        }
+        return null
     }
 
     /**
@@ -1151,12 +1050,18 @@ class MoviesModProvider(private val prefs: SharedPreferences? = null) : MainAPI(
                 " sidMatch=$matches",
         )
         val values = ArrayList<String>(2)
-        values.add(sc.second)
-        if (!matches) {
+        if (matches) {
+            // القيمة المقروءة من الصفحة سليمة أصلًا (نادرة بسبب المسافات) فتُجرَّب أولًا.
+            values.add(sc.second)
+        } else {
+            // ★ القيمة المقروءة من الصفحة **فاسدة** (مسافات مكان `+` أو قطع)،
+            // فإعادة البناء من `sid` تُجرَّب **أولًا**: تجربة الفاسدة قبلها كانت
+            // تُهدر ٣ طلبات (~٢٫٥ ثانية) ثم تردّ «Session expired».
             encodeSc(sidVal)?.let {
                 values.add(it)
                 Log.i(TAG, "lpGo: قيمة بديلة من sid len=${it.length} head=${it.take(6)}")
             }
+            values.add(sc.second)
         }
         for ((vi, v) in values.withIndex()) {
             val r = lpGoTry(sc.first, v, referer)
@@ -1195,7 +1100,17 @@ class MoviesModProvider(private val prefs: SharedPreferences? = null) : MainAPI(
 
     /** كعكة `sc("name","value",n)` — الاسم عشوائيٌّ في كل جلسة فيُقرأ من الصفحة. */
     private fun scOf(body: String): Pair<String, String>? =
-        RE_SC.find(body)?.let { it.groupValues[1] to unescapeText(it.groupValues[2]) }
+        RE_SC.find(normBody(body))?.let { it.groupValues[1] to scValue(it.groupValues[2]) }
+
+    /**
+     * قيمة كعكة `sc(...)` كما تُستعمل في الترويسة.
+     *
+     * ★ الصفحة تُصدِرها أحيانًا **بمسافات مكان `+`** (قِيس: ‎6‎ مسافات و‎0‎
+     * علامة `+` في قيمةٍ واحدة، مع `\/` مهرَّبة)، فيفشل فكّها وتُرسل قيمةٌ
+     * فاسدة يردّ عليها الخادم «Session expired». تُعاد `+` هنا فيصلح الفكّ.
+     */
+    private fun scValue(raw: String): String =
+        unescapeText(raw).replace(" ", "+").replace("&#43;", "+")
 
     /** روابط `/file/<id>` في صفحة `/list/` مع نصّها (اسم الملفّ). */
     private fun fileLinksOf(html: String): List<Pair<String, String>> =
@@ -1311,8 +1226,8 @@ class MoviesModProvider(private val prefs: SharedPreferences? = null) : MainAPI(
                     }
 
                     // 3) كعكة `sc(...)` → `?lp_go=`
-                    val scs = RE_SC.findAll(body)
-                        .map { it.groupValues[1] to unescapeText(it.groupValues[2]) }
+                    val scs = RE_SC.findAll(normBody(body))
+                        .map { it.groupValues[1] to scValue(it.groupValues[2]) }
                         .distinctBy { it.first }
                         .toList()
                     if (scs.isNotEmpty()) {
@@ -1403,21 +1318,56 @@ class MoviesModProvider(private val prefs: SharedPreferences? = null) : MainAPI(
      */
     private suspend fun mirrorsOf(fileUrl: String, serverLabel: String?): List<Cand> {
         val quality = qualityOf(serverLabel ?: fileUrl)
-        val note = serverLabel?.let { cleanTitle(it) }?.ifBlank { null }
+        // الاسم المعروض: رقم الحلقة إن وُجد (`S01E05`)، وإلا عنوان الجودة منظّفًا.
+        val note = serverLabel?.let { label ->
+            Regex("S\\d{1,2}E\\d{1,3}", RegexOption.IGNORE_CASE).find(label)?.value
+                ?: cleanTitle(label).ifBlank { null }
+        }
         val cands = ArrayList<Cand>(8)
         val seen = HashSet<String>()
 
         fun add(rawUrl: String, server: String, referer: String?) {
-            val u = unescapeText(rawUrl).replace(RE_WS, "")
+            val u = unescapeText(rawUrl).replace(RE_WS, "").trimEnd('.', ',', ')', ';')
             if (u.isBlank() || !seen.add(u)) return
-            cands.add(Cand(u, server, quality, note, referer, head))
+            // رقم الحلقة من الرابط نفسه أولًا: في «كل الحلقات» تُجمع ٩ ملفّات
+            // بعنوان جودةٍ واحد، فلولا هذا لتطابقت أسماؤها كلها. واسم الملفّ
+            // على `r2.dev` يحمل `S01E05` دائمًا.
+            val epMark = Regex("S\\d{1,2}E\\d{1,3}", RegexOption.IGNORE_CASE).find(u)?.value?.uppercase()
+            cands.add(Cand(u, server, quality, epMark ?: note, referer, head))
         }
 
         fun collect(html: String, pageUrl: String) {
-            for (m in RE_R2.findAll(html)) add(m.groupValues[1], "Cloud", null)
-            for (m in RE_VG.findAll(html)) {
-                val u = unescapeText(m.groupValues[1])
+            // `pub-….r2.dev` هو الرابط الحيّ المقيس (‎200 video/matroska‎).
+            for (m in RE_R2_ANY.findAll(html)) add(m.value, "Cloud", null)
+            for (m in RE_VG_ANY.findAll(html)) {
+                val u = unescapeText(m.value)
                 add(u, if (u.contains("cdn.")) "CDN" else "Fast", pageUrl)
+            }
+            // مرايا `/wfile/` و`/zfile/` تُصدر رابط `workers.dev` بلا امتداد.
+            for (m in RE_WORKER.findAll(html)) add(m.groupValues[1], "Mirror", pageUrl)
+        }
+
+        // صفحات `/wfile/` و`/zfile/` تحمل المرايا حين لا يحملها `/file/`:
+        // الملفّات الكبيرة محجوبة بتسجيل الدخول — `/file/` يعرض «Login to
+        // download» وحدها، و`/zfile/` يعرض «Cloud Resume Download».
+        suspend fun extras(pageUrl: String) {
+            val id = pageUrl.substringAfter("/file/", "").substringBefore("?").substringBefore("/")
+            if (id.isBlank()) return
+            val targets = listOf(
+                "https://driveseed.org/wfile/$id" to "Direct",
+                "https://driveseed.org/wfile/$id?type=1" to "Server 1",
+                "https://driveseed.org/wfile/$id?type=2" to "Server 2",
+                "https://driveseed.org/zfile/$id" to "Cloud",
+            )
+            for ((u, server) in targets) {
+                val r = try {
+                    app.get(u, headers = head, referer = pageUrl)
+                } catch (e: Exception) {
+                    continue
+                }
+                if (!r.isSuccessful) continue
+                for (m in RE_WORKER.findAll(r.text)) add(m.groupValues[1], server, u)
+                for (m in RE_R2_ANY.findAll(r.text)) add(m.value, server, u)
             }
         }
 
@@ -1428,34 +1378,52 @@ class MoviesModProvider(private val prefs: SharedPreferences? = null) : MainAPI(
                 val r = app.get(current, headers = head, referer = referer)
                 if (!r.isSuccessful) break
                 val body = r.text
-                referer = current
-                collect(body, current)
+                val pageUrl = r.url.toString()
+                referer = pageUrl
+                collect(body, pageUrl)
+
+                // `/file/`: لا مرايا ظاهرة؟ اقرأ صفحات المرايا البديلة.
+                if (cands.isEmpty() && pageUrl.contains("/file/")) extras(pageUrl)
                 if (cands.isNotEmpty()) break
 
-                // صفحة `/list/` = الموسم كلّه: اقرأ صفحات `/file/` واختر الحلقة.
+                // صفحة `/list/` = الموسم كلّه: اقرأ صفحات `/file/`.
+                // - حلقةٌ مطلوبة: الملفّ المطابق وحده.
+                // - «كل الحلقات» (بلا رقم): **كل** الملفّات، فتُجمع مرايا الموسم.
                 val files = fileLinksOf(body)
                 if (files.isNotEmpty()) {
                     val wantEp = epFromText(serverLabel ?: "")
                     val picked = if (wantEp != null) {
                         files.filter { (_, t) -> epFromText(t) == wantEp }.ifEmpty { files }
                     } else files
+                    val cap = if (wantEp != null) 3 else 20
                     Log.i(TAG, "mirrorsOf /list: files=${files.size} wantEp=$wantEp picked=${picked.size}")
-                    for ((href, _) in picked.take(if (wantEp != null) 3 else 8)) {
-                        val fu = absUrl(current, href)
-                        val sub = try {
-                            app.get(fu, headers = head, referer = current)
-                        } catch (e: Exception) {
-                            continue
-                        }
-                        if (!sub.isSuccessful) continue
-                        collect(sub.text, fu)
-                        if (cands.isNotEmpty()) break
+                    // الطلبات متوازية (٩ صفحات ≈ ثانية) والجمع تسلسليّ لأن
+                    // `cands`/`seen` حالتان مشتركتان.
+                    val subs = coroutineScope {
+                        picked.take(cap).map { (href, _) ->
+                            async(Dispatchers.IO) {
+                                val fu = absUrl(pageUrl, href)
+                                try {
+                                    val sub = app.get(fu, headers = head, referer = pageUrl)
+                                    if (sub.isSuccessful) fu to sub.text else null
+                                } catch (e: Exception) {
+                                    null
+                                }
+                            }
+                        }.awaitAll().filterNotNull()
+                    }
+                    for ((fu, text) in subs) {
+                        collect(text, fu)
+                        if (wantEp != null && cands.isNotEmpty()) break
+                    }
+                    if (cands.isEmpty()) {
+                        for ((fu, _) in subs.take(2)) if (fu.contains("/file/")) extras(fu)
                     }
                     if (cands.isNotEmpty()) break
                 }
 
                 val mv = jsTarget(body) ?: break
-                val next = absUrl(current, mv)
+                val next = absUrl(pageUrl, mv)
                 if (next == current) break
                 current = next
             }
@@ -1652,6 +1620,11 @@ class MoviesModProvider(private val prefs: SharedPreferences? = null) : MainAPI(
 
         val RE_R2 = Regex("href=\"(https://pub-[^\"]*\\.r2\\.dev/[^\"]+)\"")
         val RE_VG = Regex("href=\"(https://(?:instant|cdn)\\.video-gen\\.xyz/[^\"]+)\"")
+        /** نفس الرابطين بأي موضعٍ في الصفحة (وليس `href` وحده) — بعض الصفحات تكتبه نصًّا. */
+        val RE_R2_ANY = Regex("https://pub-[a-z0-9-]+\\.r2\\.dev/[^\"'<>\\s\\\\]+")
+        val RE_VG_ANY = Regex("https://(?:instant|cdn)\\.video-gen\\.xyz/[^\"'<>\\s\\\\]+")
+        /** مرآة `workers.dev` التي تُصدرها صفحات `/wfile/` و`/zfile/`. */
+        val RE_WORKER = Regex("href=\"(https?://[^\"]*workers\\.dev/[^\"]+)\"")
 
         val RE_STORYLINE = Regex(
             "Storyline:?\\s*</[^>]+>\\s*(?:<p[^>]*>)?(.*?)(?:</p>|</div>)",
