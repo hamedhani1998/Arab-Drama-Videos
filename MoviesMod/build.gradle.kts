@@ -1,4 +1,4 @@
-version = 41
+version = 42
 
 cloudstream {
     description = "MoviesMod - أفلام ومسلسلات مع روابط التحميل المباشر"
@@ -12,5 +12,5 @@ cloudstream {
         "TvSeries"
     )
 
-    iconUrl = "https://moviesmod.uk.com/wp-content/uploads/2024/06/moviesmod-logo.png"
+    iconUrl = "https://moviesmod.meme/wp-content/uploads/2024/06/moviesmod-logo.png"
 }

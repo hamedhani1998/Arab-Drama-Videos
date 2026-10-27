@@ -407,7 +407,9 @@ class MoviesModProvider(private val prefs: SharedPreferences? = null) : MainAPI(
         val eps = ArrayList<Episode>(bySeasonEp.size + 1)
         for ((key, payload) in bySeasonEp.entries.sortedWith(compareBy({ it.key.first }, { it.key.second }))) {
             val (season, num) = key
-            eps.add(newEpisode(payload.first) {
+            // العنوان يُمرَّر مع الرابط (مفصولًا بـtab) ليختار `mirrorsOf`
+            // الحلقة الصحيحة من صفحة `/list/` على driveseed.
+            eps.add(newEpisode(payload.first + "\t" + payload.second.heading) {
                 this.name = if (showSeasons) "الموسم $season · الحلقة $num" else "الحلقة $num"
                 this.season = season
                 this.episode = num
@@ -415,7 +417,7 @@ class MoviesModProvider(private val prefs: SharedPreferences? = null) : MainAPI(
         }
         for (b in batchRows) {
             val season = seasonOf(b.heading) ?: 1
-            eps.add(newEpisode(b.href) {
+            eps.add(newEpisode(b.href + "\t" + b.heading) {
                 this.name = if (showSeasons) "الموسم $season · كل الحلقات" else "كل الحلقات"
                 this.season = season
                 this.episode = 0
@@ -607,40 +609,9 @@ class MoviesModProvider(private val prefs: SharedPreferences? = null) : MainAPI(
         if (archive.contains("?sid=")) {
             sid = archive
             label = serverLabel
-            Log.i(TAG, "resolve: direct sid=$sid")
-            // try fast
-            try {
-                val qr = app.get(sid, headers = head, allowRedirects = true)
-                val qt = qr.text
-                Regex("https?://[^\"'\\s<>]*driveseed[^\"'\\s<>/]+/file/[^\"'\\s<>]+").find(qt.replace("\\/", "/"))?.let {
-                    return mirrorsOf(it.value.replace("\\/", "/"), label ?: serverLabel)
-                }
-                Regex("https?://[^\"'\\s<>]*driveseed[^\"'\\s<>]+/r\\?[^\"'\\s<>]+").find(qt.replace("\\/", "/"))?.let {
-                    return mirrorsOf(it.value.replace("\\/", "/"), label ?: serverLabel)
-                }
-                Regex("https?://[^\"'\\s<>]*driveseed[^\"'\\s<>]+/l\\?[^\"'\\s<>]+").find(qt.replace("\\/", "/"))?.let { m ->
-                    val v = m.value.replace("\\/", "/")
-                    val fu = followChain(v) ?: v
-                    return mirrorsOf(fu, label ?: serverLabel)
-                }
-                Regex("driveseed[^\"'\\s<> ]+/l\\?[^\"'\\s<> ]+").find(qt.replace("\\/", "/"))?.let { m ->
-                    val v = "https://${m.value.replace("\\/", "/")}"
-                    val fu = followChain(v) ?: v
-                    return mirrorsOf(fu, label ?: serverLabel)
-                }
-                Regex("https?://[^\"'\\s<>]+\\.(mp4|mkv|avi|webm|mpg|mpeg|ts|zip|rar)(\\?[^\"'\\s<>]*)?").find(qt.replace("\\/", "/"))?.let {
-                    return listOf(Cand(it.value.replace("\\/", "/"), label ?: serverLabel ?: "Direct", qualityOf(label ?: it.value), null, null, head))
-                }
-                Regex("https?://[^\"'\\s<>]+/(download|dl|getfile)/[^\"'\\s<>]+").find(qt.replace("\\/", "/"))?.let {
-                    return listOf(Cand(it.value.replace("\\/", "/"), label ?: serverLabel ?: "Direct", qualityOf(label ?: it.value), null, null, head))
-                }
-                Regex("https?://[^\"'\\s<>]*driveseed[^\"'\\s<>]+/[^\"'\\s<>]+").find(qt.replace("\\/", "/"))?.let { m ->
-                    val v = m.value
-                    if (v.contains("/file/") || v.contains("/r?") || v.contains("download")) {
-                        return mirrorsOf(v, label ?: serverLabel)
-                    }
-                }
-            } catch (e: Exception) {}
+            // لا طلبَ استكشافي هنا: صفحة `?sid=` هي نموذج `lp-land` دائمًا،
+            // و`followChain` تُكملها في طلبٍ واحد بلا قراءةٍ مزدوجة.
+            Log.i(TAG, "resolve: direct sid")
         } else if (archive.contains("links.modpro.blog")) {
             Log.i(TAG, "resolve: links.modpro.blog archive")
             val (body, finalUrl) = try {
@@ -882,27 +853,29 @@ class MoviesModProvider(private val prefs: SharedPreferences? = null) : MainAPI(
         }
 
         Log.i(TAG, "resolve: about to call followChain sidLen=${sid.length}")
-        // Try fast path first
-        try {
-            val fast = app.get(sid, headers = head, referer = archive, allowRedirects = true)
-            val ft = fast.text
-            Regex("https?://[^\"'\\s<>]*driveseed[^\"'\\s<>/]+/file/[^\"'\\s<>]+").find(ft.replace("\\/", "/"))?.let {
-                Log.i(TAG, "resolve: fast got driveseed file")
-                return mirrorsOf(it.value.replace("\\/", "/"), label ?: serverLabel)
-            }
-            Regex("https?://[^\"'\\s<>]*driveseed[^\"'\\s<>]+/r\\?[^\"'\\s<>]+").find(ft.replace("\\/", "/"))?.let {
-                Log.i(TAG, "resolve: fast got driveseed r")
-                return mirrorsOf(it.value.replace("\\/", "/"), label ?: serverLabel)
-            }
-            Regex("https?://[^\"'\\s<>]+\\.(mp4|mkv|avi|webm|mpg|mpeg|ts|zip|rar)(\\?[^\"'\\s<>]*)?").find(ft.replace("\\/", "/"))?.let {
-                Log.i(TAG, "resolve: fast got direct file")
-                return listOf(Cand(it.value.replace("\\/", "/"), label ?: serverLabel ?: "Direct", qualityOf(label ?: it.value), null, null, head))
-            }
-            Regex("https?://[^\"'\\s<>]+/(download|dl|getfile)/[^\"'\\s<>]+").find(ft.replace("\\/", "/"))?.let {
-                Log.i(TAG, "resolve: fast got direct download")
-                return listOf(Cand(it.value.replace("\\/", "/"), label ?: serverLabel ?: "Direct", qualityOf(label ?: it.value), null, null, head))
-            }
-        } catch (e: Exception) {}
+        // مسارٌ سريع للروابط المباشرة فقط (ملفٌّ أو صفحة تنزيل بلا سلسلة `?sid=`).
+        if (!sid.contains("?sid=")) {
+            try {
+                val fast = app.get(sid, headers = head, referer = archive, allowRedirects = true)
+                val ft = fast.text.replace("\\/", "/")
+                Regex("https?://[^\"'\\s<>]*driveseed[^\"'\\s<>/]+/file/[^\"'\\s<>]+").find(ft)?.let {
+                    Log.i(TAG, "resolve: fast got driveseed file")
+                    return mirrorsOf(it.value, label ?: serverLabel)
+                }
+                Regex("https?://[^\"'\\s<>]*driveseed[^\"'\\s<>]+/r\\?[^\"'\\s<>]+").find(ft)?.let {
+                    Log.i(TAG, "resolve: fast got driveseed r")
+                    return mirrorsOf(it.value, label ?: serverLabel)
+                }
+                Regex("https?://[^\"'\\s<>]+\\.(mp4|mkv|avi|webm|mpg|mpeg|ts|zip|rar)(\\?[^\"'\\s<>]*)?").find(ft)?.let {
+                    Log.i(TAG, "resolve: fast got direct file")
+                    return listOf(Cand(it.value, label ?: serverLabel ?: "Direct", qualityOf(label ?: it.value), null, null, head))
+                }
+                Regex("https?://[^\"'\\s<>]+/(download|dl|getfile)/[^\"'\\s<>]+").find(ft)?.let {
+                    Log.i(TAG, "resolve: fast got direct download")
+                    return listOf(Cand(it.value, label ?: serverLabel ?: "Direct", qualityOf(label ?: it.value), null, null, head))
+                }
+            } catch (e: Exception) {}
+        }
         val fileUrl = followChain(sid) ?: run { Log.i(TAG, "resolve: followChain returned null"); return emptyList() }
         Log.i(TAG, "resolve: got fileUrl=${fileUrl.take(80)}")
         return mirrorsOf(fileUrl, label ?: serverLabel)
@@ -916,357 +889,226 @@ class MoviesModProvider(private val prefs: SharedPreferences? = null) : MainAPI(
      * (`lp-6ad650fa2bdc3` و`lp-6ad701e919f32` و`lp-6ad7049c2e15a` في ثلاث جلسات)،
      * وأنّ `action` الثاني يأتي من الصفحة لا من ثابتٍ في الكود.
      */
+    // ---------- أدوات السلسلة ----------
+
+    /** يبني رابطًا مطلقًا من رابطٍ قد يكون نسبيًّا. */
+    private fun absUrl(base: String, link: String): String {
+        val l = unescapeText(link).trim()
+        if (l.startsWith("http://") || l.startsWith("https://")) return l
+        if (l.startsWith("//")) return "https:$l"
+        return try {
+            java.net.URI(base).resolve(l).toString()
+        } catch (e: Exception) {
+            val b = try { java.net.URI(base) } catch (e2: Exception) { null }
+            if (l.startsWith("/") && b?.host != null) "${b.scheme}://${b.host}$l" else l
+        }
+    }
+
+    /** هل هذا رابط `driveseed` نهائي (صفحة ملفّ/قائمة/غلاف)؟ */
+    private fun isFinal(u: String): Boolean =
+        u.contains("driveseed.org") && (
+            u.contains("/file/") || u.contains("/list/") ||
+                u.contains("/wfile/") || u.contains("/l?") || u.contains("/r?")
+            )
+
+    /**
+     * أوّل رابط `driveseed` في الجسم. الصفحات تُصدِره مهرَّبًا
+     * (`driveseed.org\/l?id=…`) أو داخل `window.location.replace`.
+     */
+    private fun driveseedLink(body: String): String? {
+        val b = body.replace("\\/", "/")
+        Regex("https?://[^\"'\\s<>]*driveseed\\.org/(?:file|list|wfile)/[^\"'\\s<>]+").find(b)?.let { return it.value }
+        Regex("https?://[^\"'\\s<>]*driveseed\\.org/l\\?[^\"'\\s<>]+").find(b)?.let { return it.value }
+        Regex("https?://[^\"'\\s<>]*driveseed\\.org/r\\?[^\"'\\s<>]+").find(b)?.let { return it.value }
+        Regex("(?:^|[\"'(\\s])/(?:file|list|wfile)/[A-Za-z0-9_-]{6,}[^\"'\\s<>]*").find(b)?.let {
+            return "https://driveseed.org${it.value.trimStart('"', '\'', '(', ' ', '\n', '\t')}"
+        }
+        return null
+    }
+
+    /** انتقال JS أو `meta refresh` من الصفحة. */
+    private fun jsTarget(body: String): String? =
+        RE_JS_REDIRECT.find(body)?.groupValues?.getOrNull(1)
+            ?: RE_LOC.find(body)?.groupValues?.getOrNull(1)
+            ?: Regex("(?:window\\.)?location\\.href\\s*=\\s*[\"']([^\"']+)[\"']", RegexOption.IGNORE_CASE)
+                .find(body)?.groupValues?.getOrNull(1)
+            ?: Regex("(?:window\\.)?location\\s*=\\s*[\"']([^\"']+)[\"']", RegexOption.IGNORE_CASE)
+                .find(body)?.groupValues?.getOrNull(1)
+            ?: RE_META_REFRESH.find(body)?.groupValues?.getOrNull(1)
+
+    /** كعكة `sc("name","value",n)` — الاسم عشوائيٌّ في كل جلسة فيُقرأ من الصفحة. */
+    private fun scOf(body: String): Pair<String, String>? =
+        RE_SC.find(body)?.let { it.groupValues[1] to unescapeText(it.groupValues[2]) }
+
+    /** روابط `/file/<id>` في صفحة `/list/` مع نصّها (اسم الملفّ). */
+    private fun fileLinksOf(html: String): List<Pair<String, String>> =
+        Regex("<a[^>]+href=\"([^\"]*/file/[^\"]+)\"[^>]*>(.*?)</a>", RegexOption.DOT_MATCHES_ALL)
+            .findAll(html)
+            .map { it.groupValues[1].replace("\\/", "/") to stripTags(it.groupValues[2]) }
+            .filterNot { it.first.contains("/file/delete/") || it.first.contains("/file/reset/") }
+            .distinctBy { it.first }
+            .toList()
+
+    /** رقم الحلقة من نصّ: `S01E03` أو `E03` أو `Episode 3`. */
+    private fun epFromText(text: String): Int? {
+        if (text.isBlank()) return null
+        Regex("\\bS\\d{1,2}[\\s._-]*E(\\d{1,3})\\b", RegexOption.IGNORE_CASE).find(text)
+            ?.groupValues?.get(1)?.toIntOrNull()?.let { return it }
+        Regex("\\bE(\\d{1,3})\\b", RegexOption.IGNORE_CASE).find(text)
+            ?.groupValues?.get(1)?.toIntOrNull()?.let { return it }
+        return epNumberOf(text)
+    }
+
+    /**
+     * يُكمل سلسلة التحويلات من `?sid=` حتى أوّل رابط `driveseed`.
+     *
+     * السلسلة المقيسة (2026-10) على `en.thenaukriadda.in`:
+     * ```
+     * GET  /?sid=…                    → نموذج `lp-land`
+     * POST /  (lp-land)               → صفحة فيها نموذج `lp-s1-form`
+     * POST <action> (lp-s1-form)      → مقالٌ فيه sc("lp-xxxx","<cookie>",N)
+     * GET  /?lp_go=lp-xxxx  + cookie  → جسمٌ فيه location.replace("driveseed.org/l?id=…")
+     * ```
+     * كلّ خطوة تُقرأ من الصفحة نفسها: `action`، أسماء الحقول، اسم الكعكة.
+     * لا شيء منها مثبَّت في الكود، فتبديل أسماء الكعك تلقائيًّا لا يكسرها.
+     *
+     * ملاحظة: كانت النسخة السابقة تتفرّع في عشرات الحالات وتفشل لأنّها
+     * تطلب الصفحة مرّتين وتفقد جسم ردّ الـPOST. هنا الجسم يُحلَّل مباشرةً
+     * (`pendingBody`) بلا طلبٍ زائد.
+     */
     private suspend fun followChain(sid: String): String? {
         Log.i(TAG, "followChain ENTRY sidLen=${sid.length}")
         var lastErr: Exception? = null
-        for (i in 1..8) {
+        for (attempt in 1..3) {
             try {
                 var current = sid
                 var referer: String? = sid
+                var pendingBody: String? = null
+                var pendingUrl: String? = null
+                val seenPosts = HashSet<String>()
                 var hops = 0
-                while (hops < 20) {
+                while (hops < 24) {
                     hops++
-                    Log.i(TAG, "followChain try$i hop$hops: GET $current")
-                    val resp = app.get(current, headers = head, referer = referer, allowRedirects = false)
-                    val loc = resp.headers["Location"] ?: resp.headers["location"]
-                    if (!loc.isNullOrBlank()) {
-                        val nextUrl = if (loc.startsWith("http")) loc else {
-                            val base = URI(current)
-                            "${base.scheme}://${base.host}${if (base.port != -1 && base.port != 80 && base.port != 443) ":${base.port}" else ""}$loc"
-                        }
-                        Log.i(TAG, "followChain try$i hop$hops: Location -> $nextUrl")
-                        if (nextUrl.contains("driveseed.org") && (nextUrl.contains("/file/") || nextUrl.contains("/r?") || nextUrl.contains("download"))) {
-                            return if (nextUrl.startsWith("/")) "https://driveseed.org$nextUrl" else nextUrl
-                        }
-                        if (nextUrl.contains("/file/")) {
-                            return if (nextUrl.startsWith("/")) "https://driveseed.org$nextUrl" else nextUrl
-                        }
-                        if (nextUrl.contains("thenaukriadda.in") || nextUrl.contains("modpro.blog") || nextUrl.contains("en.")) {
-                            current = nextUrl
-                            referer = current
-                            continue
-                        }
-                        // other domain, try to follow
-                        current = nextUrl
-                        referer = current
-                        continue
-                    }
-                    val body = resp.text
-                    Log.i(TAG, "followChain try$i hop$hops: bodyLen=${body.length}")
-                    if (body.length < 2000) {
-                        body.chunked(600).forEachIndexed { idx, chunk -> if (idx < 10) Log.i(TAG, "followChain try$i hop$hops B[$idx]=$chunk") }
+                    val body: String
+                    val pageUrl: String
+                    if (pendingBody != null) {
+                        body = pendingBody
+                        pageUrl = pendingUrl ?: current
+                        pendingBody = null
+                        pendingUrl = null
                     } else {
-                        Log.i(TAG, "followChain try$i hop$hops B[0]=${body.take(400)}")
-                    }
-                    // look for driveseed links directly - be very aggressive
-                    Regex("https?://[^\"'\\s<> ]*driveseed[^\"'\\s<> ]*/file/[^\"'\\s<> ]+").find(body)?.let { return it.value.replace("\\/", "/") }
-                    Regex("https?://[^\"'\\s<> ]*driveseed[^\"'\\s<> ]*/r\\?[^\"'\\s<> ]+").find(body)?.let { return it.value.replace("\\/", "/") }
-                    Regex("https?://[^\"'\\s<> ]*driveseed[^\"'\\s<> ]+/[^\"'\\s<> ]+").find(body)?.let {
-                        val v = it.value.replace("\\/", "/")
-                        if (v.contains("/file/") || v.contains("/r?") || v.contains("download") || v.contains("drive")) return v
-                    }
-                    // look for any driveseed in the whole body
-                    Regex("driveseed\\.[a-zA-Z]+/[^\"'\\s<> ]+").findAll(body).forEach { m ->
-                        val v = "https://${m.value.replace("\\/", "/")}"
-                        if (v.contains("/file/") || v.contains("/r?")) return v
-                    }
-                    Regex("driveseed[^\"'\\s<> ]+/file/[^\"'\\s<> ]+").findAll(body).forEach { m ->
-                        val v = "https://${m.value.replace("\\/", "/")}"
-                        return v
-                    }
-                    // also look for lp-s1-form anywhere
-                    Regex("<form[^>]*lp-s1-form[^>]*>(.*?)</form>", RegexOption.DOT_MATCHES_ALL).find(body)?.let { fm ->
-                        Log.i(TAG, "followChain try$i hop$hops: found lp-s1-form by regex")
-                        val action = RE_ACTION.find(fm.groupValues[0])?.groupValues?.get(1)?.let { unescapeText(it) } ?: current
-                        val fields = RE_FIELD.findAll(fm.groupValues[1]).associate { unescapeText(it.groupValues[1]) to unescapeText(it.groupValues[2]) }
-                        if (fields.isNotEmpty()) {
-                            try {
-                                val presp2 = app.post(action, data = fields, referer = current, headers = formHead, allowRedirects = false)
-                                val ploc2 = presp2.headers["Location"] ?: presp2.headers["location"]
-                                if (!ploc2.isNullOrBlank()) {
-                                    val pnu2 = if (ploc2.startsWith("http")) ploc2 else "https://en.thenaukriadda.in$ploc2"
-                                    if (pnu2.contains("driveseed.org") || pnu2.contains("/file/")) return if (pnu2.startsWith("/")) "https://driveseed.org$pnu2" else pnu2
-                                    current = pnu2; referer = action; continue
-                                }
-                                val h2 = presp2.text
-                                Regex("https?://[^\"'\\s<>]*driveseed[^\"'\\s<>/]+/file/[^\"'\\s<>]+").find(h2)?.let { return it.value }
-                                Regex("https?://[^\"'\\s<>]*driveseed[^\"'\\s<>]+/r\\?[^\"'\\s<>]+").find(h2)?.let { return it.value }
-                                val ck = RE_SC.find(h2)
-                                if (ck != null) {
-                                    val cname = ck.groupValues[1]
-                                    val cval = unescapeText(ck.groupValues[2])
-                                    val go = "https://en.thenaukriadda.in/?lp_go=$cname"
-                                    try {
-                                        val goResp = app.get(go, headers = head, referer = action, cookies = mapOf(cname to cval), allowRedirects = false)
-                                        val l = goResp.headers["Location"] ?: goResp.headers["location"]
-                                        if (!l.isNullOrBlank()) {
-                                            val nu = if (l.startsWith("http")) l else if (l.startsWith("/")) "https://driveseed.org$l" else l
-                                            if (nu.contains("driveseed.org") || nu.contains("/file/")) return if (nu.startsWith("/")) "https://driveseed.org$nu" else nu
-                                            current = nu; referer = go; continue
-                                        }
-                                        val gbody = goResp.text
-                                        Regex("https?://[^\"'\\s<>]*driveseed[^\"'\\s<>/]+/file/[^\"'\\s<>]+").find(gbody)?.let { return it.value }
-                                        Regex("https?://[^\"'\\s<>]*driveseed[^\"'\\s<>]+/r\\?[^\"'\\s<>]+").find(gbody)?.let { return it.value }
-                                    } catch (e: Exception) {}
-                                }
-                            } catch (e: Exception) {}
-                        }
-                    }
-                    // try js redirect
-                    jsRedirect(body)?.let { r ->
-                        val nextUrl = if (r.startsWith("http")) r else {
-                            val base = URI(current)
-                            "${base.scheme}://${base.host}${if (base.port != -1 && base.port != 80 && base.port != 443) ":${base.port}" else ""}$r"
-                        }
-                        Log.i(TAG, "followChain try$i hop$hops: js -> $nextUrl")
-                        if (nextUrl.contains("driveseed.org") && (nextUrl.contains("/file/") || nextUrl.contains("/r?"))) return if (nextUrl.startsWith("/")) "https://driveseed.org$nextUrl" else nextUrl
-                        if (nextUrl.contains("/file/")) return if (nextUrl.startsWith("/")) "https://driveseed.org$nextUrl" else nextUrl
-                        current = nextUrl
-                        referer = current
-                        continue
-                    }
-                    // meta refresh
-                    RE_META_REFRESH.find(body)?.groupValues?.getOrNull(1)?.let { r ->
-                        val nextUrl = if (r.startsWith("http")) r else {
-                            val base = URI(current)
-                            "${base.scheme}://${base.host}${if (base.port != -1 && base.port != 80 && base.port != 443) ":${base.port}" else ""}$r"
-                        }
-                        Log.i(TAG, "followChain try$i hop$hops: meta -> $nextUrl")
-                        if (nextUrl.contains("driveseed.org") && (nextUrl.contains("/file/") || nextUrl.contains("/r?"))) return if (nextUrl.startsWith("/")) "https://driveseed.org$nextUrl" else nextUrl
-                        if (nextUrl.contains("/file/")) return if (nextUrl.startsWith("/")) "https://driveseed.org$nextUrl" else nextUrl
-                        current = nextUrl
-                        referer = current
-                        continue
-                    }
-                    // forms
-                    formOf(body, "lp-land")?.let { f ->
-                        Log.i(TAG, "followChain try$i hop$hops: form lp-land")
-                        try {
-                            // Try POST with allowRedirects true first (follow naturally)
-                            try {
-                                val presp = app.post(f.first, data = f.second, referer = current, headers = formHead, allowRedirects = true)
-                                val ptext = presp.text
-                                Regex("https?://[^\"'\\s<>]*driveseed[^\"'\\s<>/]+/file/[^\"'\\s<>]+").find(ptext)?.let { return it.value }
-                                Regex("https?://[^\"'\\s<>]*driveseed[^\"'\\s<>]+").find(ptext)?.let { v ->
-                                    if (v.value.contains("/file/") || v.value.contains("/r?")) return v.value
-                                }
-                                jsRedirect(ptext)?.let { r ->
-                                    val nu = if (r.startsWith("http")) r else {
-                                        val base = URI(presp.url.toString())
-                                        "${base.scheme}://${base.host}${if (base.port != -1 && base.port != 80 && base.port != 443) ":${base.port}" else ""}$r"
-                                    }
-                                    if (nu.contains("driveseed.org") && (nu.contains("/file/") || nu.contains("/r?"))) return if (nu.startsWith("/")) "https://driveseed.org$nu" else nu
-                                    if (nu.contains("/file/")) return if (nu.startsWith("/")) "https://driveseed.org$nu" else nu
-                                }
-                                // look for lp-s1 or sc
-                                formOf(ptext, "lp-s1-form")?.let { f2 ->
-                                    Log.i(TAG, "followChain try$i hop$hops: form lp-s1-form (from lp-land resp)")
-                                    val presp2 = app.post(f2.first, data = f2.second, referer = presp.url.toString(), headers = formHead, allowRedirects = false)
-                                    val ploc2 = presp2.headers["Location"] ?: presp2.headers["location"]
-                                    if (!ploc2.isNullOrBlank()) {
-                                        val pnu2 = if (ploc2.startsWith("http")) ploc2 else "https://en.thenaukriadda.in$ploc2"
-                                        if (pnu2.contains("driveseed.org") || pnu2.contains("/file/")) return if (pnu2.startsWith("/")) "https://driveseed.org$pnu2" else pnu2
-                                    }
-                                    val h2 = presp2.text
-                                    Regex("https?://[^\"'\\s<>]*driveseed[^\"'\\s<>/]+/file/[^\"'\\s<>]+").find(h2)?.let { return it.value }
-                                    Regex("https?://[^\"'\\s<>]*driveseed[^\"'\\s<>]+/r\\?[^\"'\\s<>]+").find(h2)?.let { return it.value }
-                                    val ck = RE_SC.find(h2)
-                                    if (ck != null) {
-                                        val cname = ck.groupValues[1]
-                                        val cval = unescapeText(ck.groupValues[2])
-                                        val go = "https://en.thenaukriadda.in/?lp_go=$cname"
-                                        try {
-                                            val goResp = app.get(go, headers = head, referer = presp2.url.toString(), cookies = mapOf(cname to cval), allowRedirects = false)
-                                            val l = goResp.headers["Location"] ?: goResp.headers["location"]
-                                            if (!l.isNullOrBlank()) {
-                                                val nu = if (l.startsWith("http")) l else if (l.startsWith("/")) "https://driveseed.org$l" else l
-                                                if (nu.contains("driveseed.org") || nu.contains("/file/")) return if (nu.startsWith("/")) "https://driveseed.org$nu" else nu
-                                                current = if (l.startsWith("http")) l else "https://en.thenaukriadda.in$l"
-                                                referer = go
-                                                continue
-                                            }
-                                            val gbody = goResp.text
-                                            Regex("https?://[^\"'\\s<>]*driveseed[^\"'\\s<>/]+/file/[^\"'\\s<>]+").find(gbody)?.let { return it.value }
-                                            jsRedirect(gbody)?.let { r ->
-                                                val nu = if (r.startsWith("http")) r else "https://driveseed.org$r"
-                                                if (nu.contains("driveseed.org") || nu.contains("/file/")) return if (nu.startsWith("/")) "https://driveseed.org$nu" else nu
-                                            }
-                                        } catch (e: Exception) {}
-                                    }
-                                }
-                                val ck2 = RE_SC.find(ptext)
-                                if (ck2 != null) {
-                                    val cname = ck2.groupValues[1]
-                                    val cval = unescapeText(ck2.groupValues[2])
-                                    val go = "https://en.thenaukriadda.in/?lp_go=$cname"
-                                    try {
-                                        val goResp = app.get(go, headers = head, referer = presp.url.toString(), cookies = mapOf(cname to cval), allowRedirects = false)
-                                        val l = goResp.headers["Location"] ?: goResp.headers["location"]
-                                        if (!l.isNullOrBlank()) {
-                                            val nu = if (l.startsWith("http")) l else if (l.startsWith("/")) "https://driveseed.org$l" else l
-                                            if (nu.contains("driveseed.org") || nu.contains("/file/")) return if (nu.startsWith("/")) "https://driveseed.org$nu" else nu
-                                            current = if (l.startsWith("http")) l else "https://en.thenaukriadda.in$l"
-                                            referer = go
-                                            continue
-                                        }
-                                        val gbody = goResp.text
-                                        Regex("https?://[^\"'\\s<>]*driveseed[^\"'\\s<>/]+/file/[^\"'\\s<>]+").find(gbody)?.let { return it.value }
-                                    } catch (e: Exception) {}
-                                }
-                                // if we ended up on en.thenaukriadda.in homepage, try GET sid again or look for links
-                                if (ptext.contains("The Naukri Adda") || presp.url.toString().contains("en.thenaukriadda.in")) {
-                                    // try to go to sid again
-                                    try {
-                                        val rs = app.get(current, headers = head, referer = presp.url.toString())
-                                        val rsText = rs.text
-                                        Regex("https?://[^\"'\\s<>]*driveseed[^\"'\\s<>/]+/file/[^\"'\\s<>]+").find(rsText)?.let { return it.value }
-                                        formOf(rsText, "lp-land")?.let { f3 ->
-                                            val r2 = app.post(f3.first, data = f3.second, referer = rs.url.toString(), headers = formHead, allowRedirects = true)
-                                            val r2t = r2.text
-                                            Regex("https?://[^\"'\\s<>]*driveseed[^\"'\\s<>/]+/file/[^\"'\\s<>]+").find(r2t)?.let { return it.value }
-                                        }
-                                    } catch (e: Exception) {}
-                                }
-                                current = presp.url.toString()
-                                referer = current
-                                continue
-                            } catch (e: Exception) {}
-                            // fallback to old behavior
-                            val presp = app.post(f.first, data = f.second, referer = current, headers = formHead, allowRedirects = false)
-                            val ploc = presp.headers["Location"] ?: presp.headers["location"]
-                            if (!ploc.isNullOrBlank()) {
-                                val pnu = if (ploc.startsWith("http")) ploc else {
-                                    val base = URI(f.first)
-                                    "${base.scheme}://${base.host}${if (base.port != -1 && base.port != 80 && base.port != 443) ":${base.port}" else ""}$ploc"
-                                }
-                                if (pnu.contains("driveseed.org") || pnu.contains("/file/")) return if (pnu.startsWith("/")) "https://driveseed.org$pnu" else pnu
-                                current = pnu
-                                referer = f.first
-                                continue
-                            }
-                            val h = presp.text
-                            Regex("https?://[^\"'\\s<>]*driveseed[^\"'\\s<>/]+/file/[^\"'\\s<>]+").find(h)?.let { return it.value }
-                            formOf(h, "lp-s1-form")?.let { f2 ->
-                                Log.i(TAG, "followChain try$i hop$hops: form lp-s1-form (from lp-land resp)")
-                                val presp2 = app.post(f2.first, data = f2.second, referer = f.first, headers = formHead, allowRedirects = false)
-                                val ploc2 = presp2.headers["Location"] ?: presp2.headers["location"]
-                                if (!ploc2.isNullOrBlank()) {
-                                    val pnu2 = if (ploc2.startsWith("http")) ploc2 else {
-                                        val base = URI(f2.first)
-                                        "${base.scheme}://${base.host}${if (base.port != -1 && base.port != 80 && base.port != 443) ":${base.port}" else ""}$ploc2"
-                                    }
-                                    if (pnu2.contains("driveseed.org") || pnu2.contains("/file/")) return if (pnu2.startsWith("/")) "https://driveseed.org$pnu2" else pnu2
-                                }
-                                val h2 = presp2.text
-                                Regex("https?://[^\"'\\s<>]*driveseed[^\"'\\s<>/]+/file/[^\"'\\s<>]+").find(h2)?.let { return it.value }
-                                val ck = RE_SC.find(h2)
-                                if (ck != null) {
-                                    val cname = ck.groupValues[1]
-                                    val cval = unescapeText(ck.groupValues[2])
-                                    val go = "https://en.thenaukriadda.in/?lp_go=$cname"
-                                    try {
-                                        val goResp = app.get(go, headers = head, referer = f2.first, cookies = mapOf(cname to cval), allowRedirects = false)
-                                        val l = goResp.headers["Location"] ?: goResp.headers["location"]
-                                        if (!l.isNullOrBlank()) {
-                                            val nu = if (l.startsWith("http")) l else if (l.startsWith("/")) "https://driveseed.org$l" else l
-                                            if (nu.contains("driveseed.org") || nu.contains("/file/")) return if (nu.startsWith("/")) "https://driveseed.org$nu" else nu
-                                        }
-                                        val gbody = goResp.text
-                                        Regex("https?://[^\"'\\s<>]*driveseed[^\"'\\s<>/]+/file/[^\"'\\s<>]+").find(gbody)?.let { return it.value }
-                                    } catch (e: Exception) {}
-                                    continue
-                                }
-                            }
-                            val ck2 = RE_SC.find(h)
-                            if (ck2 != null) {
-                                val cname = ck2.groupValues[1]
-                                val cval = unescapeText(ck2.groupValues[2])
-                                val go = "https://en.thenaukriadda.in/?lp_go=$cname"
-                                try {
-                                    val goResp = app.get(go, headers = head, referer = f.first, cookies = mapOf(cname to cval), allowRedirects = false)
-                                    val l = goResp.headers["Location"] ?: goResp.headers["location"]
-                                    if (!l.isNullOrBlank()) {
-                                        val nu = if (l.startsWith("http")) l else if (l.startsWith("/")) "https://driveseed.org$l" else l
-                                        if (nu.contains("driveseed.org") || nu.contains("/file/")) return if (nu.startsWith("/")) "https://driveseed.org$nu" else nu
-                                    }
-                                    val gbody = goResp.text
-                                    Regex("https?://[^\"'\\s<>]*driveseed[^\"'\\s<>/]+/file/[^\"'\\s<>]+").find(gbody)?.let { return it.value }
-                                } catch (e: Exception) {}
-                            }
-                            Regex("https?://[^\"'\\s<>]*driveseed[^\"'\\s<>/]+/file/[^\"'\\s<>]+").find(h)?.let { return it.value }
-                            current = f.first
-                            referer = current
-                        } catch (e: Exception) {
-                            current = f.first
-                            referer = current
-                        }
-                        continue
-                    }
-                    formOf(body, "lp-s1-form")?.let { f ->
-                        Log.i(TAG, "followChain try$i hop$hops: form lp-s1-form")
-                        val h = app.post(f.first, data = f.second, referer = current, headers = formHead).text
-                        val ck = RE_SC.find(h)
-                        if (ck != null) {
-                            val cname = ck.groupValues[1]
-                            val cval = unescapeText(ck.groupValues[2])
-                            val go = "https://en.thenaukriadda.in/?lp_go=$cname"
-                            current = go
-                            referer = f.first
-                            // set cookie by following with cookies
-                            try {
-                                val goResp = app.get(go, headers = head, referer = referer, cookies = mapOf(cname to cval), allowRedirects = false)
-                                val l = goResp.headers["Location"] ?: goResp.headers["location"]
-                                if (!l.isNullOrBlank()) {
-                                    val nu = if (l.startsWith("http")) l else "https://driveseed.org$l"
-                                    if (nu.contains("driveseed.org")) return if (nu.startsWith("/")) "https://driveseed.org$nu" else nu
-                                    if (nu.contains("/file/")) return if (nu.startsWith("/")) "https://driveseed.org$nu" else nu
-                                    current = if (l.startsWith("http")) l else "https://en.thenaukriadda.in$l"
-                                    referer = go
-                                    continue
-                                }
-                                val gbody = goResp.text
-                                jsRedirect(gbody)?.let { r ->
-                                    val nu = if (r.startsWith("http")) r else "https://driveseed.org$r"
-                                    if (nu.contains("driveseed.org")) return if (nu.startsWith("/")) "https://driveseed.org$nu" else nu
-                                    if (nu.contains("/file/")) return if (nu.startsWith("/")) "https://driveseed.org$nu" else nu
-                                    current = if (r.startsWith("http")) r else "https://en.thenaukriadda.in$r"
-                                    referer = go
-                                    continue
-                                }
-                                Regex("https?://[^\"'\\s<>]*driveseed[^\"'\\s<>/]+/file/[^\"'\\s<>]+").find(gbody)?.let { return it.value }
-                                Regex("https?://[^\"'\\s<>]*driveseed[^\"'\\s<>]+/l\\?[^\"'\\s<>]+").find(gbody)?.let { return it.value }
-                                Regex("driveseed[^\"'\\s<> ]+/l\\?[^\"'\\s<> ]+").find(gbody)?.let { return "https://${it.value.replace("\\/", "/")}" }
-                            } catch (e: Exception) {}
+                        Log.i(TAG, "followChain try$attempt hop$hops: GET ${current.take(110)}")
+                        val resp = app.get(current, headers = head, referer = referer, allowRedirects = false)
+                        val loc = resp.headers["Location"] ?: resp.headers["location"]
+                        if (!loc.isNullOrBlank()) {
+                            val next = absUrl(current, loc)
+                            Log.i(TAG, "followChain try$attempt hop$hops: Location -> ${next.take(110)}")
+                            if (isFinal(next)) return next
+                            current = next
+                            referer = next
                             continue
                         }
+                        if (!resp.isSuccessful) throw Exception("HTTP ${resp.code}")
+                        body = resp.text
+                        pageUrl = resp.url.toString()
+                    }
+
+                    // 1) وصلنا إلى driveseed
+                    driveseedLink(body)?.let {
+                        Log.i(TAG, "followChain try$attempt hop$hops: driveseed -> ${it.take(110)}")
+                        return it
+                    }
+
+                    // 2) نموذج POST (lp-land ثم lp-s1-form)
+                    val form = formOf(body, "lp-land") ?: formOf(body, "lp-s1-form")
+                    if (form != null) {
+                        val key = form.first + "|" + form.second.entries.sortedBy { it.key }.joinToString("&")
+                        if (!seenPosts.add(key)) throw Exception("POST مكرَّر لنفس النموذج")
+                        Log.i(TAG, "followChain try$attempt hop$hops: POST ${form.first.take(100)} fields=${form.second.keys}")
+                        val pr = app.post(
+                            form.first,
+                            data = form.second,
+                            referer = pageUrl,
+                            headers = formHead,
+                            allowRedirects = false,
+                        )
+                        val ploc = pr.headers["Location"] ?: pr.headers["location"]
+                        if (!ploc.isNullOrBlank()) {
+                            val next = absUrl(form.first, ploc)
+                            Log.i(TAG, "followChain try$attempt hop$hops: POST Location -> ${next.take(110)}")
+                            if (isFinal(next)) return next
+                            current = next
+                            referer = form.first
+                            continue
+                        }
+                        if (!pr.isSuccessful) throw Exception("POST HTTP ${pr.code}")
+                        val pbody = pr.text
+                        driveseedLink(pbody)?.let { return it }
+                        // حلّل ردّ الـPOST كما هو بلا طلبٍ ثانٍ
+                        pendingBody = pbody
+                        pendingUrl = pr.url.toString()
+                        current = pr.url.toString()
+                        referer = form.first
                         continue
                     }
-                    // look for driveseed links
-                    Regex("https?://[^\"'\\s<>]*driveseed[^\"'\\s<>/]+/l\\?[^\"'\\s<>]+").find(body)?.let { m ->
-                        return m.value.replace("\\/", "/")
+
+                    // 3) كعكة `sc(...)` → `?lp_go=`
+                    scOf(body)?.let { sc ->
+                        val go = "https://en.thenaukriadda.in/?lp_go=${sc.first}"
+                        Log.i(TAG, "followChain try$attempt hop$hops: sc=${sc.first} -> lp_go")
+                        val gr = app.get(
+                            go,
+                            headers = head,
+                            referer = pageUrl,
+                            cookies = mapOf(sc.first to sc.second),
+                            allowRedirects = false,
+                        )
+                        val gloc = gr.headers["Location"] ?: gr.headers["location"]
+                        if (!gloc.isNullOrBlank()) {
+                            val next = absUrl(go, gloc)
+                            Log.i(TAG, "followChain try$attempt hop$hops: lp_go Location -> ${next.take(110)}")
+                            if (isFinal(next)) return next
+                            current = next
+                            referer = go
+                            continue
+                        }
+                        if (!gr.isSuccessful) throw Exception("lp_go HTTP ${gr.code}")
+                        val gbody = gr.text
+                        driveseedLink(gbody)?.let { return it }
+                        jsTarget(gbody)?.let { mv ->
+                            val next = absUrl(go, mv)
+                            if (isFinal(next)) return next
+                            current = next
+                            referer = go
+                            continue
+                        }
+                        throw Exception("lp_go بلا انتقال (${gbody.length} بايت)")
                     }
-                    Regex("driveseed[^\"'\\s<> ]+/l\\?[^\"'\\s<> ]+").find(body)?.let { m ->
-                        return "https://${m.value.replace("\\/", "/")}"
+
+                    // 4) انتقال JS / meta
+                    jsTarget(body)?.let { mv ->
+                        val next = absUrl(pageUrl, mv)
+                        Log.i(TAG, "followChain try$attempt hop$hops: JS -> ${next.take(110)}")
+                        if (isFinal(next)) return next
+                        if (next == pageUrl) throw Exception("redirect loop")
+                        current = next
+                        referer = next
+                        continue
                     }
-                    Regex("https?://[^\"'\\s<>]*driveseed[^\"'\\s<>]*").find(body)?.let { m ->
-                        return m.value
-                    }
-                    Regex("href=[\"']([^\"']*driveseed[^\"']*)[\"']").find(body)?.let { m ->
-                        val r = m.groupValues[1]
-                        return if (r.startsWith("http")) r else "https://driveseed.org$r"
-                    }
-                    break
+
+                    throw Exception("طريق مسدود في ${pageUrl.take(80)} (${body.length} بايت)")
                 }
-                throw Exception("followChain exhausted hops for try$i")
+                throw Exception("followChain exhausted hops for try$attempt")
             } catch (e: Exception) {
                 lastErr = e
-                Log.i(TAG, "followChain try$i FAIL ${e::class.simpleName} ${e.message}")
-                if (i < 6) kotlinx.coroutines.delay(2000)
+                Log.i(TAG, "followChain try$attempt FAIL ${e::class.simpleName} ${e.message}")
+                if (attempt < 3) kotlinx.coroutines.delay(1200)
             }
         }
         Log.i(TAG, "followChain FAIL ${lastErr?.javaClass?.simpleName} ${lastErr?.message}")
         return null
     }
+
 
     /**
      * مرايا صفحة الملفّ.
@@ -1292,40 +1134,24 @@ class MoviesModProvider(private val prefs: SharedPreferences? = null) : MainAPI(
      * والcookie **غير ضروري**: قِيس `/file/<id>` بعميل جديد بلا كعكة
      * يُعيد 200 وrapport r2 واحدٌ — أي أنّ页面 تُ servce للجميع.
      */
+    /**
+     * مرايا صفحة الملفّ.
+     *
+     * صفحات `driveseed.org` ثلاثة أنماط، والفرق بينها كان سبب كل «لا روابط»:
+     *
+     * - `/l?id=…&key=…` — غلاف 92 بايت فيه `window.location.replace("/list/<id>")` فقط.
+     * - `/list/<id>` — قائمة الموسم: روابط `/file/<id>` لكل حلقة (بلا أي مرآة).
+     * - `/file/<id>` — **الصفحة الحقيقية**: تحمل `pub-….r2.dev` (بثّ مباشر)
+     *   و`instant|cdn.video-gen.xyz` (غلافان يُحلّان إلى رابط الوسائط).
+     *
+     * الإصدارات السابقة كانت تتوقّف عند `/l?id=` أو عند `/list/` فتُعيد صفرًا.
+     * هنا: تُتبَع الانتقالات، ثمّ إن كانت الصفحة قائمةً تُختار الحلقة المطلوبة
+     * من `serverLabel` (SxxExx) وتُقرأ صفحتها، ثمّ تُستخرج المرايا.
+     */
     private suspend fun mirrorsOf(fileUrl: String, serverLabel: String?): List<Cand> {
-        val page = try {
-            var r = app.get(fileUrl, headers = head)
-            if (!r.isSuccessful) return emptyList()
-            var body = r.text
-            var current = fileUrl
-            // غلاف Redirect Only: تابع الانتقالين المتبقيين
-            for (k in 0..6) {
-                val mv = RE_JS_REDIRECT.find(body)?.groupValues?.getOrNull(1)
-                    ?: RE_LOC.find(body)?.groupValues?.getOrNull(1)
-                    ?: Regex("location\\.href\\s*=\\s*[\"']([^\"']+)[\"']", RegexOption.IGNORE_CASE).find(body)?.groupValues?.getOrNull(1)
-                    ?: Regex("window\\.location\\s*=\\s*[\"']([^\"']+)[\"']", RegexOption.IGNORE_CASE).find(body)?.groupValues?.getOrNull(1)
-                    ?: RE_META_REFRESH.find(body)?.groupValues?.getOrNull(1)
-                    ?: break
-                val nu = if (mv.startsWith("http")) mv else if (mv.startsWith("//")) "https:$mv" else if (mv.startsWith("/")) {
-                    val base = try { java.net.URI(current) } catch (e: Exception) { null }
-                    if (base?.host?.contains("driveseed") == true) "https://driveseed.org$mv" else if (base != null) "${base.scheme}://${base.host}$mv" else "https://driveseed.org$mv"
-                } else mv
-                if (nu == current || nu.isBlank()) break
-                current = nu
-                val nr = try { app.get(nu, headers = head, referer = current) } catch (e: Exception) { break }
-                if (!nr.isSuccessful) break
-                body = nr.text
-                if (RE_R2.containsMatchIn(body) || RE_VG.containsMatchIn(body) || body.contains("/file/") || body.contains("CLOUD DOWNLOAD") || body.contains("INSTANT DOWNLOAD")) break
-            }
-            body
-        } catch (e: Exception) {
-            Log.i(TAG, "mirrorsOf FAIL ${e::class.simpleName}")
-            return emptyList()
-        }
-
         val quality = qualityOf(serverLabel ?: fileUrl)
         val note = serverLabel?.let { cleanTitle(it) }?.ifBlank { null }
-        val cands = ArrayList<Cand>(4)
+        val cands = ArrayList<Cand>(8)
         val seen = HashSet<String>()
 
         fun add(rawUrl: String, server: String, referer: String?) {
@@ -1334,28 +1160,58 @@ class MoviesModProvider(private val prefs: SharedPreferences? = null) : MainAPI(
             cands.add(Cand(u, server, quality, note, referer, head))
         }
 
-        val r2 = RE_R2.findAll(page).toList()
-        val vg = RE_VG.findAll(page).toList()
-        // كل مرايا `r2` لا أولها فقط: الصفحة قد تُعلن أكثر من رابط مباشر للملفّ
-        // نفسه، وكان الأول وحده يُلتقط فيسقط الباقي بلا سبب. والتكرار مأمون
-        // لأن `add` تُسقط المكرّر بالرابط.
-        for (m in r2) add(m.groupValues[1], "Cloud", null)
-        for (m in vg) {
-            val u = unescapeText(m.groupValues[1])
-            add(u, if (u.contains("cdn.")) "CDN" else "Fast", fileUrl)
+        fun collect(html: String, pageUrl: String) {
+            for (m in RE_R2.findAll(html)) add(m.groupValues[1], "Cloud", null)
+            for (m in RE_VG.findAll(html)) {
+                val u = unescapeText(m.groupValues[1])
+                add(u, if (u.contains("cdn.")) "CDN" else "Fast", pageUrl)
+            }
         }
 
-        // ★ سطرٌ واحد يكفي لتشخيص «لا روابط» مستقبلًا: عدد كل عائلة مرايا.
-        // قِيس أنّ الملفّ قد يحمل `r2=0 vg=2` — أي أنّ مرآة `r2` المباشرة غير
-        // موجودة، والبديلان على `video-gen.xyz` وهو نطاق **لا يُحلّ** (NXDOMAIN
-        // من 1.1.1.1 و8.8.8.8 معًا، والضابط `driveseed.org` يُحلّ). فتلك الملفّات
-        // لا مرآة حيّة لها في الموقع نفسه، ولا يُنقذها أي تغيير في الكود.
-        // و`r2=1` يقابل ملفًّا يُبَثّ فعلًا (قِيس `200 video/matroska`).
-        Log.i(TAG, "mirrorsOf ${fileUrl.substringAfterLast('/')}: r2=${r2.size} vg=${vg.size}" +
-            if (r2.isEmpty() && vg.isEmpty()) " — الموقع لا يُعلن أي مرآة لهذا الملفّ" else "")
-        if (r2.isEmpty() && vg.isNotEmpty()) {
-            Log.i(TAG, "mirrorsOf: مرايا r2 غائبة والبديل على نطاق لا يُحلّ — قد يُسقطها innerMedia")
+        try {
+            var current = fileUrl
+            var referer: String? = null
+            for (hop in 0..8) {
+                val r = app.get(current, headers = head, referer = referer)
+                if (!r.isSuccessful) break
+                val body = r.text
+                referer = current
+                collect(body, current)
+                if (cands.isNotEmpty()) break
+
+                // صفحة `/list/` = الموسم كلّه: اقرأ صفحات `/file/` واختر الحلقة.
+                val files = fileLinksOf(body)
+                if (files.isNotEmpty()) {
+                    val wantEp = epFromText(serverLabel ?: "")
+                    val picked = if (wantEp != null) {
+                        files.filter { (_, t) -> epFromText(t) == wantEp }.ifEmpty { files }
+                    } else files
+                    Log.i(TAG, "mirrorsOf /list: files=${files.size} wantEp=$wantEp picked=${picked.size}")
+                    for ((href, _) in picked.take(if (wantEp != null) 3 else 8)) {
+                        val fu = absUrl(current, href)
+                        val sub = try {
+                            app.get(fu, headers = head, referer = current)
+                        } catch (e: Exception) {
+                            continue
+                        }
+                        if (!sub.isSuccessful) continue
+                        collect(sub.text, fu)
+                        if (cands.isNotEmpty()) break
+                    }
+                    if (cands.isNotEmpty()) break
+                }
+
+                val mv = jsTarget(body) ?: break
+                val next = absUrl(current, mv)
+                if (next == current) break
+                current = next
+            }
+        } catch (e: Exception) {
+            Log.i(TAG, "mirrorsOf FAIL ${e::class.simpleName} ${e.message}")
         }
+
+        Log.i(TAG, "mirrorsOf ${fileUrl.takeLast(34)}: cands=${cands.size}")
+        if (cands.isEmpty()) return emptyList()
 
         // حلّ 302 إلى رابط الوسائط الداخلي — والرابط الداخلي يُبَثّ بلا مُحيل.
         return coroutineScope {
