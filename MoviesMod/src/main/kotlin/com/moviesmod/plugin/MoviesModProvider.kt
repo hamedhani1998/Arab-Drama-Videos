@@ -912,29 +912,83 @@ class MoviesModProvider(private val prefs: SharedPreferences? = null) : MainAPI(
             )
 
     /**
-     * أوّل رابط `driveseed` في الجسم. الصفحات تُصدِره مهرَّبًا
-     * (`driveseed.org\/l?id=…`) أو داخل `window.location.replace`.
+     * يُوحّد كل أشكال هروب الروابط التي تُصدِرها الصفحات:
+     * `\/`، `&#47;`، `&amp;`، `\u002F`، `\x2F`.
+     * بدون هذا يفوت الرابط في صفحةٍ واحدة الشكل ويُقرأ في أخرى.
      */
-    private fun driveseedLink(body: String): String? {
-        val b = body.replace("\\/", "/")
-        Regex("https?://[^\"'\\s<>]*driveseed\\.org/(?:file|list|wfile)/[^\"'\\s<>]+").find(b)?.let { return it.value }
-        Regex("https?://[^\"'\\s<>]*driveseed\\.org/l\\?[^\"'\\s<>]+").find(b)?.let { return it.value }
-        Regex("https?://[^\"'\\s<>]*driveseed\\.org/r\\?[^\"'\\s<>]+").find(b)?.let { return it.value }
+    private fun normBody(body: String): String =
+        unescapeText(body)
+            .replace("\\u002F", "/").replace("\\u002f", "/")
+            .replace("\\u0026", "&")
+            .replace("\\u003D", "=").replace("\\u003d", "=")
+            .replace("\\x2F", "/").replace("\\x2f", "/")
+            .replace("\\x26", "&")
+
+    /**
+     * أوّل رابط `driveseed` في الجسم بأي شكلٍ من أشكال الهروب.
+     * آخر محاولة: فكّ أي كتلة base64 طويلة قد يُخبَّأ فيها الرابط.
+     */
+    private fun driveseedLink(body: String): String? = driveseedLink(body, 0)
+
+    private fun driveseedLink(body: String, depth: Int): String? {
+        val b = normBody(body)
+        Regex("https?://[^\"'\\s<>]*driveseed\\.[a-z]+/(?:file|list|wfile)/[^\"'\\s<>]+").find(b)?.let { return it.value }
+        Regex("https?://[^\"'\\s<>]*driveseed\\.[a-z]+/(?:l|r|zfile)\\?[^\"'\\s<>]+").find(b)?.let { return it.value }
+        Regex("https?://[^\"'\\s<>]*driveseed\\.[a-z]+/[^\"'\\s<>]*").find(b)?.let { return it.value }
         Regex("(?:^|[\"'(\\s])/(?:file|list|wfile)/[A-Za-z0-9_-]{6,}[^\"'\\s<>]*").find(b)?.let {
             return "https://driveseed.org${it.value.trimStart('"', '\'', '(', ' ', '\n', '\t')}"
+        }
+        if (depth < 2) {
+            Regex("[A-Za-z0-9+/]{40,}={0,2}").findAll(b).take(6).forEach { m ->
+                try {
+                    val dec = String(android.util.Base64.decode(m.value, android.util.Base64.DEFAULT))
+                    if (dec.contains("driveseed")) driveseedLink(dec, depth + 1)?.let { return it }
+                } catch (e: Throwable) {
+                }
+            }
         }
         return null
     }
 
-    /** انتقال JS أو `meta refresh` من الصفحة. */
-    private fun jsTarget(body: String): String? =
-        RE_JS_REDIRECT.find(body)?.groupValues?.getOrNull(1)
-            ?: RE_LOC.find(body)?.groupValues?.getOrNull(1)
-            ?: Regex("(?:window\\.)?location\\.href\\s*=\\s*[\"']([^\"']+)[\"']", RegexOption.IGNORE_CASE)
-                .find(body)?.groupValues?.getOrNull(1)
-            ?: Regex("(?:window\\.)?location\\s*=\\s*[\"']([^\"']+)[\"']", RegexOption.IGNORE_CASE)
-                .find(body)?.groupValues?.getOrNull(1)
-            ?: RE_META_REFRESH.find(body)?.groupValues?.getOrNull(1)
+    /** انتقال JS أو `meta refresh` من الصفحة (كل الصيغ الشائعة). */
+    private fun jsTarget(body: String): String? {
+        val b = normBody(body)
+        RE_JS_REDIRECT.find(b)?.groupValues?.getOrNull(1)?.let { return it }
+        RE_LOC.find(b)?.groupValues?.getOrNull(1)?.let { return it }
+        RE_META_REFRESH.find(b)?.groupValues?.getOrNull(1)?.let { return it }
+        Regex(
+            "(?:window\\.|document\\.|top\\.|parent\\.|self\\.)?location(?:\\s*\\.\\s*href)?\\s*=\\s*[\"']([^\"']+)[\"']",
+            RegexOption.IGNORE_CASE,
+        ).find(b)?.groupValues?.getOrNull(1)?.let { return it }
+        Regex("window\\.open\\s*\\(\\s*[\"']([^\"']+)[\"']", RegexOption.IGNORE_CASE)
+            .find(b)?.groupValues?.getOrNull(1)?.let { return it }
+        return null
+    }
+
+    /**
+     * يكتب تشخيصًا خامًّا في مجلّد التطبيق الخارجي ليُسحب بـ`adb pull`
+     * (`/sdcard/Android/data/com.lagradost.cloudstream3/files/mmdbg/`).
+     * لا يؤثّر على السلوك: أي فشل في الكتابة يُبتلع.
+     */
+    private fun dbg(name: String, text: String) {
+        try {
+            val dirs = listOf(
+                java.io.File("/sdcard/Android/data/com.lagradost.cloudstream3/files/mmdbg"),
+                java.io.File("/storage/emulated/0/Android/data/com.lagradost.cloudstream3/files/mmdbg"),
+            )
+            for (d in dirs) {
+                try {
+                    if (!d.exists()) d.mkdirs()
+                    val f = java.io.File(d, name)
+                    f.writeText(text.take(300_000))
+                    Log.i(TAG, "dbg -> ${f.absolutePath}")
+                    return
+                } catch (e: Exception) {
+                }
+            }
+        } catch (e: Throwable) {
+        }
+    }
 
     /** كعكة `sc("name","value",n)` — الاسم عشوائيٌّ في كل جلسة فيُقرأ من الصفحة. */
     private fun scOf(body: String): Pair<String, String>? =
@@ -1056,33 +1110,71 @@ class MoviesModProvider(private val prefs: SharedPreferences? = null) : MainAPI(
                     scOf(body)?.let { sc ->
                         val go = "https://en.thenaukriadda.in/?lp_go=${sc.first}"
                         Log.i(TAG, "followChain try$attempt hop$hops: sc=${sc.first} -> lp_go")
-                        val gr = app.get(
-                            go,
-                            headers = head,
-                            referer = pageUrl,
-                            cookies = mapOf(sc.first to sc.second),
-                            allowRedirects = false,
-                        )
-                        val gloc = gr.headers["Location"] ?: gr.headers["location"]
-                        if (!gloc.isNullOrBlank()) {
-                            val next = absUrl(go, gloc)
-                            Log.i(TAG, "followChain try$attempt hop$hops: lp_go Location -> ${next.take(110)}")
-                            if (isFinal(next)) return next
-                            current = next
+                        var lastBody: String? = null
+                        var moved: String? = null
+                        for (g in 1..3) {
+                            val gr = try {
+                                app.get(
+                                    go,
+                                    // الكعكة تُرسَل في الترويسة أيضًا: بعض إصدارات
+                                    // CloudStream تتجاهل معامل `cookies`، والترويسة
+                                    // تعمل دائمًا (OkHttp لا يضيف كعكًا إن وُجدت).
+                                    headers = head + mapOf("Cookie" to "${sc.first}=${sc.second}"),
+                                    referer = pageUrl,
+                                    cookies = mapOf(sc.first to sc.second),
+                                    allowRedirects = false,
+                                )
+                            } catch (e: Exception) {
+                                Log.i(TAG, "followChain lp_go[$g] EX ${e::class.simpleName}")
+                                null
+                            }
+                            if (gr == null) {
+                                if (g < 3) kotlinx.coroutines.delay(900)
+                                continue
+                            }
+                            val gloc = gr.headers["Location"] ?: gr.headers["location"]
+                            if (!gloc.isNullOrBlank()) {
+                                val next = absUrl(go, gloc)
+                                Log.i(TAG, "followChain lp_go[$g] Location -> ${next.take(110)}")
+                                if (isFinal(next)) return next
+                                moved = next
+                                break
+                            }
+                            if (!gr.isSuccessful) {
+                                Log.i(TAG, "followChain lp_go[$g] HTTP ${gr.code}")
+                            } else {
+                                val b = gr.text
+                                lastBody = b
+                                driveseedLink(b)?.let {
+                                    Log.i(TAG, "followChain lp_go[$g] driveseed -> ${it.take(110)}")
+                                    return it
+                                }
+                                jsTarget(b)?.let { mv ->
+                                    val next = absUrl(go, mv)
+                                    Log.i(TAG, "followChain lp_go[$g] JS -> ${next.take(110)}")
+                                    if (isFinal(next)) return next
+                                    moved = next
+                                }
+                                if (moved != null) break
+                                Log.i(
+                                    TAG,
+                                    "followChain lp_go[$g] بلا انتقال (${b.length} بايت)" +
+                                        " wait=${b.contains("Please wait")}" +
+                                        " expired=${b.contains("Session expired")}" +
+                                        " tail=${b.takeLast(260).replace('\n', ' ').replace('\r', ' ')}",
+                                )
+                            }
+                            if (g < 3) kotlinx.coroutines.delay(900)
+                        }
+                        if (lastBody != null) {
+                            dbg("lp_go_fail_${attempt}_${System.currentTimeMillis()}.html", lastBody!!)
+                        }
+                        if (moved != null) {
+                            current = moved
                             referer = go
                             continue
                         }
-                        if (!gr.isSuccessful) throw Exception("lp_go HTTP ${gr.code}")
-                        val gbody = gr.text
-                        driveseedLink(gbody)?.let { return it }
-                        jsTarget(gbody)?.let { mv ->
-                            val next = absUrl(go, mv)
-                            if (isFinal(next)) return next
-                            current = next
-                            referer = go
-                            continue
-                        }
-                        throw Exception("lp_go بلا انتقال (${gbody.length} بايت)")
+                        throw Exception("lp_go بلا انتقال (${lastBody?.length ?: 0} بايت)")
                     }
 
                     // 4) انتقال JS / meta
@@ -1096,6 +1188,7 @@ class MoviesModProvider(private val prefs: SharedPreferences? = null) : MainAPI(
                         continue
                     }
 
+                    dbg("dead_end_${attempt}_${System.currentTimeMillis()}.html", body)
                     throw Exception("طريق مسدود في ${pageUrl.take(80)} (${body.length} بايت)")
                 }
                 throw Exception("followChain exhausted hops for try$attempt")
