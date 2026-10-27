@@ -1141,12 +1141,14 @@ class MoviesModProvider(private val prefs: SharedPreferences? = null) : MainAPI(
     private suspend fun lpGoStep(sc: Pair<String, String>, referer: String?, sid: String): String? {
         val sidVal = sid.substringAfter("?sid=", sid).substringBefore("&")
         val dec = decodeSc(sc.second)
-        val matches = dec != null && sidVal.isNotEmpty() && dec.contains(sidVal.take(40))
+        val matches = dec != null && sidVal.isNotEmpty() &&
+            dec.trim().trimEnd('=') == sidVal.trim().trimEnd('=')
         Log.i(
             TAG,
             "lpGo name=${sc.first} len=${sc.second.length}" +
                 " head=${sc.second.take(6)} tail=${sc.second.takeLast(6)}" +
-                " decoded=${dec?.take(28)} sidMatch=$matches",
+                " decoded=${dec?.take(28)} sidLen=${sidVal.length} decLen=${dec?.length}" +
+                " sidMatch=$matches",
         )
         val values = ArrayList<String>(2)
         values.add(sc.second)
