@@ -132,10 +132,27 @@ class MoviesModProvider(private val prefs: SharedPreferences? = null) : MainAPI(
             "thenaukriadda.in",
             "driveseed.org",
             "www.driveseed.org",
+            "video-gen.xyz",
         )
 
+        /**
+         * مضيفاتٌ يردّ عليها مُحلِّل الجهاز بـ`NXDOMAIN` وهي **حيّةٌ فعلًا**:
+         * قِيس من الجهاز `ping cdn.video-gen.xyz` → `unknown host` بينما
+         * `nslookup … 8.8.8.8` يعيد عنوانَي Cloudflare، و`curl --resolve`
+         * عليها يعيد 200. وكلّها خلف Cloudflare، فيكفي تثبيت عنوان حافةٍ
+         * واحدٍ لها جميعًا — والـ`SNI` يحمل الاسم الصحيح.
+         *
+         * بلا هذا التثبيت كان كل ملفٍّ على `video-gen` (وهو **المرآة الوحيدة**
+         * لبعض الحلقات، إذ لا `r2.dev` في صفحتها) يسقط بـ`UnknownHostException`
+         * فتُعلن القائمة فارغة.
+         */
+        private val pinnedSuffixes = listOf(".video-gen.xyz", ".workers.dev")
+
+        private fun isPinned(host: String): Boolean =
+            pinnedHosts.contains(host) || pinnedSuffixes.any { host.endsWith(it) }
+
         override fun lookup(hostname: String): List<InetAddress> {
-            if (pinnedHosts.contains(hostname.lowercase())) {
+            if (isPinned(hostname.lowercase())) {
                 val ips = resolveIps() ?: return base.lookup(hostname)
                 return ips.map { InetAddress.getByName(it) }
             }
@@ -1440,36 +1457,17 @@ class MoviesModProvider(private val prefs: SharedPreferences? = null) : MainAPI(
     /**
      * مرايا صفحة الملفّ.
      *
-     * `instant`/`cdn` تردّان 302 إلى غلاف `video-seed.dev` الذي يحمل رابط
-     * الوسائط في معامل `url=` — يُستخرج ولا يُبَثّ. و`seedtg` و`/zfile/`
-     * غلافان بلا وسائط فلا يدخلان القائمة أصلًا. ورابط `r2.dev` إن وُجد رابط
-     * ملفٍّ مباشر — **لكنه ليس حاضرًا دائمًا** (قِيس `r2: []` على صفحةٍ كاملة).
-     */
-    /**
-     * صفحات `driveseed.org` نمطين، والفرق بينهما يُكاد يكون سبب كل
-     * «لا روابط» في الإصدارات السابقة:
-     *
-     * - `/l?id=…&key=…` — غلاف Redirect Only: جسمه 92 بايت يحتوي
-     *   `window.location.replace("/list/<id>")` فقط، **لا روابط وسائط**.
-     * - `/list/<id>` — قائمة الملفّات: يحتوي روابط `/file/<id>` لكل جودة.
-     * - `/file/<id>` — **الصفحة الحقيقية**: يحمل رابط `r2.dev` المباشر
-     *   (قِيس: `pub-2fbc…r2.dev/…/Friends.Sex.and.Games.S01.480p…zip`).
-     *
-     * الـ`followChain` كان يُعيد `/l?id=` (الغلاف) فتُستخرَج روابطه
-     * فارغة، والحلّ أن يُكمل الانتقالين剩下的 إلى `/file/<id>`.
-     *
-     * والcookie **غير ضروري**: قِيس `/file/<id>` بعميل جديد بلا كعكة
-     * يُعيد 200 وrapport r2 واحدٌ — أي أنّ页面 تُ servce للجميع.
-     */
-    /**
-     * مرايا صفحة الملفّ.
-     *
      * صفحات `driveseed.org` ثلاثة أنماط، والفرق بينها كان سبب كل «لا روابط»:
      *
      * - `/l?id=…&key=…` — غلاف 92 بايت فيه `window.location.replace("/list/<id>")` فقط.
      * - `/list/<id>` — قائمة الموسم: روابط `/file/<id>` لكل حلقة (بلا أي مرآة).
      * - `/file/<id>` — **الصفحة الحقيقية**: تحمل `pub-….r2.dev` (بثّ مباشر)
      *   و`instant|cdn.video-gen.xyz` (غلافان يُحلّان إلى رابط الوسائط).
+     *
+     * و`instant`/`cdn` تردّان 302 إلى غلاف `video-seed.dev` الذي يحمل رابط
+     * الوسائط في معامل `url=` — يُستخرج ولا يُبَثّ. ورابط `r2.dev` إن وُجد رابط
+     * ملفٍّ مباشر — **لكنه ليس حاضرًا دائمًا** (قِيس `r2: []` على صفحةٍ كاملة)،
+     * فيبقى `video-gen` هو المرآة الوحيدة لبعض الحلقات.
      *
      * الإصدارات السابقة كانت تتوقّف عند `/l?id=` أو عند `/list/` فتُعيد صفرًا.
      * هنا: تُتبَع الانتقالات، ثمّ إن كانت الصفحة قائمةً تُختار الحلقة المطلوبة
