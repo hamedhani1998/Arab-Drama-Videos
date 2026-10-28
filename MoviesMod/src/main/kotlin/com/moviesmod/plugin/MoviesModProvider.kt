@@ -447,18 +447,35 @@ class MoviesModProvider(private val prefs: SharedPreferences? = null) : MainAPI(
         }
 
         val showSeasons = pref(KEY_SHOW_SEASONS, true)
+        // sid «كل الحلقات» لكل موسم — يُلحَق بكل حلقة سطرًا رابعًا (`zipOnly`)
+        // فيظهر رابط تحميل أرشيف الموسم (‎zip‎) **مع** روابط الحلقة نفسها، وهو
+        // ما طلبه المستخدم. السطر الرابع يجعل `mirrorsOf` يقرأ ملفّات الأرشيف
+        // وحدها من `/list/` فلا تُدفَع كلفة قائمة الموسم كاملة لكل حلقة.
+        val batchSidBySeason = HashMap<Int, Pair<String, Row>>()
+        // الأولوية لـ`sid` «All Episodes Batch» المقروء من صفحة الأرشيف نفسها:
+        // يفتح `/list/` مباشرة. و`b.href` صفحةُ أرشيفٍ فيها عدّة سيرفرات،
+        // فتُترك للمدخلة المستقلّة. ولكل موسم يُؤخذ **أعلى جودة** متاحة.
+        for ((sid, row) in fetched.flatMap { it.batches }) {
+            val season = seasonOf(row.heading) ?: 1
+            val prev = batchSidBySeason[season]
+            if (prev == null || qualityOf(row.heading) > qualityOf(prev.second.heading)) {
+                batchSidBySeason[season] = sid to row
+            }
+        }
         val eps = ArrayList<Episode>(bySeasonEp.size + 1)
         for ((key, list) in bySeasonEp.entries.sortedWith(compareBy({ it.key.first }, { it.key.second }))) {
             val (season, num) = key
             // كل جودةٍ سطرٌ مستقلّ: `<sid>	<عنوان الجودة> · SxxExx	<اسم الرابط>`.
             // رقم الحلقة في العنوان يلزم لاختيار الملفّ الصحيح من صفحات `/list/`،
             // والاسم الثالث هو نصّ رابط الأرشيف (يُصبح اسم السيرفر إن كان اسمًا).
-            val payload = list
-                .sortedByDescending { qualityOf(it.second.heading) }
-                .joinToString("\n") { (sid, row) ->
-                    sid + "\t" + epHeading(row.heading, season, num) + "\t" + row.label
-                }
-            eps.add(newEpisode(payload) {
+            val lines = ArrayList<String>(list.size + 1)
+            for ((sid, row) in list.sortedByDescending { qualityOf(it.second.heading) }) {
+                lines.add(sid + "\t" + epHeading(row.heading, season, num) + "\t" + row.label)
+            }
+            batchSidBySeason[season]?.let { (bsid, brow) ->
+                lines.add(bsid + "\t" + brow.heading.trim() + " · كل الحلقات\t" + brow.label + "\t1")
+            }
+            eps.add(newEpisode(lines.joinToString("\n")) {
                 this.name = if (showSeasons) "الموسم $season · الحلقة $num" else "الحلقة $num"
                 this.season = season
                 this.episode = num
@@ -550,8 +567,11 @@ class MoviesModProvider(private val prefs: SharedPreferences? = null) : MainAPI(
                 val link = parts.getOrNull(0)?.trim().orEmpty()
                 val heading = parts.getOrNull(1)?.trim()?.ifBlank { null }
                 val hint = parts.getOrNull(2)?.trim()?.ifBlank { null }
+                // السطر الرابع: هذا المدخل يخصّ **أرشيف الموسم** فقط (‎zip‎)،
+                // فيُقرأ من `/list/` ملفّات الأرشيف وحدها.
+                val zipOnly = parts.getOrNull(3)?.trim() == "1"
                 if (link.isBlank()) return emptyList()
-                val res = resolve(link, heading, hint)
+                val res = resolve(link, heading, hint, zipOnly)
                 if (res.isNotEmpty()) return res
                 return try {
                     val r = app.get(link, headers = head, allowRedirects = true)
@@ -746,14 +766,15 @@ class MoviesModProvider(private val prefs: SharedPreferences? = null) : MainAPI(
         archive: String,
         serverLabel: String?,
         serverHint: String? = null,
+        zipOnly: Boolean = false,
     ): List<Cand> {
         if (archive.isBlank()) return emptyList()
-        Log.i(TAG, "resolve: start ${archive.take(100)} label=$serverLabel hint=$serverHint")
+        Log.i(TAG, "resolve: start ${archive.take(100)} label=$serverLabel hint=$serverHint zipOnly=$zipOnly")
 
         // 1) رابط `?sid=` جاهز: لا طلبَ استكشافي، `followChain` تكفيه.
         if (archive.contains("?sid=")) {
             Log.i(TAG, "resolve: direct sid")
-            return chainToMirrors(archive, serverLabel, serverHint)
+            return chainToMirrors(archive, serverLabel, serverHint, zipOnly)
         }
 
         // 2) صفحة أرشيف (أو صفحة عملٍ لفيلم).
@@ -850,14 +871,15 @@ class MoviesModProvider(private val prefs: SharedPreferences? = null) : MainAPI(
         sidUrl: String,
         label: String?,
         hint: String? = null,
+        zipOnly: Boolean = false,
     ): List<Cand> {
         val fileUrl = followChain(sidUrl)
         if (fileUrl == null) {
             Log.i(TAG, "resolve: followChain returned null for ${sidUrl.take(70)}")
             return emptyList()
         }
-        Log.i(TAG, "resolve: got fileUrl=${fileUrl.take(80)} hint=$hint")
-        return mirrorsOf(fileUrl, label, hint)
+        Log.i(TAG, "resolve: got fileUrl=${fileUrl.take(80)} hint=$hint zipOnly=$zipOnly")
+        return mirrorsOf(fileUrl, label, hint, zipOnly)
     }
 
     /**
@@ -1515,6 +1537,7 @@ class MoviesModProvider(private val prefs: SharedPreferences? = null) : MainAPI(
         fileUrl: String,
         serverLabel: String?,
         serverHint: String? = null,
+        zipOnly: Boolean = false,
     ): List<Cand> {
         var quality = qualityOf(serverLabel ?: fileUrl)
         // «كل الحلقات» تعني: لا تُصفَّ الملفّات برقم حلقة (العنوان يحمل
@@ -1691,7 +1714,11 @@ class MoviesModProvider(private val prefs: SharedPreferences? = null) : MainAPI(
                 // - «كل الحلقات»: **كل** الملفّات، فتُجمع مرايا الموسم.
                 val files = fileLinksOf(body)
                 if (files.isNotEmpty()) {
-                    val picked = if (wantEp != null) {
+                    val picked = if (zipOnly) {
+                        // مدخل «أرشيف الموسم»: ملفّات الـZIP وحدها، فلا تُدفَع
+                        // كلفة صفحات الحلقات كلها في كل حلقة.
+                        files.filter { (_, t) -> isArchiveName(t) }.take(4)
+                    } else if (wantEp != null) {
                         val epFiles = files.filter { (_, t) -> epFromText(t) == wantEp }
                         // أجزاء الأرشيف تُضاف دائمًا (سقف ٤): ملفّات الـZIP لا
                         // تحمل رقم حلقة، فكانت تُصفّى خارج القائمة كلّها.
@@ -1700,7 +1727,8 @@ class MoviesModProvider(private val prefs: SharedPreferences? = null) : MainAPI(
                     } else {
                         files
                     }
-                    val cap = if (wantEp != null) 8 else 20
+                    if (picked.isEmpty()) break
+                    val cap = if (zipOnly || wantEp != null) 8 else 20
                     Log.i(TAG, "mirrorsOf /list: files=${files.size} wantEp=$wantEp picked=${picked.size}")
                     // ٨ صفحات في الوقت الواحد: صفحة الموسم قد تحمل ٢٠ ملفًّا،
                     // و٥ في الدفعة تُطيل الانتظار أربع دفعات كاملة.
