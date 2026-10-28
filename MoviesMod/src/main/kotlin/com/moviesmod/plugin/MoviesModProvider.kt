@@ -10,6 +10,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.delay
 import org.jsoup.nodes.Document
 import org.jsoup.nodes.Element
 import java.net.InetAddress
@@ -283,11 +284,11 @@ class MoviesModProvider(private val prefs: SharedPreferences? = null) : MainAPI(
 
             if (dlRows.isNotEmpty()) {
                 // بيانات الفيلم = روابط أرشيف الجودات، سطرٌ لكل جودة:
-                // `<رابط الأرشيف>\t<عنوان صفّ الجودة>`. العنوان هو ما يحمل الجودة
-                // (‎1080p x264‎) والحجم، وهو ما يُبنى عليه الترتيب والوسم؛ ونصّ
-                // الزرّ نفسه «Download Links» في كل الصفوف فلا يميّز شيئًا.
+                // `<رابط الأرشيف>\t<عنوان صفّ الجودة>\t<نصّ الزرّ>`. العنوان هو
+                // ما يحمل الجودة (‎1080p x264‎) والحجم، ويُبنى عليه الترتيب
+                // والوسم؛ ونصّ الزرّ الثالث يُقرأ اسمًا للسيرفر إن كان اسمًا.
                 // وكل سطر يبدأ بـhttp وإلا لحق CloudStream رابط الصفحة بها.
-                val data = dlRows.joinToString("\n") { "${it.href}\t${it.heading}" }
+                val data = dlRows.joinToString("\n") { "${it.href}\t${it.heading}\t${it.label}" }
                 return newMovieLoadResponse(title, url, TvType.Movie, data) {
                     this.posterUrl = poster
                     this.plot = plot
@@ -372,34 +373,42 @@ class MoviesModProvider(private val prefs: SharedPreferences? = null) : MainAPI(
         // `/list/` على driveseed بقائمة الموسم كاملًا (قِيس: ٩ ملفّات لـ٩ حلقات).
         data class Scan(val eps: List<Pair<String, Row>>, val batches: List<Pair<String, Row>>)
 
-        val fetched = coroutineScope {
-            archives.map { row ->
-                async(Dispatchers.IO) {
-                    try {
-                        val r = app.get(row.href, headers = head)
-                        if (!r.isSuccessful) return@async Scan(emptyList(), emptyList())
-                        val eps = ArrayList<Pair<String, Row>>(16)
-                        val batches = ArrayList<Pair<String, Row>>(2)
-                        for (a in RE_SID.findAll(r.text)) {
-                            val sid = unescapeText(a.groupValues[1]).replace(RE_WS, "")
-                            val label = stripTags(a.groupValues[2])
-                            if (label.contains("batch", true) || label.contains("all episodes", true)) {
-                                batches.add(sid to row.copy(label = label))
-                                continue
-                            }
-                            val n = epNumberOf(label) ?: continue
-                            eps.add(sid to row.copy(label = label, epNum = n))
-                        }
-                        Log.i(TAG, "archive ${row.href.substringAfterLast('/')}:" +
-                            " حلقات=${eps.size} دفعات=${batches.size}")
-                        Scan(eps, batches)
-                    } catch (e: Exception) {
-                        Log.i(TAG, "archive FAIL ${row.href} ${e::class.simpleName}" +
-                            if (e is UnknownHostException) " — المضيف لا يُحلّ" else "")
-                        Scan(emptyList(), emptyList())
+        suspend fun scan(row: Row): Scan = try {
+            val r = app.get(row.href, headers = head)
+            if (!r.isSuccessful) {
+                Log.i(TAG, "archive HTTP ${r.code} ${row.href.substringAfterLast('/')}")
+                Scan(emptyList(), emptyList())
+            } else {
+                val eps = ArrayList<Pair<String, Row>>(16)
+                val batches = ArrayList<Pair<String, Row>>(2)
+                for (a in RE_SID.findAll(r.text)) {
+                    val sid = unescapeText(a.groupValues[1]).replace(RE_WS, "")
+                    val label = stripTags(a.groupValues[2])
+                    if (label.contains("batch", true) || label.contains("all episodes", true)) {
+                        batches.add(sid to row.copy(label = label))
+                        continue
                     }
+                    val n = epNumberOf(label) ?: continue
+                    eps.add(sid to row.copy(label = label, epNum = n))
                 }
-            }.awaitAll()
+                Log.i(TAG, "archive ${row.href.substringAfterLast('/')}:" +
+                    " حلقات=${eps.size} دفعات=${batches.size}")
+                Scan(eps, batches)
+            }
+        } catch (e: Exception) {
+            Log.i(TAG, "archive FAIL ${row.href} ${e::class.simpleName}" +
+                if (e is UnknownHostException) " — المضيف لا يُحلّ" else "")
+            Scan(emptyList(), emptyList())
+        }
+
+        // ★ ٣ أرشيفاتٍ في الوقت الواحد لا كلّها: قِيس أن ٨ طلبات متوازية على
+        // `episodes.modpro.blog` تُرجع **429** لنصفها، فتبدو حلقاتها بلا روابط.
+        val fetched = ArrayList<Scan>(archives.size)
+        for (chunk in archives.chunked(3)) {
+            fetched += coroutineScope {
+                chunk.map { row -> async(Dispatchers.IO) { scan(row) } }.awaitAll()
+            }
+            if (archives.size > 3) delay(400)
         }
 
         // مفتاح الحلقة → كل جوداتها (لا الأعلى فقط). `LinkedHashMap` ليبقى
@@ -420,11 +429,14 @@ class MoviesModProvider(private val prefs: SharedPreferences? = null) : MainAPI(
         val eps = ArrayList<Episode>(bySeasonEp.size + 1)
         for ((key, list) in bySeasonEp.entries.sortedWith(compareBy({ it.key.first }, { it.key.second }))) {
             val (season, num) = key
-            // كل جودةٍ سطرٌ مستقلّ: `<sid>	<عنوان الجودة> · SxxExx`.
-            // رقم الحلقة في العنوان يلزم لاختيار الملفّ الصحيح من صفحات `/list/`.
+            // كل جودةٍ سطرٌ مستقلّ: `<sid>	<عنوان الجودة> · SxxExx	<اسم الرابط>`.
+            // رقم الحلقة في العنوان يلزم لاختيار الملفّ الصحيح من صفحات `/list/`،
+            // والاسم الثالث هو نصّ رابط الأرشيف (يُصبح اسم السيرفر إن كان اسمًا).
             val payload = list
                 .sortedByDescending { qualityOf(it.second.heading) }
-                .joinToString("\n") { (sid, row) -> sid + "\t" + epHeading(row.heading, season, num) }
+                .joinToString("\n") { (sid, row) ->
+                    sid + "\t" + epHeading(row.heading, season, num) + "\t" + row.label
+                }
             eps.add(newEpisode(payload) {
                 this.name = if (showSeasons) "الموسم $season · الحلقة $num" else "الحلقة $num"
                 this.season = season
@@ -447,8 +459,12 @@ class MoviesModProvider(private val prefs: SharedPreferences? = null) : MainAPI(
                 .filter { (seasonOf(it.second.heading) ?: 1) == season }
                 .sortedByDescending { qualityOf(it.second.heading) }
                 .distinctBy { it.first }
-            for ((sid, row) in qualityLines) lines.add(sid + "\t" + row.heading.trim())
-            lines.add(b.href + "\t" + b.heading)
+            for ((sid, row) in qualityLines) {
+                // «كل الحلقات» تُكتب في العنوان: `epFromText` كان يقرأ `E01-45`
+                // من عنوان المدى فيظنّها الحلقة 1 ويُبقي ملفًّا واحدًا من `/list/`.
+                lines.add(sid + "\t" + row.heading.trim() + " · كل الحلقات\t" + row.label)
+            }
+            lines.add(b.href + "\t" + b.heading.trim() + " · كل الحلقات\t" + b.label)
             Log.i(TAG, "batch S$season: qualityLists=${qualityLines.size}")
             eps.add(newEpisode(lines.joinToString("\n")) {
                 this.name = if (showSeasons) "الموسم $season · كل الحلقات" else "كل الحلقات"
@@ -502,30 +518,42 @@ class MoviesModProvider(private val prefs: SharedPreferences? = null) : MainAPI(
             val showAlt = pref(KEY_SHOW_ALT, true)
             val order = prefs?.getString(KEY_QUALITY_ORDER, "default") ?: "default"
 
-            val resolved = coroutineScope {
-                entries.map { e ->
-                    async(Dispatchers.IO) {
-                        val link = e.substringBefore("\t").trim()
-                        val heading = e.substringAfter("\t", "").trim().ifBlank { null }
-                        val res = resolve(link, heading)
-                        if (res.isNotEmpty()) res else {
-                            try {
-                                val r = app.get(link, headers = head, allowRedirects = true)
-                                val t = r.text
-                                val out = ArrayList<Cand>()
-                                Regex("https?://[^\"'\\s<>]+\\.(mp4|mkv|avi|webm|mpg|mpeg|ts|zip|rar)(\\?[^\"'\\s<>]*)?").findAll(t.replace("\\/", "/")).forEach { m ->
-                                    out.add(Cand(m.value.replace("\\/", "/"), heading ?: "Direct", qualityOf(heading ?: m.value), null, null, head))
-                                }
-                                Regex("https?://[^\"'\\s<>]+/(download|dl|getfile)/[^\"'\\s<>]+").findAll(t.replace("\\/", "/")).forEach { m ->
-                                    out.add(Cand(m.value.replace("\\/", "/"), heading ?: "Direct", qualityOf(heading ?: m.value), null, null, head))
-                                }
-                                out
-                            } catch (ex: Exception) { emptyList() }
-                        }
+            suspend fun one(e: String): List<Cand> {
+                val parts = e.split("\t")
+                val link = parts.getOrNull(0)?.trim().orEmpty()
+                val heading = parts.getOrNull(1)?.trim()?.ifBlank { null }
+                val hint = parts.getOrNull(2)?.trim()?.ifBlank { null }
+                if (link.isBlank()) return emptyList()
+                val res = resolve(link, heading, hint)
+                if (res.isNotEmpty()) return res
+                return try {
+                    val r = app.get(link, headers = head, allowRedirects = true)
+                    val t = r.text
+                    val out = ArrayList<Cand>()
+                    Regex("https?://[^\"'\\s<>]+\\.(mp4|mkv|avi|webm|mpg|mpeg|ts|zip|rar)(\\?[^\"'\\s<>]*)?").findAll(t.replace("\\/", "/")).forEach { m ->
+                        out.add(Cand(m.value.replace("\\/", "/"), heading ?: "Direct", qualityOf(heading ?: m.value), null, null, head))
                     }
-                }.awaitAll().flatten().distinctBy { it.url }
+                    Regex("https?://[^\"'\\s<>]+/(download|dl|getfile)/[^\"'\\s<>]+").findAll(t.replace("\\/", "/")).forEach { m ->
+                        out.add(Cand(m.value.replace("\\/", "/"), heading ?: "Direct", qualityOf(heading ?: m.value), null, null, head))
+                    }
+                    out
+                } catch (ex: Exception) {
+                    emptyList()
+                }
             }
-            if (resolved.isEmpty()) {
+
+            // ٣ مدخلاتٍ في الوقت الواحد: كلّ مدخلةٍ سلسلة تحويلات كاملة على
+            // `en.thenaukriadda.in`، وأكثر من ٣ متوازية يُغري ردّ 429 فتختفي
+            // حلقةٌ لها روابط.
+            val resolved = ArrayList<Cand>(entries.size * 2)
+            for (chunk in entries.chunked(3)) {
+                resolved += coroutineScope {
+                    chunk.map { e -> async(Dispatchers.IO) { one(e) } }.awaitAll().flatten()
+                }
+                if (entries.size > 3) delay(300)
+            }
+            val deduped = resolved.distinctBy { it.url }
+            if (deduped.isEmpty()) {
                 Log.i(TAG, "loadLinks: resolved nothing from ${entries.size} entries (dns fixed)")
                 return false
             }
@@ -535,7 +563,7 @@ class MoviesModProvider(private val prefs: SharedPreferences? = null) : MainAPI(
             // `links.modpro.blog` نفسه لا يُحلّ محليًّا، وأنّ رابط الوسائط
             // أحادي الاستعمال فردُّ 400 عليه لاحقًا ليس دليل موت.
             val probed = coroutineScope {
-                resolved.map { c ->
+                deduped.map { c ->
                     async(Dispatchers.IO) {
                         val r = MediaProbe.probe(c.url, c.referer, c.headers)
                         c.bytes = c.bytes ?: r.totalBytes
@@ -633,83 +661,94 @@ class MoviesModProvider(private val prefs: SharedPreferences? = null) : MainAPI(
     private fun isArchive(c: Cand): Boolean {
         val u = c.url.lowercase()
         if (u.contains(".zip") || u.contains(".rar") || u.contains(".7z")) return true
+        // رابط صفحة محجوبة لا امتداد له؛ الوسم يأتي من اسم الملفّ في [Cand.note].
+        if (c.note?.contains(".zip", true) == true || c.note?.contains(".rar", true) == true) return true
         return c.mime?.let { it.contains("zip", true) || it.contains("rar", true) } == true
     }
 
     /**
      * حلّ مدخلةٍ واحدة إلى ملفّات وسائط.
      *
-     * المدخلة قد تكون أرشيفًا (`episodes.modpro.blog/archives/…`) أو رابط
-     * `?sid=` مباشرةً. والقراءة تبحث عن `?sid=` **بعلامةٍ ثابتة** لا بموضع،
-     * فالأرشيف يردّ 200 وجسمه يتغيّر حجمًا بين جلبٍ وجلب (قِيس: ‎38 KB‎ ثم
-     * ‎42 KB‎ للصفحة نفسها).
-     */
-    /**
-     * حلّ مدخلةٍ واحدة إلى ملفّات وسائط.
-     *
      * المدخلة إمّا:
      * - رابط `?sid=` مباشر (ما تبنيه `buildEpisodes` لكل جودة) — سلسلة واحدة فقط.
-     * - صفحة أرشيف (`episodes.modpro.blog/archives/…`) فيها رابط `?sid=` لكل
-     *   حلقة؛ **تُختار الحلقة المطلوبة** من نصّ الرابط (`Episode 5` أو `S01E05`)
-     *   أو رابط «All Episodes Batch» للدفعة. الإصدار السابق كان يجرّب **كل**
-     *   روابط الصفحة بالترتيب حتى ينجح أوّلُها، فتعود كل الحلقات إلى ملفّ
-     *   الحلقة الأولى — وهذا سبب «نفس الرابط لكل الحلقات».
+     * - صفحة أرشيف فيها `?sid=` لكل حلقة؛ **تُختار الحلقة المطلوبة** من نصّ
+     *   الرابط (`Episode 5`/`S01E05`).
+     * - صفحة أرشيف نصوصها **أسماء سيرفرات** (`✅ Fast Server 1 (G-Drive)`،
+     *   `🚀 Google Drive (Server 2)`) — وهذه تُحلّ **كلّها** لا واحدًا منها:
+     *   حصرُ الأوّل كان يُخفي بقيّة السيرفرات، وهو سبب «روابط G-Drive لا تظهر».
      * - رابط `driveseed` أو ملفّ وسائط مباشر.
-     *
-     * قراءة الصفحة تبحث عن `?sid=` بعلامةٍ ثابتة لا بموضع، فالأرشيف يردّ 200
-     * وجسمه يتغيّر حجمًا بين جلبٍ وجلب (قِيس: ‎38 KB‎ ثم ‎42 KB‎).
      */
-    private suspend fun resolve(archive: String, serverLabel: String?): List<Cand> {
+    private suspend fun resolve(
+        archive: String,
+        serverLabel: String?,
+        serverHint: String? = null,
+    ): List<Cand> {
         if (archive.isBlank()) return emptyList()
-        Log.i(TAG, "resolve: start ${archive.take(100)} label=$serverLabel")
+        Log.i(TAG, "resolve: start ${archive.take(100)} label=$serverLabel hint=$serverHint")
 
         // 1) رابط `?sid=` جاهز: لا طلبَ استكشافي، `followChain` تكفيه.
         if (archive.contains("?sid=")) {
             Log.i(TAG, "resolve: direct sid")
-            return chainToMirrors(archive, serverLabel)
+            return chainToMirrors(archive, serverLabel, serverHint)
         }
 
         // 2) صفحة أرشيف (أو صفحة عملٍ لفيلم).
-        val body: String
-        val finalUrl: String
-        try {
-            val r = app.get(archive, headers = head, allowRedirects = true, referer = mainUrl)
-            if (!r.isSuccessful) {
-                Log.i(TAG, "resolve: HTTP ${r.code} ${archive.take(80)}")
-                return emptyList()
-            }
-            body = r.text
-            finalUrl = r.url.toString()
+        val got = try {
+            getText(archive, referer = mainUrl)
         } catch (e: Exception) {
             Log.i(TAG, "resolve archive FAIL ${e::class.simpleName}" +
                 " ${hostOf(archive)}" +
                 if (e is UnknownHostException) " — المضيف لا يُحلّ" else "")
+            null
+        }
+        if (got == null) {
+            Log.i(TAG, "resolve: no body ${archive.take(80)}")
             return emptyList()
         }
+        val body = got.first
+        val finalUrl = got.second
 
         // 3) رابط `driveseed` مباشر في الصفحة.
         driveseedLink(body)?.let {
             Log.i(TAG, "resolve: driveseed in page -> ${it.take(80)}")
-            return mirrorsOf(it, serverLabel)
+            return mirrorsOf(it, serverLabel, serverHint)
         }
 
-        // 4) أزواج `?sid=` مع نصّها — القلب: اختيار الحلقة الصحيحة.
+        // 4) أزواج `?sid=` مع نصّها.
         val pairs = RE_SID.findAll(body)
             .map { unescapeText(it.groupValues[1]).replace(RE_WS, "") to stripTags(it.groupValues[2]) }
             .filterNot { it.second.contains("comment", true) }
             .distinctBy { it.first }
             .toList()
-        if (pairs.isNotEmpty()) {
-            val pick = pickSid(pairs, serverLabel)
+
+        // 4-أ) أرشيف حلقات: نصوصه أرقام حلقات ⇒ تُختار الحلقة المطلوبة وحدها.
+        val epPairs = pairs.filter { epFromText(it.second) != null }
+        if (epPairs.isNotEmpty()) {
+            val pick = pickSid(epPairs, serverLabel)
             Log.i(TAG, "resolve: sids=${pairs.size} wantEp=${epFromText(serverLabel ?: "")}" +
                 " picked=${pick.second.take(40)}")
-            return chainToMirrors(pick.first, serverLabel)
+            return chainToMirrors(pick.first, serverLabel, null)
+        }
+
+        // 4-ب) نصوص أسماء سيرفرات ⇒ تُحلّ كلّها (سقف ٤) ويُحمل اسم كلٍّ منها
+        //      إلى اسم الرابط المعروض، فيرى المستخدم «G-Drive» كما في الموقع.
+        if (pairs.isNotEmpty()) {
+            val servers = pairs.take(4)
+            Log.i(TAG, "resolve: servers=${servers.joinToString(" | ") { it.second.take(30) }}")
+            val out = coroutineScope {
+                servers.map { (sid, name) ->
+                    async(Dispatchers.IO) {
+                        chainToMirrors(sid, serverLabel, serverHintOf(name) ?: serverHint)
+                    }
+                }.awaitAll().flatten()
+            }
+            if (out.isNotEmpty()) return out.distinctBy { it.url }
         }
 
         // 5) الصفحة نفسها صارت `?sid=` بعد التحويل.
         if (finalUrl.contains("?sid=")) {
             Log.i(TAG, "resolve: redirected to sid")
-            return chainToMirrors(finalUrl, serverLabel)
+            return chainToMirrors(finalUrl, serverLabel, serverHint)
         }
 
         // 6) صفحات بلا نصوص مطابقة: تُحلّ كل روابط `?sid=` القليلة وتُجمع مراياها.
@@ -720,7 +759,7 @@ class MoviesModProvider(private val prefs: SharedPreferences? = null) : MainAPI(
         if (all.isNotEmpty()) {
             Log.i(TAG, "resolve: ${all.size} sid links (no labels)")
             val out = ArrayList<Cand>()
-            for (s in all) out.addAll(chainToMirrors(s, serverLabel))
+            for (s in all.take(4)) out.addAll(chainToMirrors(s, serverLabel, serverHint))
             if (out.isNotEmpty()) return out.distinctBy { it.url }
         }
 
@@ -732,7 +771,7 @@ class MoviesModProvider(private val prefs: SharedPreferences? = null) : MainAPI(
             body.contains("lp-s1-form") || body.contains("timed-content")
         ) {
             Log.i(TAG, "resolve: form page -> chain from ${finalUrl.take(80)}")
-            return chainToMirrors(finalUrl, serverLabel)
+            return chainToMirrors(finalUrl, serverLabel, serverHint)
         }
 
         Log.i(TAG, "resolve: no route in ${archive.take(80)} (${body.length} بايت)")
@@ -740,14 +779,18 @@ class MoviesModProvider(private val prefs: SharedPreferences? = null) : MainAPI(
     }
 
     /** سلسلة `?sid=` واحدة حتى مرايا الملفّ. */
-    private suspend fun chainToMirrors(sidUrl: String, label: String?): List<Cand> {
+    private suspend fun chainToMirrors(
+        sidUrl: String,
+        label: String?,
+        hint: String? = null,
+    ): List<Cand> {
         val fileUrl = followChain(sidUrl)
         if (fileUrl == null) {
             Log.i(TAG, "resolve: followChain returned null for ${sidUrl.take(70)}")
             return emptyList()
         }
-        Log.i(TAG, "resolve: got fileUrl=${fileUrl.take(80)}")
-        return mirrorsOf(fileUrl, label)
+        Log.i(TAG, "resolve: got fileUrl=${fileUrl.take(80)} hint=$hint")
+        return mirrorsOf(fileUrl, label, hint)
     }
 
     /**
@@ -776,6 +819,92 @@ class MoviesModProvider(private val prefs: SharedPreferences? = null) : MainAPI(
             }
         Regex("https?://[^\"'\\s<>]+/(download|dl|getfile)/[^\"'\\s<>]+").find(b)?.let {
             return listOf(Cand(it.value, "Direct", qualityOf(it.value), null, null, head))
+        }
+        return null
+    }
+
+    /**
+     * اسم السيرفر من نصّ رابط الأرشيف، أو `null` إن كان النصّ رقم حلقة/دفعة.
+     * `✅ Fast Server 1 (G-Drive)` → `Fast Server 1 (G-Drive)` (الرمز الأمامي يُزال).
+     */
+    private fun serverHintOf(label: String?): String? {
+        val l = label?.let { stripTags(it) }?.trim().orEmpty()
+        if (l.isBlank()) return null
+        if (l.contains("batch", true) || l.contains("comment", true)) return null
+        if (epFromText(l) != null) return null
+        return l.replace(Regex("^[^\\p{L}\\p{N}]+"), "").trim().ifBlank { null }
+    }
+
+    /**
+     * اسم الملفّ كما يعرضه `driveseed`: سطر `Name : Dutton.Ranch.S01E05….mkv`.
+     * يُستعمل اسمًا للرابط، فيطابق ما يُنزَّل فعلًا.
+     */
+    private fun fileNameOf(html: String): String? {
+        // الاسم قد يحوي مسافات (`Dutton Ranch S01E03 Act Of…`)، فيُقرأ حتى `<`
+        // لا حتى أوّل فراغ. والسطر في الصفحة: `<li …>Name : <الاسم></li>`.
+        Regex("Name\\s*:\\s*([^<\\r\\n]{3,240})").find(html)
+            ?.groupValues?.get(1)?.let { return unescapeText(it).trim().ifBlank { null } }
+        return Regex("Name\\s*:\\s*([^\\s<]{3,240})")
+            .find(html.replace(Regex("<[^>]+>"), " "))
+            ?.groupValues?.get(1)
+            ?.let { unescapeText(it).trim() }
+            ?.ifBlank { null }
+    }
+
+    /**
+     * اسم الملفّ للعرض: بلا امتداد وبلا ذيل الموقع.
+     * `Dutton.Ranch.S01E05.720p.Hindi.English.Esubs.MoviesMod.army.mkv`
+     * → `Dutton.Ranch.S01E05.720p.Hindi.English.Esubs`.
+     */
+    private fun displayName(raw: String): String {
+        val t = raw.trim()
+        var n = t.substringBeforeLast('.', t)
+        n = n.replace(Regex("(?i)\\.?MoviesMod(\\.[A-Za-z0-9]+)*$"), "")
+        n = n.replace(Regex("(?i)\\.?(army|meme|com)$"), "")
+        return n.trim().ifBlank { t }
+    }
+
+    /** يضمّ اسم السيرفر من الأرشيف إلى اسم زرّ الملفّ: `Cloud Download · G-Drive`. */
+    private fun combineServer(server: String, hint: String?): String {
+        val h = hint?.trim().orEmpty()
+        if (h.isBlank()) return server
+        if (server.contains(h, true)) return server
+        return "$server · $h"
+    }
+
+    /**
+     * GET بنصّ الاستجابة وعنوانها النهائي، مع إعادة محاولة على 429/5xx.
+     *
+     * ★ قِيس أن `episodes.modpro.blog` يردّ **429** إذا طُلب منه أكثر من ٣
+     * صفحاتٍ في اللحظة نفسها (٨ أرشيفات متوازية ⇒ نصفها 429 وجسمها 8 KB بلا
+     * روابط) — وهذا سبب «حلقات لا تظهر روابطها» في المسلسلات ذات المواسم
+     * الكثيرة. الانتظار التصاعدي يعيدها سليمة.
+     */
+    private suspend fun getText(
+        url: String,
+        referer: String? = null,
+        tries: Int = 3,
+    ): Pair<String, String>? {
+        var wait = 800L
+        for (i in 1..tries) {
+            try {
+                val r = app.get(url, headers = head, referer = referer, allowRedirects = true)
+                if (r.isSuccessful) return r.text to r.url.toString()
+                val code = r.code
+                if (code == 429 || code >= 500) {
+                    Log.i(TAG, "getText HTTP $code try$i ${url.take(60)}")
+                    if (i < tries) {
+                        delay(wait)
+                        wait *= 2
+                        continue
+                    }
+                }
+                return null
+            } catch (e: Exception) {
+                if (i == tries) return null
+                delay(wait)
+                wait *= 2
+            }
         }
         return null
     }
@@ -1316,58 +1445,117 @@ class MoviesModProvider(private val prefs: SharedPreferences? = null) : MainAPI(
      * هنا: تُتبَع الانتقالات، ثمّ إن كانت الصفحة قائمةً تُختار الحلقة المطلوبة
      * من `serverLabel` (SxxExx) وتُقرأ صفحتها، ثمّ تُستخرج المرايا.
      */
-    private suspend fun mirrorsOf(fileUrl: String, serverLabel: String?): List<Cand> {
-        val quality = qualityOf(serverLabel ?: fileUrl)
-        // الاسم المعروض: رقم الحلقة إن وُجد (`S01E05`)، وإلا عنوان الجودة منظّفًا.
-        val note = serverLabel?.let { label ->
+    private suspend fun mirrorsOf(
+        fileUrl: String,
+        serverLabel: String?,
+        serverHint: String? = null,
+    ): List<Cand> {
+        var quality = qualityOf(serverLabel ?: fileUrl)
+        // «كل الحلقات» تعني: لا تُصفَّ الملفّات برقم حلقة (العنوان يحمل
+        // `E01-45` فيُقرأ خطأً حلقةً واحدة).
+        val wantEp = if (serverLabel?.contains("كل الحلقات", true) == true) {
+            null
+        } else {
+            epFromText(serverLabel ?: "")
+        }
+        val baseNote = serverLabel?.let { label ->
             Regex("S\\d{1,2}E\\d{1,3}", RegexOption.IGNORE_CASE).find(label)?.value
                 ?: cleanTitle(label).ifBlank { null }
         }
-        val cands = ArrayList<Cand>(8)
+        val cands = ArrayList<Cand>(12)
         val seen = HashSet<String>()
+        val gatedNotes = HashSet<String>()
 
-        fun add(rawUrl: String, server: String, referer: String?) {
+        fun add(rawUrl: String, server: String, referer: String?, note: String?) {
             val u = unescapeText(rawUrl).replace(RE_WS, "").trimEnd('.', ',', ')', ';')
             if (u.isBlank() || !seen.add(u)) return
-            // رقم الحلقة من الرابط نفسه أولًا: في «كل الحلقات» تُجمع ٩ ملفّات
-            // بعنوان جودةٍ واحد، فلولا هذا لتطابقت أسماؤها كلها. واسم الملفّ
-            // على `r2.dev` يحمل `S01E05` دائمًا.
+            // رقم الحلقة من الرابط أولًا (اسم ملفّ `r2.dev` يحمله دائمًا)، ثم
+            // اسم الملفّ الكامل، ثم عنوان الجودة. واسم الملفّ هو ما يُنزَّل
+            // فعلًا فيطابق «اسم التحميل» الذي يطلبه المستخدم.
             val epMark = Regex("S\\d{1,2}E\\d{1,3}", RegexOption.IGNORE_CASE).find(u)?.value?.uppercase()
-            cands.add(Cand(u, server, quality, epMark ?: note, referer, head))
+            cands.add(Cand(u, combineServer(server, serverHint), quality, note ?: epMark ?: baseNote, referer, head))
         }
 
-        fun collect(html: String, pageUrl: String) {
-            // `pub-….r2.dev` هو الرابط الحيّ المقيس (‎200 video/matroska‎).
-            for (m in RE_R2_ANY.findAll(html)) add(m.value, "Cloud", null)
-            for (m in RE_VG_ANY.findAll(html)) {
-                val u = unescapeText(m.value)
-                add(u, if (u.contains("cdn.")) "CDN" else "Fast", pageUrl)
+        /**
+         * جمع روابط الوسائط من صفحة، بأسماء **أزرارها الحقيقية**: صفحة
+         * `/file/` تسمّي كل خادم باسمه — «Cloud Download» (‎r2.dev‎)،
+         * «Instant Download V2» (‎instant.video-gen‎)، «Instant Download»
+         * (‎cdn.video-gen‎)، «Direct Links»/«Server 1/2» (‎workers.dev‎).
+         * اختراع اسمٍ بديل («Cloud»/«Mirror») كان يجعل القائمة لا تشبه الموقع.
+         */
+        fun collect(html: String, pageUrl: String, note: String?): Int {
+            val b = html.replace("\\/", "/")
+            var found = 0
+            for (a in RE_ANCHOR.findAll(b)) {
+                val href = RE_HREF.find(a.groupValues[1])?.groupValues?.get(1)
+                    ?.let { unescapeText(it) }?.replace(RE_WS, "") ?: continue
+                if (href.isBlank()) continue
+                val text = stripTags(a.groupValues[2]).trim()
+                when {
+                    href.contains(".r2.dev") -> {
+                        add(href, text.ifBlank { "Cloud Download" }, null, note)
+                        found++
+                    }
+                    href.contains("video-gen.xyz") -> {
+                        add(
+                            href,
+                            text.ifBlank { if (href.contains("cdn.")) "Instant Download" else "Instant Download V2" },
+                            pageUrl,
+                            note,
+                        )
+                        found++
+                    }
+                    href.contains("workers.dev") -> {
+                        add(href, text.ifBlank { "Mirror" }, pageUrl, note)
+                        found++
+                    }
+                }
             }
-            // مرايا `/wfile/` و`/zfile/` تُصدر رابط `workers.dev` بلا امتداد.
-            for (m in RE_WORKER.findAll(html)) add(m.groupValues[1], "Mirror", pageUrl)
+            if (found == 0) {
+                for (m in RE_R2_ANY.findAll(b)) {
+                    add(m.value, "Cloud Download", null, note)
+                    found++
+                }
+                for (m in RE_VG_ANY.findAll(b)) {
+                    add(m.value, if (m.value.contains("cdn.")) "Instant Download" else "Instant Download V2", pageUrl, note)
+                    found++
+                }
+            }
+            return found
         }
 
-        // صفحات `/wfile/` و`/zfile/` تحمل المرايا حين لا يحملها `/file/`:
-        // الملفّات الكبيرة محجوبة بتسجيل الدخول — `/file/` يعرض «Login to
-        // download» وحدها، و`/zfile/` يعرض «Cloud Resume Download».
+        /**
+         * ملفّ محجوب بتسجيل الدخول (أرشيف `zip` على «G-Drive»): لا رابط وسائط
+         * في صفحته — `generate` يردّ «Session Not Found Please Login!» (قِيس).
+         * يُعرض رابط الصفحة نفسه بوسم ZIP صريح، فلا يختفي الموسم كلّه ولا
+         * يبدو الرابط صالحًا للبثّ.
+         */
+        fun addGated(pageUrl: String, html: String, note: String?) {
+            val file = fileNameOf(html)?.let { displayName(it) } ?: note ?: "ZIP"
+            if (gatedNotes.size >= 4 || !gatedNotes.add(file)) return
+            val gatedNote = file + " · ZIP — يتطلب تسجيل دخول"
+            add(pageUrl, serverHint?.takeIf { it.isNotBlank() } ?: "G-Drive", pageUrl, gatedNote)
+        }
+
+        // صفحات `/wfile/` و`/zfile/` تحمل المرايا حين لا يحملها `/file/`.
         suspend fun extras(pageUrl: String) {
             val id = pageUrl.substringAfter("/file/", "").substringBefore("?").substringBefore("/")
             if (id.isBlank()) return
             val targets = listOf(
-                "https://driveseed.org/wfile/$id" to "Direct",
+                "https://driveseed.org/wfile/$id" to "Direct Links",
                 "https://driveseed.org/wfile/$id?type=1" to "Server 1",
                 "https://driveseed.org/wfile/$id?type=2" to "Server 2",
-                "https://driveseed.org/zfile/$id" to "Cloud",
+                "https://driveseed.org/zfile/$id" to "Cloud Resume Download",
             )
             for ((u, server) in targets) {
-                val r = try {
-                    app.get(u, headers = head, referer = pageUrl)
-                } catch (e: Exception) {
-                    continue
+                val body = getText(u, referer = pageUrl)?.first ?: continue
+                for (a in RE_ANCHOR.findAll(body.replace("\\/", "/"))) {
+                    val href = RE_HREF.find(a.groupValues[1])?.groupValues?.get(1)
+                        ?.let { unescapeText(it) }?.replace(RE_WS, "") ?: continue
+                    if (!href.contains("workers.dev") && !href.contains(".r2.dev")) continue
+                    val text = stripTags(a.groupValues[2]).trim()
+                    add(href, text.ifBlank { server }, u, null)
                 }
-                if (!r.isSuccessful) continue
-                for (m in RE_WORKER.findAll(r.text)) add(m.groupValues[1], server, u)
-                for (m in RE_R2_ANY.findAll(r.text)) add(m.value, server, u)
             }
         }
 
@@ -1375,49 +1563,55 @@ class MoviesModProvider(private val prefs: SharedPreferences? = null) : MainAPI(
             var current = fileUrl
             var referer: String? = null
             for (hop in 0..8) {
-                val r = app.get(current, headers = head, referer = referer)
-                if (!r.isSuccessful) break
-                val body = r.text
-                val pageUrl = r.url.toString()
+                val got = getText(current, referer = referer) ?: break
+                val body = got.first
+                val pageUrl = got.second
                 referer = pageUrl
-                collect(body, pageUrl)
 
-                // `/file/`: لا مرايا ظاهرة؟ اقرأ صفحات المرايا البديلة.
-                if (cands.isEmpty() && pageUrl.contains("/file/")) extras(pageUrl)
-                if (cands.isNotEmpty()) break
+                val fileNote = fileNameOf(body)?.let { displayName(it) }
+                // الجودة من اسم الملفّ أدقّ من عنوان الصفّ: صفحة الفيلم قد تجمع
+                // ‎480p/720p/1080p‎ تحت عنوانٍ واحد، فيُقرأ أعلاها للجميع.
+                fileNote?.let { q -> qualityOf(q).takeIf { it != Qualities.Unknown.value }?.let { quality = it } }
+                val note = fileNote ?: baseNote
+                val found = collect(body, pageUrl, note)
+
+                if (pageUrl.contains("/file/")) {
+                    if (found == 0) {
+                        extras(pageUrl)
+                        if (cands.isEmpty()) addGated(pageUrl, body, note)
+                    }
+                    if (cands.isNotEmpty()) break
+                }
 
                 // صفحة `/list/` = الموسم كلّه: اقرأ صفحات `/file/`.
                 // - حلقةٌ مطلوبة: الملفّ المطابق وحده.
-                // - «كل الحلقات» (بلا رقم): **كل** الملفّات، فتُجمع مرايا الموسم.
+                // - «كل الحلقات»: **كل** الملفّات، فتُجمع مرايا الموسم.
                 val files = fileLinksOf(body)
                 if (files.isNotEmpty()) {
-                    val wantEp = epFromText(serverLabel ?: "")
                     val picked = if (wantEp != null) {
                         files.filter { (_, t) -> epFromText(t) == wantEp }.ifEmpty { files }
-                    } else files
+                    } else {
+                        files
+                    }
                     val cap = if (wantEp != null) 3 else 20
                     Log.i(TAG, "mirrorsOf /list: files=${files.size} wantEp=$wantEp picked=${picked.size}")
-                    // الطلبات متوازية (٩ صفحات ≈ ثانية) والجمع تسلسليّ لأن
-                    // `cands`/`seen` حالتان مشتركتان.
-                    val subs = coroutineScope {
-                        picked.take(cap).map { (href, _) ->
-                            async(Dispatchers.IO) {
-                                val fu = absUrl(pageUrl, href)
-                                try {
-                                    val sub = app.get(fu, headers = head, referer = pageUrl)
-                                    if (sub.isSuccessful) fu to sub.text else null
-                                } catch (e: Exception) {
-                                    null
+                    // ٥ صفحات في الوقت الواحد: أكثر منها يُغري بردّ 429.
+                    val subs = ArrayList<Pair<String, String>>(picked.size)
+                    for (chunk in picked.take(cap).chunked(5)) {
+                        subs += coroutineScope {
+                            chunk.map { (href, _) ->
+                                async(Dispatchers.IO) {
+                                    val fu = absUrl(pageUrl, href)
+                                    getText(fu, referer = pageUrl)?.let { fu to it.first }
                                 }
-                            }
-                        }.awaitAll().filterNotNull()
+                            }.awaitAll().filterNotNull()
+                        }
                     }
                     for ((fu, text) in subs) {
-                        collect(text, fu)
+                        val fn = fileNameOf(text)?.let { displayName(it) }
+                        val ok = collect(text, fu, fn) > 0
+                        if (!ok && fu.contains("/file/")) addGated(fu, text, fn)
                         if (wantEp != null && cands.isNotEmpty()) break
-                    }
-                    if (cands.isEmpty()) {
-                        for ((fu, _) in subs.take(2)) if (fu.contains("/file/")) extras(fu)
                     }
                     if (cands.isNotEmpty()) break
                 }
@@ -1431,7 +1625,8 @@ class MoviesModProvider(private val prefs: SharedPreferences? = null) : MainAPI(
             Log.i(TAG, "mirrorsOf FAIL ${e::class.simpleName} ${e.message}")
         }
 
-        Log.i(TAG, "mirrorsOf ${fileUrl.takeLast(34)}: cands=${cands.size}")
+        Log.i(TAG, "mirrorsOf ${fileUrl.takeLast(34)}: cands=${cands.size}" +
+            " servers=${cands.map { it.server }.distinct().joinToString("|").take(80)}")
         if (cands.isEmpty()) return emptyList()
 
         // حلّ 302 إلى رابط الوسائط الداخلي — والرابط الداخلي يُبَثّ بلا مُحيل.
