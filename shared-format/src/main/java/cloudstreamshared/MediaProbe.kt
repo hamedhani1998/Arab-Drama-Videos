@@ -201,13 +201,14 @@ object MediaProbe {
      * ورابط تحميل ملفٍّ كامل بجوار بثٍّ مباشر لا يفترقان بالعين إلا بهذا
      * الوسم — والاثنان يُفتحان في المشغّل نفسه. المستخدم طلب التمييز صريحًا.
      *
-     * ولماذا كلمةٌ عربية لا أيقونة وحدها: الاسم يظهر في قائمة نصّية، والرمز
-     * وحده قد لا يُقرأ (أو يُقرأ صندوقًا فارغًا في بعض الخطوط)، فالمعنى في
-     * الكلمة والرمز زينةٌ لها.
+     * ولماذا كلمةٌ لا أيقونة وحدها: الاسم يظهر في قائمة نصّية، والرمز وحده
+     * قد لا يُقرأ (أو يُقرأ صندوقًا فارغًا في بعض الخطوط)، فالمعنى في الكلمة
+     * والرمز زينةٌ لها. والكلمة **إنجليزية** بطلب المستخدم: القائمة كلها
+     * أسماء سيرفرات لاتينية، ووسمٌ عربي وسطها يقطع القراءة.
      */
     enum class Use(val mark: String) {
-        WATCH("▶ مشاهدة"),
-        DOWNLOAD("⬇ تحميل"),
+        WATCH("▶ WATCH"),
+        DOWNLOAD("⬇ DOWNLOAD"),
     }
 
     /**
@@ -234,7 +235,7 @@ object MediaProbe {
     ): String {
         val parts = ArrayList<String>(6)
         use?.let { parts.add(it.mark) }
-        parts.add(server.ifBlank { "تشغيل" })
+        parts.add(server.ifBlank { "Play" })
         quality?.takeIf { it.isNotBlank() }?.let { parts.add(it) }
         note?.takeIf { it.isNotBlank() }?.let { parts.add(it) }
         human(bytes)?.let { parts.add(it) }

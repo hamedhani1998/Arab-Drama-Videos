@@ -391,14 +391,16 @@ class MoviesModProvider(private val prefs: SharedPreferences? = null) : MainAPI(
         data class Scan(val eps: List<Pair<String, Row>>, val batches: List<Pair<String, Row>>)
 
         suspend fun scan(row: Row): Scan = try {
-            val r = app.get(row.href, headers = head)
-            if (!r.isSuccessful) {
-                Log.i(TAG, "archive HTTP ${r.code} ${row.href.substringAfterLast('/')}")
+            // `getText` لا `app.get`: يردّ 429 على الدفعات المتوازية، وهو
+            // يُعيد المحاولة بتراجعٍ أُسّيّ بدل إسقاط أرشيفٍ كامل.
+            val got = getText(row.href)
+            if (got == null) {
+                Log.i(TAG, "archive FAIL ${row.href.substringAfterLast('/')}")
                 Scan(emptyList(), emptyList())
             } else {
                 val eps = ArrayList<Pair<String, Row>>(16)
                 val batches = ArrayList<Pair<String, Row>>(2)
-                for (a in RE_SID.findAll(r.text)) {
+                for (a in RE_SID.findAll(got.first)) {
                     val sid = unescapeText(a.groupValues[1]).replace(RE_WS, "")
                     val label = stripTags(a.groupValues[2])
                     if (label.contains("batch", true) || label.contains("all episodes", true)) {
@@ -418,14 +420,16 @@ class MoviesModProvider(private val prefs: SharedPreferences? = null) : MainAPI(
             Scan(emptyList(), emptyList())
         }
 
-        // ★ ٣ أرشيفاتٍ في الوقت الواحد لا كلّها: قِيس أن ٨ طلبات متوازية على
-        // `episodes.modpro.blog` تُرجع **429** لنصفها، فتبدو حلقاتها بلا روابط.
+        // ★ ٥ أرشيفاتٍ في الوقت الواحد لا ٣: قِيس أن ٨ طلبات متوازية على
+        // `episodes.modpro.blog` تُرجع **429**، لكن `getText` صار يُعيد
+        // المحاولة، فـ٥ آمنة وأسرع بمرّتين لمسلسلٍ بـ١٨ أرشيفًا (قائمة
+        // الحلقات نفسها كانت تتأخّر ثوانيَ طويلة قبل أن تظهر).
         val fetched = ArrayList<Scan>(archives.size)
-        for (chunk in archives.chunked(3)) {
+        for (chunk in archives.chunked(5)) {
             fetched += coroutineScope {
                 chunk.map { row -> async(Dispatchers.IO) { scan(row) } }.awaitAll()
             }
-            if (archives.size > 3) delay(400)
+            if (archives.size > 5) delay(200)
         }
 
         // مفتاح الحلقة → كل جوداتها (لا الأعلى فقط). `LinkedHashMap` ليبقى
@@ -565,17 +569,27 @@ class MoviesModProvider(private val prefs: SharedPreferences? = null) : MainAPI(
                 }
             }
 
-            // ٣ مدخلاتٍ في الوقت الواحد: كلّ مدخلةٍ سلسلة تحويلات كاملة على
-            // `en.thenaukriadda.in`، وأكثر من ٣ متوازية يُغري ردّ 429 فتختفي
-            // حلقةٌ لها روابط.
+            // ٦ مدخلاتٍ في الوقت الواحد: كلّ مدخلةٍ سلسلة تحويلات كاملة على
+            // `en.thenaukriadda.in` (مضيفٌ آخر غير `episodes.modpro.blog`
+            // الذي يردّ 429 على ٨ طلبات). ٣ كانت تُطيل الانتظار دَورَين كاملَين
+            // لمسلسلٍ بأربع جودات، والمستخدم يريد القائمة فورًا.
             val resolved = ArrayList<Cand>(entries.size * 2)
-            for (chunk in entries.chunked(3)) {
+            for (chunk in entries.chunked(6)) {
                 resolved += coroutineScope {
                     chunk.map { e -> async(Dispatchers.IO) { one(e) } }.awaitAll().flatten()
                 }
-                if (entries.size > 3) delay(300)
+                if (entries.size > 6) delay(150)
             }
-            val deduped = resolved.distinctBy { it.url }
+            // التكرار يُقاس بالزوج (الرابط، السيرفر) لا بالرابط وحده: موقع
+            // الأفلام يعطي «Fast Server (G-Drive)» و«Google Drive (Server 2)»
+            // **الرابط نفسه**، وحذف أحدهما بالرابط كان يُخفي سيرفرًا كاملًا
+            // من القائمة. وإعداد «إظهار البدائل» حين يُطفأ يعيد الحذف بالرابط
+            // (ملفٌّ واحد بمدخلةٍ واحدة) — ولا يُخفي جودةً أبدًا.
+            val deduped = if (showAlt) {
+                resolved.distinctBy { it.url + "|" + it.server }
+            } else {
+                resolved.distinctBy { it.url }
+            }
             if (deduped.isEmpty()) {
                 Log.i(TAG, "loadLinks: resolved nothing from ${entries.size} entries (dns fixed)")
                 return false
@@ -594,7 +608,10 @@ class MoviesModProvider(private val prefs: SharedPreferences? = null) : MainAPI(
                             c.certain = false
                             return@async c
                         }
-                        val r = MediaProbe.probe(c.url, c.referer, c.headers)
+                        // ٣٫٥ث سقف الفحص: الفحص يُنتظر قبل عرض القائمة، ومهلةٌ
+                        // طويلة على مرآةٍ بطيئة تُؤخّر كل الروابط لا واحدًا.
+                        // والرابط الذي لا يُحكم عليه يُبقى (سياسة «لا نعرف»).
+                        val r = MediaProbe.probe(c.url, c.referer, c.headers, timeoutMs = 3500)
                         c.bytes = c.bytes ?: r.totalBytes
                         c.ttfb = if (r.alive) r.ttfbMs else Long.MAX_VALUE - 1
                         c.alive = r.alive
@@ -612,7 +629,10 @@ class MoviesModProvider(private val prefs: SharedPreferences? = null) : MainAPI(
                 else -> pool.sortedBy { it.rank() }
             }
 
-            val take = if (showAlt) ordered else ordered.take(1)
+            // كل المرشّحين يُعرضون دائمًا — لا `take(1)`. إعداد «أفضل رابط
+            // واحد» كان يُخفي الجودات وبقيّة السيرفرات، والمطلوب صراحةً:
+            // كل جودة متاحة بكل سيرفراتها.
+            val take = ordered
             var emitted = 0
             for (c in take) {
                 // ★ الإرسال محاطٌ بـ`try` **داخل** الحلقة لا حولها كلّها: قِيس أن
@@ -759,10 +779,10 @@ class MoviesModProvider(private val prefs: SharedPreferences? = null) : MainAPI(
             return chainToMirrors(pick.first, serverLabel, null)
         }
 
-        // 4-ب) نصوص أسماء سيرفرات ⇒ تُحلّ كلّها (سقف ٤) ويُحمل اسم كلٍّ منها
+        // 4-ب) نصوص أسماء سيرفرات ⇒ تُحلّ كلّها (سقف ٦) ويُحمل اسم كلٍّ منها
         //      إلى اسم الرابط المعروض، فيرى المستخدم «G-Drive» كما في الموقع.
         if (pairs.isNotEmpty()) {
-            val servers = pairs.take(4)
+            val servers = pairs.take(6)
             Log.i(TAG, "resolve: servers=${servers.joinToString(" | ") { it.second.take(30) }}")
             val out = coroutineScope {
                 servers.map { (sid, name) ->
@@ -771,7 +791,10 @@ class MoviesModProvider(private val prefs: SharedPreferences? = null) : MainAPI(
                     }
                 }.awaitAll().flatten()
             }
-            if (out.isNotEmpty()) return out.distinctBy { it.url }
+            // الحذف بالزوج (رابط، سيرفر): «Fast Server (G-Drive)» و«Google
+            // Drive (Server 2)» قد يشيران إلى الملفّ نفسه، وحذف أحدهما كان
+            // يُخفي سيرفرًا من القائمة.
+            if (out.isNotEmpty()) return out.distinctBy { it.url + "|" + it.server }
         }
 
         // 5) الصفحة نفسها صارت `?sid=` بعد التحويل.
@@ -788,8 +811,8 @@ class MoviesModProvider(private val prefs: SharedPreferences? = null) : MainAPI(
         if (all.isNotEmpty()) {
             Log.i(TAG, "resolve: ${all.size} sid links (no labels)")
             val out = ArrayList<Cand>()
-            for (s in all.take(4)) out.addAll(chainToMirrors(s, serverLabel, serverHint))
-            if (out.isNotEmpty()) return out.distinctBy { it.url }
+            for (s in all.take(6)) out.addAll(chainToMirrors(s, serverLabel, serverHint))
+            if (out.isNotEmpty()) return out.distinctBy { it.url + "|" + it.server }
         }
 
         // 7) ملفّ وسائط مباشر في الصفحة.
@@ -1503,14 +1526,17 @@ class MoviesModProvider(private val prefs: SharedPreferences? = null) : MainAPI(
             bytes: Long? = null,
         ) {
             val u = unescapeText(rawUrl).replace(RE_WS, "").trimEnd('.', ',', ')', ';')
-            if (u.isBlank() || !seen.add(u)) return
+            // المفتاح (الرابط + اسم السيرفر): سيرفران مختلفان قد يعطيان الملفّ
+            // نفسه، وحذف الثاني بالرابط وحده يُخفي سيرفرًا من القائمة.
+            val full = combineServer(server, serverHint)
+            if (u.isBlank() || !seen.add("$u|$full")) return
             // رقم الحلقة من الرابط أولًا (اسم ملفّ `r2.dev` يحمله دائمًا)، ثم
             // اسم الملفّ الكامل، ثم عنوان الجودة. واسم الملفّ هو ما يُنزَّل
             // فعلًا فيطابق «اسم التحميل» الذي يطلبه المستخدم.
             val epMark = Regex("S\\d{1,2}E\\d{1,3}", RegexOption.IGNORE_CASE).find(u)?.value?.uppercase()
             cands.add(
                 Cand(
-                    u, combineServer(server, serverHint), quality,
+                    u, full, quality,
                     note ?: epMark ?: baseNote, referer, head,
                     bytes = bytes, gated = gated,
                 )
@@ -1574,7 +1600,7 @@ class MoviesModProvider(private val prefs: SharedPreferences? = null) : MainAPI(
         fun addGated(pageUrl: String, html: String, note: String?) {
             val file = fileNameOf(html)?.let { displayName(it) } ?: note ?: "ZIP"
             if (gatedNotes.size >= 4 || !gatedNotes.add(file)) return
-            val gatedNote = file + " · ZIP — يتطلب تسجيل دخول"
+            val gatedNote = file + " · ZIP · login required"
             add(
                 pageUrl,
                 serverHint?.takeIf { it.isNotBlank() } ?: "G-Drive",
@@ -1586,6 +1612,8 @@ class MoviesModProvider(private val prefs: SharedPreferences? = null) : MainAPI(
         }
 
         // صفحات `/wfile/` و`/zfile/` تحمل المرايا حين لا يحملها `/file/`.
+        // ★ الطلبات الأربعة متوازية: تسلسلها كان يُضيف ٤ أضعاف زمن الاستجابة
+        // لكل ملفٍّ محجوب (والموسم كلّه ملفّات محجوبة).
         suspend fun extras(pageUrl: String) {
             val id = pageUrl.substringAfter("/file/", "").substringBefore("?").substringBefore("/")
             if (id.isBlank()) return
@@ -1595,8 +1623,17 @@ class MoviesModProvider(private val prefs: SharedPreferences? = null) : MainAPI(
                 "https://driveseed.org/wfile/$id?type=2" to "Server 2",
                 "https://driveseed.org/zfile/$id" to "Cloud Resume Download",
             )
-            for ((u, server) in targets) {
-                val body = getText(u, referer = pageUrl)?.first ?: continue
+            val bodies = coroutineScope {
+                targets.map { (u, server) ->
+                    async(Dispatchers.IO) {
+                        val body = getText(u, referer = pageUrl)?.first ?: return@async null
+                        u to (server to body)
+                    }
+                }.awaitAll().filterNotNull()
+            }
+            for ((u, pair) in bodies) {
+                val server = pair.first
+                val body = pair.second
                 for (a in RE_ANCHOR.findAll(body.replace("\\/", "/"))) {
                     val href = RE_HREF.find(a.groupValues[1])?.groupValues?.get(1)
                         ?.let { unescapeText(it) }?.replace(RE_WS, "") ?: continue
@@ -1643,9 +1680,10 @@ class MoviesModProvider(private val prefs: SharedPreferences? = null) : MainAPI(
                     }
                     val cap = if (wantEp != null) 3 else 20
                     Log.i(TAG, "mirrorsOf /list: files=${files.size} wantEp=$wantEp picked=${picked.size}")
-                    // ٥ صفحات في الوقت الواحد: أكثر منها يُغري بردّ 429.
+                    // ٨ صفحات في الوقت الواحد: صفحة الموسم قد تحمل ٢٠ ملفًّا،
+                    // و٥ في الدفعة تُطيل الانتظار أربع دفعات كاملة.
                     val subs = ArrayList<Pair<String, String>>(picked.size)
-                    for (chunk in picked.take(cap).chunked(5)) {
+                    for (chunk in picked.take(cap).chunked(8)) {
                         subs += coroutineScope {
                             chunk.map { (href, _) ->
                                 async(Dispatchers.IO) {
