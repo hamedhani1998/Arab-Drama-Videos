@@ -499,6 +499,12 @@ class MoviesModProvider(private val prefs: SharedPreferences? = null) : MainAPI(
          * (رابطها بلا امتدادٍ إطلاقًا).
          */
         var mime: String? = null,
+        /**
+         * رابط **صفحة** محجوبة بتسجيل الدخول (ZIP على «G-Drive») لا رابط وسائط:
+         * لا يُفحص بـHTTP (فحصه يقيس صفحة HTML فيظهر حجمها ‎18 KB‎ مكان حجم
+         * الأرشيف)، ويُعرض بوسم التحميل وحده.
+         */
+        var gated: Boolean = false,
     ) {
         /** رافعة الترتيب: الحي الأسرع أوّلًا، وما لا حكم له آخرًا. */
         fun rank(): Long = if (alive) ttfb else Long.MAX_VALUE - 1
@@ -565,6 +571,12 @@ class MoviesModProvider(private val prefs: SharedPreferences? = null) : MainAPI(
             val probed = coroutineScope {
                 deduped.map { c ->
                     async(Dispatchers.IO) {
+                        // صفحة محجوبة: لا تُفحص (فحصها يقيس حجم HTML لا حجم الأرشيف).
+                        if (c.gated) {
+                            c.alive = true
+                            c.certain = false
+                            return@async c
+                        }
                         val r = MediaProbe.probe(c.url, c.referer, c.headers)
                         c.bytes = c.bytes ?: r.totalBytes
                         c.ttfb = if (r.alive) r.ttfbMs else Long.MAX_VALUE - 1
@@ -849,6 +861,24 @@ class MoviesModProvider(private val prefs: SharedPreferences? = null) : MainAPI(
             ?.groupValues?.get(1)
             ?.let { unescapeText(it).trim() }
             ?.ifBlank { null }
+    }
+
+    /**
+     * حجم الملفّ من صفحة `driveseed`: سطر `Size : 6.12GB`.
+     * يلزم لروابط الصفحات المحجوبة، إذ لا يُفحص رابطها (فحصه يقيس صفحة HTML).
+     */
+    private fun sizeOf(html: String): Long? {
+        val m = Regex("Size\\s*:\\s*([0-9]+(?:\\.[0-9]+)?)\\s*([KMGT]?)B", RegexOption.IGNORE_CASE)
+            .find(html.replace(Regex("<[^>]+>"), " ")) ?: return null
+        val v = m.groupValues[1].toDoubleOrNull() ?: return null
+        val mul = when (m.groupValues[2].uppercase()) {
+            "T" -> 1024.0 * 1024 * 1024 * 1024
+            "G" -> 1024.0 * 1024 * 1024
+            "M" -> 1024.0 * 1024
+            "K" -> 1024.0
+            else -> 1.0
+        }
+        return (v * mul).toLong()
     }
 
     /**
@@ -1466,14 +1496,27 @@ class MoviesModProvider(private val prefs: SharedPreferences? = null) : MainAPI(
         val seen = HashSet<String>()
         val gatedNotes = HashSet<String>()
 
-        fun add(rawUrl: String, server: String, referer: String?, note: String?) {
+        fun add(
+            rawUrl: String,
+            server: String,
+            referer: String?,
+            note: String?,
+            gated: Boolean = false,
+            bytes: Long? = null,
+        ) {
             val u = unescapeText(rawUrl).replace(RE_WS, "").trimEnd('.', ',', ')', ';')
             if (u.isBlank() || !seen.add(u)) return
             // رقم الحلقة من الرابط أولًا (اسم ملفّ `r2.dev` يحمله دائمًا)، ثم
             // اسم الملفّ الكامل، ثم عنوان الجودة. واسم الملفّ هو ما يُنزَّل
             // فعلًا فيطابق «اسم التحميل» الذي يطلبه المستخدم.
             val epMark = Regex("S\\d{1,2}E\\d{1,3}", RegexOption.IGNORE_CASE).find(u)?.value?.uppercase()
-            cands.add(Cand(u, combineServer(server, serverHint), quality, note ?: epMark ?: baseNote, referer, head))
+            cands.add(
+                Cand(
+                    u, combineServer(server, serverHint), quality,
+                    note ?: epMark ?: baseNote, referer, head,
+                    bytes = bytes, gated = gated,
+                )
+            )
         }
 
         /**
@@ -1534,7 +1577,14 @@ class MoviesModProvider(private val prefs: SharedPreferences? = null) : MainAPI(
             val file = fileNameOf(html)?.let { displayName(it) } ?: note ?: "ZIP"
             if (gatedNotes.size >= 4 || !gatedNotes.add(file)) return
             val gatedNote = file + " · ZIP — يتطلب تسجيل دخول"
-            add(pageUrl, serverHint?.takeIf { it.isNotBlank() } ?: "G-Drive", pageUrl, gatedNote)
+            add(
+                pageUrl,
+                serverHint?.takeIf { it.isNotBlank() } ?: "G-Drive",
+                pageUrl,
+                gatedNote,
+                gated = true,
+                bytes = sizeOf(html),
+            )
         }
 
         // صفحات `/wfile/` و`/zfile/` تحمل المرايا حين لا يحملها `/file/`.
