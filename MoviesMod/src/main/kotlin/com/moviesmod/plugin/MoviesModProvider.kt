@@ -661,15 +661,14 @@ class MoviesModProvider(private val prefs: SharedPreferences? = null) : MainAPI(
                 // `catch` الخارجي فيعود `false` ولو كان قبله ما أُرسل. الآن
                 // يسقط المرشّح وحده ويُسجَّل، وتبقى بقيّة القائمة.
                 //
-                // ولكل ملفٍّ وسائط **مدخلتان**: «مشاهدة» و«تحميل» بالرابط نفسه.
-                // الموقع لا يقدّم مشغّلًا (قِيس: صفر `iframe` وصفر `video` في
-                // صفحة العمل) فالبثّ والتنزيل كلاهما من الملفّ ذاته؛ ووسمٌ واحد
-                // كان يوهم المستخدم أنّ مشاهدة الحلقة غير متاحة. ملفّات
-                // الأرشيف (`zip`/`rar`) تحمل وسم التحميل وحده.
+                // وسمٌ واحد لكل رابط: «تحميل» لأرشيف الموسم ولروابط
+                // Google Drive (`googleusercontent`)، و«مشاهدة» لكل ما عداهما.
+                // المدخلتان بالرابط نفسه كانتا تُظهران كل سيرفر مرّتين،
+                // والمستخدم طلب فصلًا صريحًا: هذه للتحميل وتلك للمشاهدة.
                 val uses = if (downloadOnly(c)) {
                     listOf(MediaProbe.Use.DOWNLOAD)
                 } else {
-                    listOf(MediaProbe.Use.WATCH, MediaProbe.Use.DOWNLOAD)
+                    listOf(MediaProbe.Use.WATCH)
                 }
                 for (use in uses) {
                     try {
@@ -740,15 +739,18 @@ class MoviesModProvider(private val prefs: SharedPreferences? = null) : MainAPI(
         name.contains(".zip", true) || name.contains(".rar", true) || name.contains(".7z", true)
 
     /**
-     * رابطٌ **للتحميل فقط**: أرشيف (`zip`/`rar`) أو سيرفر «G-Drive».
+     * رابطٌ **للتحميل فقط**: أرشيف (`zip`/`rar`) أو رابط Google Drive
+     * (`video-downloads.googleusercontent.com`).
      *
-     * «G-Drive» على الموقع يُعرض تحت «Fast Server (G-Drive)» وهو ملفّ Google
-     * Drive كامل: يُنزَّل ولا يُبَثّ في المشغّل، ووسمه بـ«مشاهدة» كان يدفع
-     * المستخدم إلى مشغّل لا يعمل. بقيت المرايا الأخرى (‎r2/video-gen‎) تحمل
-     * الوسمين لأنها بثٌّ حقيقي.
+     * ★ المِحَكّ **الرابط** لا اسم السيرفر: «Fast Server (G-Drive)» على صفحة
+     * الأرشيف قد يُحلّ إلى `r2.dev` (ملفٌّ يُبَثّ فعلًا)، فيُوسم مشاهدةً. أما
+     * ما ينتهي على `googleusercontent.com` فهو ملفّ Google Drive كامل يُنزَّل
+     * ولا يُبَثّ — ووسمه «مشاهدة» كان يدفع المستخدم إلى مشغّلٍ لا يعمل.
      */
     private fun downloadOnly(c: Cand): Boolean =
-        isArchive(c) || c.server.contains("G-Drive", true) || c.server.contains("Gdrive", true)
+        isArchive(c) || c.url.contains("googleusercontent.com", true)
+
+    /** البقيّة كلها **مشاهدة** فقط — بطلب المستخدم. */
 
     /**
      * حلّ مدخلةٍ واحدة إلى ملفّات وسائط.
