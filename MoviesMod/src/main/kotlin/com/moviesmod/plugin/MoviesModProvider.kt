@@ -646,7 +646,7 @@ class MoviesModProvider(private val prefs: SharedPreferences? = null) : MainAPI(
                 // صفحة العمل) فالبثّ والتنزيل كلاهما من الملفّ ذاته؛ ووسمٌ واحد
                 // كان يوهم المستخدم أنّ مشاهدة الحلقة غير متاحة. ملفّات
                 // الأرشيف (`zip`/`rar`) تحمل وسم التحميل وحده.
-                val uses = if (isArchive(c)) {
+                val uses = if (downloadOnly(c)) {
                     listOf(MediaProbe.Use.DOWNLOAD)
                 } else {
                     listOf(MediaProbe.Use.WATCH, MediaProbe.Use.DOWNLOAD)
@@ -714,6 +714,21 @@ class MoviesModProvider(private val prefs: SharedPreferences? = null) : MainAPI(
         if (c.note?.contains(".zip", true) == true || c.note?.contains(".rar", true) == true) return true
         return c.mime?.let { it.contains("zip", true) || it.contains("rar", true) } == true
     }
+
+    /** اسم ملفٍّ (لا رابط) يدلّ على أرشيف موسم: `…S01.480p.Part.1.zip`. */
+    private fun isArchiveName(name: String): Boolean =
+        name.contains(".zip", true) || name.contains(".rar", true) || name.contains(".7z", true)
+
+    /**
+     * رابطٌ **للتحميل فقط**: أرشيف (`zip`/`rar`) أو سيرفر «G-Drive».
+     *
+     * «G-Drive» على الموقع يُعرض تحت «Fast Server (G-Drive)» وهو ملفّ Google
+     * Drive كامل: يُنزَّل ولا يُبَثّ في المشغّل، ووسمه بـ«مشاهدة» كان يدفع
+     * المستخدم إلى مشغّل لا يعمل. بقيت المرايا الأخرى (‎r2/video-gen‎) تحمل
+     * الوسمين لأنها بثٌّ حقيقي.
+     */
+    private fun downloadOnly(c: Cand): Boolean =
+        isArchive(c) || c.server.contains("G-Drive", true) || c.server.contains("Gdrive", true)
 
     /**
      * حلّ مدخلةٍ واحدة إلى ملفّات وسائط.
@@ -1599,7 +1614,9 @@ class MoviesModProvider(private val prefs: SharedPreferences? = null) : MainAPI(
          */
         fun addGated(pageUrl: String, html: String, note: String?) {
             val file = fileNameOf(html)?.let { displayName(it) } ?: note ?: "ZIP"
-            if (gatedNotes.size >= 4 || !gatedNotes.add(file)) return
+            // سقف ١٠ أجزاء: الموسم قد يُقسَّم عشرة أجزاء، وسقف ٤ كان يُخفي
+            // بقيّة روابط الـZIP عن المستخدم.
+            if (gatedNotes.size >= 10 || !gatedNotes.add(file)) return
             val gatedNote = file + " · ZIP · login required"
             add(
                 pageUrl,
@@ -1669,16 +1686,21 @@ class MoviesModProvider(private val prefs: SharedPreferences? = null) : MainAPI(
                 }
 
                 // صفحة `/list/` = الموسم كلّه: اقرأ صفحات `/file/`.
-                // - حلقةٌ مطلوبة: الملفّ المطابق وحده.
+                // - حلقةٌ مطلوبة: الملفّ المطابق **مع** ملفّات الأرشيف (‎zip/rar‎)
+                //   فيُرى رابط تحميل الموسم بجوار الحلقة، وهو ما طلبه المستخدم.
                 // - «كل الحلقات»: **كل** الملفّات، فتُجمع مرايا الموسم.
                 val files = fileLinksOf(body)
                 if (files.isNotEmpty()) {
                     val picked = if (wantEp != null) {
-                        files.filter { (_, t) -> epFromText(t) == wantEp }.ifEmpty { files }
+                        val epFiles = files.filter { (_, t) -> epFromText(t) == wantEp }
+                        // أجزاء الأرشيف تُضاف دائمًا (سقف ٤): ملفّات الـZIP لا
+                        // تحمل رقم حلقة، فكانت تُصفّى خارج القائمة كلّها.
+                        val arch = files.filter { (_, t) -> isArchiveName(t) }.take(4)
+                        (epFiles.ifEmpty { files } + arch).distinctBy { it.first }
                     } else {
                         files
                     }
-                    val cap = if (wantEp != null) 3 else 20
+                    val cap = if (wantEp != null) 8 else 20
                     Log.i(TAG, "mirrorsOf /list: files=${files.size} wantEp=$wantEp picked=${picked.size}")
                     // ٨ صفحات في الوقت الواحد: صفحة الموسم قد تحمل ٢٠ ملفًّا،
                     // و٥ في الدفعة تُطيل الانتظار أربع دفعات كاملة.
@@ -1693,11 +1715,13 @@ class MoviesModProvider(private val prefs: SharedPreferences? = null) : MainAPI(
                             }.awaitAll().filterNotNull()
                         }
                     }
+                    // كل الصفحات المجلوبة تُقرأ: `subs` أُحضرت متوازية سلفًا،
+                    // فلا كلفة شبكة في قراءتها، والتوقّف عند أوّل رابط كان
+                    // يُسقط روابط الأرشيف (‎zip‎) الواقعة بعد ملفّ الحلقة.
                     for ((fu, text) in subs) {
                         val fn = fileNameOf(text)?.let { displayName(it) }
                         val ok = collect(text, fu, fn) > 0
                         if (!ok && fu.contains("/file/")) addGated(fu, text, fn)
-                        if (wantEp != null && cands.isNotEmpty()) break
                     }
                     if (cands.isNotEmpty()) break
                 }
