@@ -1,5 +1,6 @@
 package com.animeflix.plugin
 
+import android.content.SharedPreferences
 import cloudstreamshared.DriveChain
 import cloudstreamshared.MediaProbe
 import com.lagradost.cloudstream3.*
@@ -20,7 +21,7 @@ import java.net.URLEncoder
  * لهذا لا يوجد هنا أي «بوّابة» نماذج كما في MoviesMod: الموقع يعطي الرابط
  * النهائي بعد تحويلةٍ واحدة.
  */
-class AnimeFlixProvider : MainAPI() {
+class AnimeFlixProvider(private val prefs: SharedPreferences? = null) : MainAPI() {
 
     override var mainUrl = "https://animeflix.my"
     override var name = "AnimeFlix"
@@ -92,10 +93,23 @@ class AnimeFlixProvider : MainAPI() {
         }
         if (cards.isEmpty()) return null
 
+        // إعداد «الجودة المفضّلة»: يُبقي بطاقات جودةٍ واحدة فقط، وإن لم توجد
+        // يعود لكل البطاقات حتى لا يبقى العمل بلا روابط.
+        val preferred = prefs?.getString(AnimeFlixSettingsBottomSheet.KEY_PREFERRED_Q, "all") ?: "all"
+        val order = prefs?.getString(AnimeFlixSettingsBottomSheet.KEY_QUALITY_ORDER, "default") ?: "default"
+        val showSeasons = pref(AnimeFlixSettingsBottomSheet.KEY_SHOW_SEASONS, true)
+        val wantedCards = if (preferred == "all") {
+            cards
+        } else {
+            val want = preferred.toIntOrNull() ?: 0
+            cards.filter { DriveChain.heightOf(DriveChain.qualityOf(it.first)) == want }
+                .ifEmpty { cards }
+        }
+
         // رقم الحلقة → (الجودة، عنوان الصفّ، رابط `/getlink/`).
         val byEp = LinkedHashMap<Int, MutableList<Triple<Int, String, String>>>()
         var hasEpisodes = false
-        for ((q, href) in cards) {
+        for ((q, href) in wantedCards) {
             val quality = DriveChain.qualityOf(q)
             val body = try {
                 app.get(href, headers = head).text
@@ -120,11 +134,18 @@ class AnimeFlixProvider : MainAPI() {
         if (byEp.isEmpty()) return null
 
         val eps = byEp.entries.sortedBy { it.key }.map { (n, list) ->
-            val payload = list
-                .sortedByDescending { it.first }
+            val sorted = when (order) {
+                "asc" -> list.sortedBy { it.first }
+                else -> list.sortedByDescending { it.first }
+            }
+            val payload = sorted
                 .joinToString("\n") { (q, heading, href) -> "$href\t$heading\t$q" }
             newEpisode(payload) {
-                this.name = if (hasEpisodes) "الحلقة $n" else list.firstOrNull()?.second ?: "Download"
+                this.name = when {
+                    !hasEpisodes -> list.firstOrNull()?.second ?: "Download"
+                    showSeasons -> "الموسم 1 · الحلقة $n"
+                    else -> "الحلقة $n"
+                }
                 this.season = 1
                 this.episode = if (hasEpisodes) n else 1
             }
@@ -144,36 +165,49 @@ class AnimeFlixProvider : MainAPI() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit,
     ): Boolean {
-        var emitted = 0
+        val all = ArrayList<DriveChain.Link>()
         for (line in data.split("\n")) {
             val parts = line.split("\t")
             val url = parts.getOrNull(0)?.trim().orEmpty()
             val heading = parts.getOrNull(1)?.trim()?.ifBlank { null }
             val quality = parts.getOrNull(2)?.trim()?.toIntOrNull() ?: 0
             if (url.isBlank()) continue
-            val links = DriveChain.resolve(url, heading, quality)
-            for (l in links) {
-                callback(
-                    newExtractorLink(
-                        source = name,
-                        name = MediaProbe.label(
-                            l.server,
-                            MediaProbe.qualityLabel(DriveChain.heightOf(l.quality)),
-                            l.bytes,
-                            l.url,
-                            null,
-                            l.note,
-                            if (l.downloadOnly) MediaProbe.Use.DOWNLOAD else MediaProbe.Use.WATCH,
-                        ),
-                        url = l.url,
-                    ) {
-                        this.quality = l.quality
-                        this.referer = l.referer ?: ""
-                    }
-                )
-                emitted++
-            }
+            all += DriveChain.resolve(url, heading, quality)
         }
-        return emitted > 0
+        if (all.isEmpty()) return false
+
+        // «إظهار كل المرايا» مطفأ ⇒ مرآة واحدة لكل (جودة، ملفّ). المفتاح
+        // يشمل الجودة كي لا تُحذف جودةٌ كاملة لمجرّد أنّ مرآتها تحمل الاسم نفسه.
+        val showAlt = pref(AnimeFlixSettingsBottomSheet.KEY_SHOW_ALT, true)
+        val seen = HashSet<String>()
+        val links = all.filter {
+            val key = if (showAlt) it.url + "|" + it.server
+            else it.quality.toString() + "|" + (it.note ?: it.server)
+            seen.add(key)
+        }
+
+        for (l in links) {
+            callback(
+                newExtractorLink(
+                    source = name,
+                    name = MediaProbe.label(
+                        l.server,
+                        MediaProbe.qualityLabel(DriveChain.heightOf(l.quality)),
+                        l.bytes,
+                        l.url,
+                        null,
+                        l.note,
+                        if (l.downloadOnly) MediaProbe.Use.DOWNLOAD else MediaProbe.Use.WATCH,
+                    ),
+                    url = l.url,
+                ) {
+                    this.quality = l.quality
+                    this.referer = l.referer ?: ""
+                }
+            )
+        }
+        return links.isNotEmpty()
     }
+
+    private fun pref(key: String, def: Boolean): Boolean = prefs?.getBoolean(key, def) ?: def
 }

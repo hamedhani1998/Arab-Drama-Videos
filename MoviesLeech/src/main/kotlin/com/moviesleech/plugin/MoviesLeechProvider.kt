@@ -1,5 +1,6 @@
 package com.moviesleech.plugin
 
+import android.content.SharedPreferences
 import cloudstreamshared.DriveChain
 import cloudstreamshared.MediaProbe
 import com.lagradost.cloudstream3.*
@@ -20,7 +21,7 @@ import java.net.URLEncoder
  *    ← `/file/` أو `/list/` ← المرايا.
  *  وكل خطوةٍ تُقرأ من الصفحة نفسها داخل [DriveChain]، لا من ثوابت.
  */
-class MoviesLeechProvider : MainAPI() {
+class MoviesLeechProvider(private val prefs: SharedPreferences? = null) : MainAPI() {
 
     override var mainUrl = "https://moviesleech.media"
     override var name = "MoviesLeech"
@@ -106,17 +107,37 @@ class MoviesLeechProvider : MainAPI() {
         }
         if (pairs.isEmpty()) return null
 
-        val eps = pairs.map { (q, href) ->
-            val quality = DriveChain.qualityOf(q)
-            // اسم السطر قصير (`480p`) والوسم يُبنى من الجودة وحدها، فلا يتكرّر
-            // عنوان الصفحة الطويل في كل رابط.
-            val short = Regex("\\b(\\d{3,4}p)\\b", RegexOption.IGNORE_CASE)
-                .find(q)?.groupValues?.get(1)
-                ?: q.ifBlank { "Download" }
-            newEpisode("$href\t\t$quality") {
-                this.name = short
+        val order = prefs?.getString(MoviesLeechSettingsBottomSheet.KEY_QUALITY_ORDER, "default") ?: "default"
+        val sortedPairs = when (order) {
+            "asc" -> pairs.sortedBy { DriveChain.qualityOf(it.first) }
+            else -> pairs.sortedByDescending { DriveChain.qualityOf(it.first) }
+        }
+
+        fun shortQ(q: String): String = Regex("\\b(\\d{3,4}p)\\b", RegexOption.IGNORE_CASE)
+            .find(q)?.groupValues?.get(1)
+            ?: q.ifBlank { "Download" }
+
+        val oneEntry = pref(MoviesLeechSettingsBottomSheet.KEY_ONE_ENTRY, false)
+        val eps = if (oneEntry) {
+            // مدخلٌ واحد يحمل كل الجودات: كل سطرٍ يبقى بجودته في الوسم.
+            val payload = sortedPairs.joinToString("\n") { (q, href) ->
+                "$href\t${shortQ(q)}\t${DriveChain.qualityOf(q)}"
+            }
+            listOf(newEpisode(payload) {
+                this.name = "كل الجودات"
                 this.season = 1
                 this.episode = 1
+            })
+        } else {
+            sortedPairs.map { (q, href) ->
+                val quality = DriveChain.qualityOf(q)
+                // اسم السطر قصير (`480p`) والوسم يُبنى من الجودة وحدها، فلا
+                // يتكرّر عنوان الصفحة الطويل في كل رابط.
+                newEpisode("$href\t\t$quality") {
+                    this.name = shortQ(q)
+                    this.season = 1
+                    this.episode = 1
+                }
             }
         }
 
@@ -134,7 +155,7 @@ class MoviesLeechProvider : MainAPI() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit,
     ): Boolean {
-        var emitted = 0
+        val all = ArrayList<DriveChain.Link>()
         for (line in data.split("\n")) {
             val parts = line.split("\t")
             val archive = parts.getOrNull(0)?.trim().orEmpty()
@@ -156,29 +177,42 @@ class MoviesLeechProvider : MainAPI() {
 
             val entries = if (sids.isEmpty()) listOf(archive) else sids
             for (entry in entries.take(3)) {
-                for (l in DriveChain.resolve(entry, heading, quality)) {
-                    callback(
-                        newExtractorLink(
-                            source = name,
-                            name = MediaProbe.label(
-                                l.server,
-                                MediaProbe.qualityLabel(DriveChain.heightOf(l.quality)),
-                                l.bytes,
-                                l.url,
-                                null,
-                                l.note,
-                                if (l.downloadOnly) MediaProbe.Use.DOWNLOAD else MediaProbe.Use.WATCH,
-                            ),
-                            url = l.url,
-                        ) {
-                            this.quality = l.quality
-                            this.referer = l.referer ?: ""
-                        }
-                    )
-                    emitted++
-                }
+                all += DriveChain.resolve(entry, heading, quality)
             }
         }
-        return emitted > 0
+        if (all.isEmpty()) return false
+
+        // «إظهار كل المرايا» مطفأ ⇒ مرآة واحدة لكل (جودة، ملفّ).
+        val showAlt = pref(MoviesLeechSettingsBottomSheet.KEY_SHOW_ALT, true)
+        val seen = HashSet<String>()
+        val links = all.filter {
+            val key = if (showAlt) it.url + "|" + it.server
+            else it.quality.toString() + "|" + (it.note ?: it.server)
+            seen.add(key)
+        }
+
+        for (l in links) {
+            callback(
+                newExtractorLink(
+                    source = name,
+                    name = MediaProbe.label(
+                        l.server,
+                        MediaProbe.qualityLabel(DriveChain.heightOf(l.quality)),
+                        l.bytes,
+                        l.url,
+                        null,
+                        l.note,
+                        if (l.downloadOnly) MediaProbe.Use.DOWNLOAD else MediaProbe.Use.WATCH,
+                    ),
+                    url = l.url,
+                ) {
+                    this.quality = l.quality
+                    this.referer = l.referer ?: ""
+                }
+            )
+        }
+        return links.isNotEmpty()
     }
+
+    private fun pref(key: String, def: Boolean): Boolean = prefs?.getBoolean(key, def) ?: def
 }
