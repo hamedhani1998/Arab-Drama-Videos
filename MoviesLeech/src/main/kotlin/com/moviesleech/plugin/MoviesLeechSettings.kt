@@ -100,9 +100,9 @@ class MoviesLeechSettingsBottomSheet(private val prefs: SharedPreferences) : Bot
 
             cat.addPreference(SwitchPreferenceCompat(ctx).apply {
                 key = KEY_ONE_ENTRY
-                title = "دمج الجودات في مدخل واحد"
-                summary = "قائمة العمل تصير مدخلًا واحدًا يحمل كل الجودات (الافتراضي: مدخل لكل جودة)"
-                setDefaultValue(false)
+                title = "مدخل واحد للفيلم"
+                summary = "يُعرض الفيلم مدخلًا واحدًا يحمل كل الجودات (أوقفه لعرض كل جودة في مدخل منفصل)"
+                setDefaultValue(true)
             })
 
             preferenceScreen.addPreference(Preference(ctx).apply {

@@ -1,4 +1,4 @@
-version = 2
+version = 3
 
 cloudstream {
     description = "AnimeFlix - أنمي مترجم مع روابط مشاهدة وتحميل مباشرة"

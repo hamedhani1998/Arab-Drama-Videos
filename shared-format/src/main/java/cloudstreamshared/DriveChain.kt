@@ -83,9 +83,10 @@ object DriveChain {
     }
 
     private class PinnedDns(private val base: Dns) : Dns {
+        // تُثبَّت المضيفات التي لا يُحلّها مُحلِّل النظام (NXDOMAIN) وحدها.
+        // `driveseed.org` **لا** يُثبَّت: هو صاحب السلسلة كلها، وتثبيته على
+        // عنوانٍ من مُحلِّلٍ محجوب كان يُسقط كل الروابط في الإضافتين معًا.
         private val pinnedHosts = setOf(
-            "driveseed.org",
-            "www.driveseed.org",
             "video-gen.xyz",
             "instant.video-gen.xyz",
             "cdn.video-gen.xyz",
@@ -97,7 +98,7 @@ object DriveChain {
 
         override fun lookup(hostname: String): List<InetAddress> {
             if (isPinned(hostname.lowercase())) {
-                val ips = resolveIps() ?: return base.lookup(hostname)
+                val ips = CF_EDGE_IPS.ifEmpty { resolveIps() ?: return base.lookup(hostname) }
                 return ips.map { InetAddress.getByName(it) }
             }
             return base.lookup(hostname)
@@ -107,6 +108,7 @@ object DriveChain {
             for (host in PINNED_SEEDS) {
                 val got = try {
                     base.lookup(host).mapNotNull { it.hostAddress }
+                        .filter { it.contains('.') && !it.contains(':') }
                 } catch (e: Exception) {
                     emptyList()
                 }
@@ -619,14 +621,97 @@ object DriveChain {
                         continue
                     }
                 }
+                // 403 من Cloudflare على عميلٍ بعينه: محاولةٌ خامّ بجارٍ آخر
+                // (HttpURLConnection) قد تمرّ — وهي أرخص من إسقاط الصفحة.
+                rawGet(url, null, referer)?.let { raw ->
+                    if (raw.code in 200..299 && raw.body.isNotBlank()) return raw.body to url
+                    if (!raw.location.isNullOrBlank()) {
+                        val next = absUrl(url, raw.location)
+                        val again = rawGet(next, null, url)
+                        if (again != null && again.code in 200..299 && again.body.isNotBlank()) {
+                            return again.body to next
+                        }
+                    }
+                }
                 return null
             } catch (e: Exception) {
-                if (i == tries) return null
+                if (i == tries) {
+                    rawGet(url, null, referer)?.let { raw ->
+                        if (raw.code in 200..299 && raw.body.isNotBlank()) return raw.body to url
+                    }
+                    return null
+                }
                 delay(wait)
                 wait *= 2
             }
         }
         return null
+    }
+
+    /**
+     * مسح صفحةٍ مباشرةً عن أي رابط وسائط/أرشيف — بلا اتباع بوّابة. يُستعمل
+     * كخطةٍ بديلة حين تفشل السلسلة، فيبقى ما يمكن إنقاذه ظاهرًا للمستخدم.
+     */
+    suspend fun scanDirect(url: String, label: String? = null, quality: Int = 0): List<Link> {
+        var current = url
+        var referer: String? = null
+        for (hop in 0..2) {
+            val got = getText(current, referer = referer) ?: return emptyList()
+            val body = got.first.replace("\\/", "/")
+            val pageUrl = got.second
+            val q = if (quality != 0) quality else qualityOf(label ?: body)
+            val note = label?.trim()?.ifBlank { null }
+            val out = ArrayList<Link>()
+            val seen = HashSet<String>()
+
+            fun add(u: String, server: String, ref: String?) {
+                val clean = unescapeText(u).replace(RE_WS, "").trimEnd('.', ',', ')', ';')
+                if (clean.isBlank() || !seen.add(clean)) return
+                val dl = isArchiveUrl(clean) || clean.contains("googleusercontent.com", true) ||
+                    note?.contains(".zip", true) == true || note?.contains(".rar", true) == true
+                out.add(
+                    Link(
+                        url = clean,
+                        server = server,
+                        quality = q,
+                        note = note,
+                        referer = ref,
+                        downloadOnly = dl,
+                    )
+                )
+            }
+
+            for (a in RE_ANCHOR.findAll(body)) {
+                val href = RE_HREF.find(a.groupValues[1])?.groupValues?.get(1)
+                    ?.let { unescapeText(it) }?.replace(RE_WS, "") ?: continue
+                if (href.isBlank()) continue
+                val text = stripTags(a.groupValues[2]).trim()
+                val abs = absUrl(pageUrl, href)
+                when {
+                    href.contains(".r2.dev") -> add(abs, text.ifBlank { "Cloud Download" }, null)
+                    href.contains("video-gen.xyz") -> add(abs, text.ifBlank { "Instant Download" }, pageUrl)
+                    href.contains("workers.dev") -> add(abs, text.ifBlank { "Mirror" }, pageUrl)
+                    href.contains("googleusercontent.com", true) ->
+                        add(abs, text.ifBlank { "G-Drive" }, pageUrl)
+                    Regex("\\.(mp4|mkv|avi|webm|m3u8|zip|rar|7z)(\\?|$)", RegexOption.IGNORE_CASE)
+                        .containsMatchIn(href) -> add(abs, text.ifBlank { "Direct" }, pageUrl)
+                }
+            }
+            if (out.isEmpty()) {
+                for (m in RE_R2_ANY.findAll(body)) add(m.value, "Cloud Download", null)
+                for (m in RE_VG_ANY.findAll(body)) add(m.value, "Instant Download", pageUrl)
+            }
+            if (out.isNotEmpty()) {
+                Log.i(TAG, "scanDirect: ${out.size} links من ${url.take(70)}")
+                return out
+            }
+            val mv = jsTarget(body) ?: break
+            val next = absUrl(pageUrl, mv)
+            if (next == current) break
+            current = next
+            referer = pageUrl
+        }
+        return emptyList()
     }
 
     private fun anyForm(html: String): Pair<String, Map<String, String>>? {
@@ -813,6 +898,13 @@ object DriveChain {
         org.jsoup.parser.Parser.unescapeEntities(s, false).replace("\\/", "/")
 
     private val PINNED_SEEDS = listOf("cloudflare.com", "driveseed.org", "episodes.modpro.blog")
+
+    /**
+     * عناوين حافة Cloudflare العامة (anycast): تخدم أي نطاقٍ خلفها بشرط
+     * `SNI` الصحيح، فلا حاجة لسؤال DNS عنها — وهذا يقطع الطريق على مُحلِّلٍ
+     * محجوب يعيد عنوانًا مزيفًا.
+     */
+    private val CF_EDGE_IPS = listOf("104.16.132.229", "104.16.133.229", "172.67.131.141")
 
     private val RE_WS = Regex("\\s+")
     private val RE_TAGS = Regex("<[^>]+>")

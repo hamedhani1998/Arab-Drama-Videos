@@ -1,6 +1,7 @@
 package com.moviesleech.plugin
 
 import android.content.SharedPreferences
+import android.util.Log
 import cloudstreamshared.DriveChain
 import cloudstreamshared.MediaProbe
 import com.lagradost.cloudstream3.*
@@ -31,6 +32,8 @@ class MoviesLeechProvider(private val prefs: SharedPreferences? = null) : MainAP
     override val supportedTypes = setOf(TvType.Movie, TvType.TvSeries)
 
     private val head get() = mapOf("User-Agent" to DriveChain.UA)
+
+    private val TAG = "MoviesLeech"
 
     override val mainPage = mainPageOf(
         "" to "أحدث الإضافات",
@@ -117,27 +120,29 @@ class MoviesLeechProvider(private val prefs: SharedPreferences? = null) : MainAP
             .find(q)?.groupValues?.get(1)
             ?: q.ifBlank { "Download" }
 
-        val oneEntry = pref(MoviesLeechSettingsBottomSheet.KEY_ONE_ENTRY, false)
-        val eps = if (oneEntry) {
-            // مدخلٌ واحد يحمل كل الجودات: كل سطرٍ يبقى بجودته في الوسم.
+        val oneEntry = pref(MoviesLeechSettingsBottomSheet.KEY_ONE_ENTRY, true)
+        if (oneEntry) {
+            // فيلم: مدخل مشاهدة واحد يحمل كل الجودات، لا «حلقات» لكل جودة.
             val payload = sortedPairs.joinToString("\n") { (q, href) ->
-                "$href\t${shortQ(q)}\t${DriveChain.qualityOf(q)}"
+                "$href\t\t${DriveChain.qualityOf(q)}"
             }
-            listOf(newEpisode(payload) {
-                this.name = "كل الجودات"
+            Log.i(TAG, "load: فيلم — ${sortedPairs.size} جودة في مدخل واحد")
+            return newMovieLoadResponse(title, url, TvType.Movie, payload) {
+                this.posterUrl = poster
+                this.plot = plot
+                this.tags = doc.select("a[href*=movies-by-genre]").map { it.text().trim() }
+                    .filter { it.isNotBlank() }.distinct()
+            }
+        }
+
+        val eps = sortedPairs.map { (q, href) ->
+            val quality = DriveChain.qualityOf(q)
+            // اسم السطر قصير (`480p`) والوسم يُبنى من الجودة وحدها، فلا
+            // يتكرّر عنوان الصفحة الطويل في كل رابط.
+            newEpisode("$href\t\t$quality") {
+                this.name = shortQ(q)
                 this.season = 1
                 this.episode = 1
-            })
-        } else {
-            sortedPairs.map { (q, href) ->
-                val quality = DriveChain.qualityOf(q)
-                // اسم السطر قصير (`480p`) والوسم يُبنى من الجودة وحدها، فلا
-                // يتكرّر عنوان الصفحة الطويل في كل رابط.
-                newEpisode("$href\t\t$quality") {
-                    this.name = shortQ(q)
-                    this.season = 1
-                    this.episode = 1
-                }
             }
         }
 
@@ -177,9 +182,25 @@ class MoviesLeechProvider(private val prefs: SharedPreferences? = null) : MainAP
 
             val entries = if (sids.isEmpty()) listOf(archive) else sids
             for (entry in entries.take(3)) {
-                all += DriveChain.resolve(entry, heading, quality)
+                val got = try {
+                    DriveChain.resolve(entry, heading, quality)
+                } catch (e: Exception) {
+                    Log.i(TAG, "resolve EX ${e.javaClass.simpleName}: ${e.message}")
+                    emptyList()
+                }
+                if (got.isEmpty()) {
+                    Log.i(TAG, "resolve فارغ — scanDirect ${entry.take(70)}")
+                    all += try {
+                        DriveChain.scanDirect(entry, heading, quality)
+                    } catch (e: Exception) {
+                        emptyList()
+                    }
+                } else {
+                    all += got
+                }
             }
         }
+        Log.i(TAG, "loadLinks: ${all.size} رابطًا من ${data.count { it == '\n' } + 1} مدخلًا")
         if (all.isEmpty()) return false
 
         // «إظهار كل المرايا» مطفأ ⇒ مرآة واحدة لكل (جودة، ملفّ).

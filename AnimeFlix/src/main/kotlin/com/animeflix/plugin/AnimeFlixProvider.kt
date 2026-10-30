@@ -1,6 +1,7 @@
 package com.animeflix.plugin
 
 import android.content.SharedPreferences
+import android.util.Log
 import cloudstreamshared.DriveChain
 import cloudstreamshared.MediaProbe
 import com.lagradost.cloudstream3.*
@@ -31,6 +32,8 @@ class AnimeFlixProvider(private val prefs: SharedPreferences? = null) : MainAPI(
     override val supportedTypes = setOf(TvType.Movie, TvType.TvSeries)
 
     private val head get() = mapOf("User-Agent" to DriveChain.UA)
+
+    private val TAG = "AnimeFlix"
 
     override val mainPage = mainPageOf(
         "" to "أحدث الإضافات",
@@ -133,29 +136,42 @@ class AnimeFlixProvider(private val prefs: SharedPreferences? = null) : MainAPI(
         }
         if (byEp.isEmpty()) return null
 
-        val eps = byEp.entries.sortedBy { it.key }.map { (n, list) ->
-            val sorted = when (order) {
-                "asc" -> list.sortedBy { it.first }
-                else -> list.sortedByDescending { it.first }
+        fun sorted(list: List<Triple<Int, String, String>>) = when (order) {
+            "asc" -> list.sortedBy { it.first }
+            else -> list.sortedByDescending { it.first }
+        }
+
+        val tags = doc.select("a[href*=category/genre]").map { it.text().trim() }
+            .filter { it.isNotBlank() }.distinct()
+
+        // عملٌ بحلقةٍ واحدة (فيلم أنمي في الغالب): مدخل مشاهدة واحد يحمل كل
+        // الجودات، بدل أن تظهر الجودة الواحدة «حلقة» في مسلسل.
+        if (byEp.size <= 1) {
+            val flat = sorted(byEp.values.firstOrNull().orEmpty())
+            if (flat.isEmpty()) return null
+            val payload = flat.joinToString("\n") { (q, _, href) -> "$href\t\t$q" }
+            Log.i(TAG, "load: فيلم — ${flat.size} جودة في مدخل واحد")
+            return newMovieLoadResponse(title, url, TvType.Movie, payload) {
+                this.posterUrl = poster
+                this.plot = plot
+                this.tags = tags
             }
-            val payload = sorted
+        }
+
+        val eps = byEp.entries.sortedBy { it.key }.map { (n, list) ->
+            val payload = sorted(list)
                 .joinToString("\n") { (q, heading, href) -> "$href\t$heading\t$q" }
             newEpisode(payload) {
-                this.name = when {
-                    !hasEpisodes -> list.firstOrNull()?.second ?: "Download"
-                    showSeasons -> "الموسم 1 · الحلقة $n"
-                    else -> "الحلقة $n"
-                }
+                this.name = if (showSeasons) "الموسم 1 · الحلقة $n" else "الحلقة $n"
                 this.season = 1
-                this.episode = if (hasEpisodes) n else 1
+                this.episode = n
             }
         }
 
         return newTvSeriesLoadResponse(title, url, TvType.TvSeries, eps) {
             this.posterUrl = poster
             this.plot = plot
-            this.tags = doc.select("a[href*=category/genre]").map { it.text().trim() }
-                .filter { it.isNotBlank() }.distinct()
+            this.tags = tags
         }
     }
 
@@ -172,8 +188,25 @@ class AnimeFlixProvider(private val prefs: SharedPreferences? = null) : MainAPI(
             val heading = parts.getOrNull(1)?.trim()?.ifBlank { null }
             val quality = parts.getOrNull(2)?.trim()?.toIntOrNull() ?: 0
             if (url.isBlank()) continue
-            all += DriveChain.resolve(url, heading, quality)
+            val got = try {
+                DriveChain.resolve(url, heading, quality)
+            } catch (e: Exception) {
+                Log.i(TAG, "resolve EX ${e.javaClass.simpleName}: ${e.message}")
+                emptyList()
+            }
+            if (got.isEmpty()) {
+                // خطة بديلة: امسح الصفحة (أو وجهتها) مباشرةً عن أي رابط.
+                Log.i(TAG, "resolve فارغ — scanDirect ${url.take(70)}")
+                all += try {
+                    DriveChain.scanDirect(url, heading, quality)
+                } catch (e: Exception) {
+                    emptyList()
+                }
+            } else {
+                all += got
+            }
         }
+        Log.i(TAG, "loadLinks: ${all.size} رابطًا من ${data.count { it == '\n' } + 1} مدخلًا")
         if (all.isEmpty()) return false
 
         // «إظهار كل المرايا» مطفأ ⇒ مرآة واحدة لكل (جودة، ملفّ). المفتاح
