@@ -1,4 +1,4 @@
-version = 6
+version = 7
 
 cloudstream {
     description = "MoviesLeech - أفلام هندية وبوليوود مع روابط مشاهدة وتحميل مباشرة"

@@ -94,8 +94,9 @@ class MoviesLeechSettingsBottomSheet(private val prefs: SharedPreferences) : Bot
             cat.addPreference(SwitchPreferenceCompat(ctx).apply {
                 key = KEY_SHOW_ALT
                 title = "إظهار كل المرايا"
-                summary = "عند الإطفاء تُعرض مرآة واحدة لكل ملفّ بدل كلّها"
+                summary = "مفعّل دائمًا: كل الجودات وكل السيرفرات تُعرض دون استثناء"
                 setDefaultValue(true)
+                isEnabled = false
             })
 
             cat.addPreference(SwitchPreferenceCompat(ctx).apply {

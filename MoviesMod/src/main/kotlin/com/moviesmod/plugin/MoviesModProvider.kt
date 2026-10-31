@@ -559,7 +559,10 @@ class MoviesModProvider(private val prefs: SharedPreferences? = null) : MainAPI(
             val entries = data.split("\n").map { it.trim() }.filter { it.isNotBlank() }
             if (entries.isEmpty()) return false
 
-            val showAlt = pref(KEY_SHOW_ALT, true)
+            // ★ كل المرايا تُعرض دائمًا (لا خيار يُخفي شيئًا): المطلوب صريحًا
+            // «كل الروابط دون استثناء». الإعداد القديم أُلغي أثره وبقي ظاهرًا
+            // للتوضيح فقط.
+            val showAlt = true
             val order = prefs?.getString(KEY_QUALITY_ORDER, "default") ?: "default"
 
             suspend fun one(e: String): List<Cand> {

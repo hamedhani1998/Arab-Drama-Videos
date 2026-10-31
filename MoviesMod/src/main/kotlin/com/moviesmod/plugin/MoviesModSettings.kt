@@ -101,8 +101,9 @@ class MoviesModSettingsBottomSheet(private val prefs: SharedPreferences) : Botto
             val altPref = SwitchPreferenceCompat(ctx).apply {
                 key = KEY_SHOW_ALT
                 title = "إظهار المرايا البديلة"
-                summary = "تُظهر مرآة جوجل الثانية و«cdn» إضافةً إلى المرآة الأساسية — مفعّلة في الأصل"
+                summary = "مفعّلة دائمًا: كل الجودات وكل السيرفرات تُعرض دون استثناء"
                 setDefaultValue(true)
+                isEnabled = false
             }
             playbackCategory.addPreference(altPref)
 
