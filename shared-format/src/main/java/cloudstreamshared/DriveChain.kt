@@ -401,8 +401,6 @@ object DriveChain {
             val u = unescapeText(rawUrl).replace(RE_WS, "").trimEnd('.', ',', ')', ';')
             if (u.isBlank() || !seen.add("$u|$server")) return
             val noteVal = note ?: baseNote
-            val dl = isArchiveUrl(u) || u.contains("googleusercontent.com", true) ||
-                noteVal?.contains(".zip", true) == true || noteVal?.contains(".rar", true) == true
             out.add(
                 Link(
                     url = u,
@@ -411,7 +409,7 @@ object DriveChain {
                     bytes = bytes,
                     note = noteVal,
                     referer = referer,
-                    downloadOnly = dl,
+                    downloadOnly = isDownload(u, noteVal),
                     gated = gated,
                 )
             )
@@ -526,10 +524,10 @@ object DriveChain {
                 val found = collect(body, pageUrl, note)
 
                 if (pageUrl.contains("/file/")) {
-                    if (found == 0) {
-                        extras(pageUrl)
-                        if (out.isEmpty()) addGated(pageUrl, body, note)
-                    }
+                    // نجمع دائماً روابط «Direct Links / Server 1 / Server 2 /
+                    // Cloud Resume» — المستخدم يريد **كل** الروابط لا أوّلها.
+                    extras(pageUrl)
+                    if (out.isEmpty()) addGated(pageUrl, body, note)
                     if (out.isNotEmpty()) break
                 }
 
@@ -577,16 +575,40 @@ object DriveChain {
         Log.i(TAG, "mirrorsOf: ${out.size} links (${out.map { it.server }.distinct().take(4)})")
         if (out.isEmpty()) return emptyList()
 
-        // حلّ 302 لمرايا `video-gen` إلى رابط الوسائط الداخلي.
+        // حلّ 302 لمرايا `video-gen` إلى رابط الوسائط الداخلي. وإن تعذّر
+        // الحلّ يُبقى الرابط الأصلي (المشغّل يتبع التحويلة بنفسه) بدل إسقاطه.
+        // ★ بعد الحلّ يُعاد حساب «تحميل فقط»: كثيرٌ من مرايا `video-gen` تنتهي
+        // إلى `video-downloads.googleusercontent.com`، وحملُ الحكم القديم كان
+        // يُعرض رابط G-Drive بوسم «مشاهدة» وهو تحميلٌ صريح.
         return coroutineScope {
             out.map { c ->
                 async(Dispatchers.IO) {
                     if (!c.url.contains("video-gen.xyz")) return@async c
-                    val inner = innerMedia(c.url, c.referer) ?: return@async null
-                    c.copy(url = inner, referer = null)
+                    val inner = innerMedia(c.url, c.referer) ?: return@async c
+                    c.copy(
+                        url = inner,
+                        referer = null,
+                        downloadOnly = isDownload(inner, c.note),
+                    )
                 }
-            }.awaitAll().filterNotNull()
+            }.awaitAll()
         }
+    }
+
+    /**
+     * «تحميل فقط»: أرشيف (zip/rar/7z) أو Google Drive/UserContent.
+     * يُقاس على الرابط النهائي بعد فكّ التحويلات لا على الوسيط.
+     */
+    private fun isDownload(url: String, note: String?): Boolean {
+        val u = url.lowercase()
+        return isArchiveUrl(u) ||
+            u.contains("googleusercontent.com") ||
+            u.contains("video-downloads.googleusercontent") ||
+            u.contains("drive.google.com/uc") ||
+            u.contains("docs.google.com/uc") ||
+            note?.contains(".zip", true) == true ||
+            note?.contains(".rar", true) == true ||
+            note?.contains(".7z", true) == true
     }
 
     private suspend fun innerMedia(hopUrl: String, referer: String?): String? = try {
@@ -667,8 +689,6 @@ object DriveChain {
             fun add(u: String, server: String, ref: String?) {
                 val clean = unescapeText(u).replace(RE_WS, "").trimEnd('.', ',', ')', ';')
                 if (clean.isBlank() || !seen.add(clean)) return
-                val dl = isArchiveUrl(clean) || clean.contains("googleusercontent.com", true) ||
-                    note?.contains(".zip", true) == true || note?.contains(".rar", true) == true
                 out.add(
                     Link(
                         url = clean,
@@ -676,7 +696,7 @@ object DriveChain {
                         quality = q,
                         note = note,
                         referer = ref,
-                        downloadOnly = dl,
+                        downloadOnly = isDownload(clean, note),
                     )
                 )
             }
