@@ -600,15 +600,15 @@ class MoviesModProvider(private val prefs: SharedPreferences? = null) : MainAPI(
                 }
                 if (entries.size > 6) delay(150)
             }
-            // التكرار يُقاس بالزوج (الرابط، السيرفر) لا بالرابط وحده: موقع
+            // التكرار يُقاس بالرباع (الرابط، السيرفر، الجودة، الملاحظة): موقع
             // الأفلام يعطي «Fast Server (G-Drive)» و«Google Drive (Server 2)»
             // **الرابط نفسه**، وحذف أحدهما بالرابط كان يُخفي سيرفرًا كاملًا
             // من القائمة. وإعداد «إظهار البدائل» حين يُطفأ يعيد الحذف بالرابط
-            // (ملفٌّ واحد بمدخلةٍ واحدة) — ولا يُخفي جودةً أبدًا.
+            // والجودة (ملفٌّ واحد بمدخلةٍ واحدة) — ولا يُخفي جودةً أبدًا.
             val deduped = if (showAlt) {
-                resolved.distinctBy { it.url + "|" + it.server }
+                resolved.distinctBy { it.url + "|" + it.server + "|" + it.quality + "|" + (it.note ?: "") }
             } else {
-                resolved.distinctBy { it.url }
+                resolved.distinctBy { it.url + "|" + it.quality }
             }
             if (deduped.isEmpty()) {
                 Log.i(TAG, "loadLinks: resolved nothing from ${entries.size} entries (dns fixed)")
@@ -628,10 +628,10 @@ class MoviesModProvider(private val prefs: SharedPreferences? = null) : MainAPI(
                             c.certain = false
                             return@async c
                         }
-                        // ٣٫٥ث سقف الفحص: الفحص يُنتظر قبل عرض القائمة، ومهلةٌ
+                        // ١٫٢ث سقف الفحص: الفحص يُنتظر قبل عرض القائمة، ومهلةٌ
                         // طويلة على مرآةٍ بطيئة تُؤخّر كل الروابط لا واحدًا.
                         // والرابط الذي لا يُحكم عليه يُبقى (سياسة «لا نعرف»).
-                        val r = MediaProbe.probe(c.url, c.referer, c.headers, timeoutMs = 3500)
+                        val r = MediaProbe.probe(c.url, c.referer, c.headers, timeoutMs = 1200)
                         c.bytes = c.bytes ?: r.totalBytes
                         c.ttfb = if (r.alive) r.ttfbMs else Long.MAX_VALUE - 1
                         c.alive = r.alive
@@ -642,10 +642,21 @@ class MoviesModProvider(private val prefs: SharedPreferences? = null) : MainAPI(
                 }.awaitAll()
             }
 
-            val pool = probed.filterNot { !it.alive && it.certain }.ifEmpty { probed }
+            // ★ لا يُسقَط أي مرشّح: المطلوب صراحةً عرض **كل** الروابط دون
+            // استثناء، حتى ما رُدّ بكودٍ قاطع أو لم يُحسم فحصه. الترتيب وحده
+            // يقدّم الحيّ السريع، فلا يضيع رابط من القائمة أبدًا.
+            val pool = probed
             val ordered = when (order) {
-                "desc" -> pool.sortedWith(compareByDescending<Cand> { it.quality }.thenBy { it.rank() })
-                "asc" -> pool.sortedWith(compareBy<Cand> { it.quality }.thenBy { it.rank() })
+                "desc" -> pool.sortedWith(
+                    compareByDescending<Cand> { it.alive }
+                        .thenByDescending { it.quality }
+                        .thenBy { it.rank() }
+                )
+                "asc" -> pool.sortedWith(
+                    compareByDescending<Cand> { it.alive }
+                        .thenBy { it.quality }
+                        .thenBy { it.rank() }
+                )
                 else -> pool.sortedBy { it.rank() }
             }
 

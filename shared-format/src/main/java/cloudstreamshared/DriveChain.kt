@@ -158,8 +158,8 @@ object DriveChain {
             try {
                 c = (java.net.URL(url).openConnection() as java.net.HttpURLConnection)
                 c.instanceFollowRedirects = false
-                c.connectTimeout = 20000
-                c.readTimeout = 20000
+                c.connectTimeout = 8000
+                c.readTimeout = 10000
                 c.requestMethod = "GET"
                 c.setRequestProperty("User-Agent", UA)
                 c.setRequestProperty(
@@ -628,9 +628,9 @@ object DriveChain {
     private suspend fun getText(
         url: String,
         referer: String? = null,
-        tries: Int = 3,
+        tries: Int = 2,
     ): Pair<String, String>? {
-        var wait = 700L
+        var wait = 400L
         for (i in 1..tries) {
             try {
                 val r = app.get(url, headers = head, referer = referer, allowRedirects = true)

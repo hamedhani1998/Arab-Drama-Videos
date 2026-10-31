@@ -6,6 +6,10 @@ import cloudstreamshared.DriveChain
 import cloudstreamshared.MediaProbe
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
 import org.jsoup.nodes.Element
 import java.net.URLEncoder
 
@@ -160,56 +164,67 @@ class MoviesLeechProvider(private val prefs: SharedPreferences? = null) : MainAP
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit,
     ): Boolean {
-        val all = ArrayList<DriveChain.Link>()
-        for (line in data.split("\n")) {
-            val parts = line.split("\t")
-            val archive = parts.getOrNull(0)?.trim().orEmpty()
-            val heading = parts.getOrNull(1)?.trim()?.ifBlank { null }
-            val quality = parts.getOrNull(2)?.trim()?.toIntOrNull() ?: 0
-            if (archive.isBlank()) continue
+        val lines = data.split("\n").map { it.trim() }.filter { it.isNotBlank() }
+        if (lines.isEmpty()) return false
 
-            // صفحة الأرشيف تحمل روابط `?sid=` (واحدة حقيقية والباقي `#`).
-            val body = try {
-                app.get(archive, headers = head).text
-            } catch (e: Exception) {
-                ""
-            }
-            val sids = Regex("href=\"(https?://[^\"]+\\?sid=[^\"]+)\"")
-                .findAll(body)
-                .map { DriveChain.unescapeText(it.groupValues[1]) }
-                .distinct()
-                .toList()
+        // كل الجودات تُفتح **معًا**: صفحة الأرشيف ثم سلسلة `?sid=` لكل مدخل.
+        // التسلسل كان يجعل الزمن مجموع السلاسل؛ الآن الزمن = أبطأها.
+        val all = coroutineScope {
+            lines.map { line ->
+                async(Dispatchers.IO) {
+                    val parts = line.split("\t")
+                    val archive = parts.getOrNull(0)?.trim().orEmpty()
+                    val heading = parts.getOrNull(1)?.trim()?.ifBlank { null }
+                    val quality = parts.getOrNull(2)?.trim()?.toIntOrNull() ?: 0
+                    if (archive.isBlank()) return@async emptyList<DriveChain.Link>()
 
-            val entries = if (sids.isEmpty()) listOf(archive) else sids
-            for (entry in entries.take(3)) {
-                val got = try {
-                    DriveChain.resolve(entry, heading, quality)
-                } catch (e: Exception) {
-                    Log.i(TAG, "resolve EX ${e.javaClass.simpleName}: ${e.message}")
-                    emptyList()
-                }
-                if (got.isEmpty()) {
-                    Log.i(TAG, "resolve فارغ — scanDirect ${entry.take(70)}")
-                    all += try {
-                        DriveChain.scanDirect(entry, heading, quality)
+                    // صفحة الأرشيف تحمل روابط `?sid=` (واحدة حقيقية والباقي `#`).
+                    val body = try {
+                        app.get(archive, headers = head).text
                     } catch (e: Exception) {
-                        emptyList()
+                        ""
                     }
-                } else {
-                    all += got
+                    val sids = Regex("href=\"(https?://[^\"]+\\?sid=[^\"]+)\"")
+                        .findAll(body)
+                        .map { DriveChain.unescapeText(it.groupValues[1]) }
+                        .distinct()
+                        .toList()
+
+                    // ★ كل `sid` يُحلّ — لا `take(3)`: القصّ كان يُخفي سيرفرات
+                    // إضافية يراها المستخدم في الموقع.
+                    val entries = if (sids.isEmpty()) listOf(archive) else sids
+                    coroutineScope {
+                        entries.map { entry ->
+                            async(Dispatchers.IO) {
+                                val got = try {
+                                    DriveChain.resolve(entry, heading, quality)
+                                } catch (e: Exception) {
+                                    Log.i(TAG, "resolve EX ${e.javaClass.simpleName}: ${e.message}")
+                                    emptyList()
+                                }
+                                if (got.isNotEmpty()) return@async got
+                                Log.i(TAG, "resolve فارغ — scanDirect ${entry.take(70)}")
+                                try {
+                                    DriveChain.scanDirect(entry, heading, quality)
+                                } catch (e: Exception) {
+                                    emptyList()
+                                }
+                            }
+                        }.awaitAll().flatten()
+                    }
                 }
-            }
+            }.awaitAll().flatten()
         }
-        Log.i(TAG, "loadLinks: ${all.size} رابطًا من ${data.count { it == '\n' } + 1} مدخلًا")
+        Log.i(TAG, "loadLinks: ${all.size} رابطًا من ${lines.size} مدخلًا")
         if (all.isEmpty()) return false
 
-        // «إظهار كل المرايا» مطفأ ⇒ مرآة واحدة لكل (جودة، ملفّ).
-        val showAlt = pref(MoviesLeechSettingsBottomSheet.KEY_SHOW_ALT, true)
+        // لا يُحذف إلا التكرار المطابق تمامًا — كل جودة/سيرفر يظهر.
         val seen = HashSet<String>()
         val links = all.filter {
-            val key = if (showAlt) it.url + "|" + it.server
-            else it.quality.toString() + "|" + (it.note ?: it.server)
-            seen.add(key)
+            seen.add(
+                it.url + "|" + it.server + "|" + it.quality + "|" +
+                    (it.note ?: "") + "|" + it.downloadOnly
+            )
         }
 
         for (l in links) {

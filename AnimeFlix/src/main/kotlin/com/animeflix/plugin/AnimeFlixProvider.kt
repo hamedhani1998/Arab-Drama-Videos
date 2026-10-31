@@ -6,6 +6,10 @@ import cloudstreamshared.DriveChain
 import cloudstreamshared.MediaProbe
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
 import org.jsoup.nodes.Element
 import java.net.URLEncoder
 
@@ -181,42 +185,49 @@ class AnimeFlixProvider(private val prefs: SharedPreferences? = null) : MainAPI(
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit,
     ): Boolean {
-        val all = ArrayList<DriveChain.Link>()
-        for (line in data.split("\n")) {
-            val parts = line.split("\t")
-            val url = parts.getOrNull(0)?.trim().orEmpty()
-            val heading = parts.getOrNull(1)?.trim()?.ifBlank { null }
-            val quality = parts.getOrNull(2)?.trim()?.toIntOrNull() ?: 0
-            if (url.isBlank()) continue
-            val got = try {
-                DriveChain.resolve(url, heading, quality)
-            } catch (e: Exception) {
-                Log.i(TAG, "resolve EX ${e.javaClass.simpleName}: ${e.message}")
-                emptyList()
-            }
-            if (got.isEmpty()) {
-                // خطة بديلة: امسح الصفحة (أو وجهتها) مباشرةً عن أي رابط.
-                Log.i(TAG, "resolve فارغ — scanDirect ${url.take(70)}")
-                all += try {
-                    DriveChain.scanDirect(url, heading, quality)
-                } catch (e: Exception) {
-                    emptyList()
+        val lines = data.split("\n").map { it.trim() }.filter { it.isNotBlank() }
+        if (lines.isEmpty()) return false
+
+        // كل مدخلات الحلقة/الفيلم تُحلّ **معًا** لا واحدًا بعد الآخر: سلسلة
+        // التحويلات (٢–٤ طلبات) كانت تُجمَع تسلسليًّا فتُضاعف زمن الظهور بعدد
+        // الجودات. الآن الزمن = أبطأ سلسلة واحدة، لا مجموعها.
+        val all = coroutineScope {
+            lines.map { line ->
+                async(Dispatchers.IO) {
+                    val parts = line.split("\t")
+                    val url = parts.getOrNull(0)?.trim().orEmpty()
+                    val heading = parts.getOrNull(1)?.trim()?.ifBlank { null }
+                    val quality = parts.getOrNull(2)?.trim()?.toIntOrNull() ?: 0
+                    if (url.isBlank()) return@async emptyList<DriveChain.Link>()
+                    val got = try {
+                        DriveChain.resolve(url, heading, quality)
+                    } catch (e: Exception) {
+                        Log.i(TAG, "resolve EX ${e.javaClass.simpleName}: ${e.message}")
+                        emptyList()
+                    }
+                    if (got.isNotEmpty()) return@async got
+                    // خطة بديلة: امسح الصفحة (أو وجهتها) مباشرةً عن أي رابط.
+                    Log.i(TAG, "resolve فارغ — scanDirect ${url.take(70)}")
+                    try {
+                        DriveChain.scanDirect(url, heading, quality)
+                    } catch (e: Exception) {
+                        emptyList()
+                    }
                 }
-            } else {
-                all += got
-            }
+            }.awaitAll().flatten()
         }
-        Log.i(TAG, "loadLinks: ${all.size} رابطًا من ${data.count { it == '\n' } + 1} مدخلًا")
+        Log.i(TAG, "loadLinks: ${all.size} رابطًا من ${lines.size} مدخلًا")
         if (all.isEmpty()) return false
 
-        // «إظهار كل المرايا» مطفأ ⇒ مرآة واحدة لكل (جودة، ملفّ). المفتاح
-        // يشمل الجودة كي لا تُحذف جودةٌ كاملة لمجرّد أنّ مرآتها تحمل الاسم نفسه.
-        val showAlt = pref(AnimeFlixSettingsBottomSheet.KEY_SHOW_ALT, true)
+        // لا يُحذف إلا التكرار **المطابق تمامًا** (رابط + سيرفر + جودة + ملاحظة
+        // + نوع الاستعمال). أي رابط مختلف بجودةٍ أو سيرفر يظهر، مهما كان
+        // إعداد «إظهار البدائل» — لأن المطلوب كل الروابط دون استثناء.
         val seen = HashSet<String>()
         val links = all.filter {
-            val key = if (showAlt) it.url + "|" + it.server
-            else it.quality.toString() + "|" + (it.note ?: it.server)
-            seen.add(key)
+            seen.add(
+                it.url + "|" + it.server + "|" + it.quality + "|" +
+                    (it.note ?: "") + "|" + it.downloadOnly
+            )
         }
 
         for (l in links) {
