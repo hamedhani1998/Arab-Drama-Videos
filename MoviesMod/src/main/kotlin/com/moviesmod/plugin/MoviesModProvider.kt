@@ -1604,7 +1604,7 @@ class MoviesModProvider(private val prefs: SharedPreferences? = null) : MainAPI(
          * (‎cdn.video-gen‎)، «Direct Links»/«Server 1/2» (‎workers.dev‎).
          * اختراع اسمٍ بديل («Cloud»/«Mirror») كان يجعل القائمة لا تشبه الموقع.
          */
-        fun collect(html: String, pageUrl: String, note: String?): Int {
+        fun collect(html: String, pageUrl: String, note: String?, bytes: Long?): Int {
             val b = html.replace("\\/", "/")
             var found = 0
             for (a in RE_ANCHOR.findAll(b)) {
@@ -1614,7 +1614,7 @@ class MoviesModProvider(private val prefs: SharedPreferences? = null) : MainAPI(
                 val text = stripTags(a.groupValues[2]).trim()
                 when {
                     href.contains(".r2.dev") -> {
-                        add(href, text.ifBlank { "Cloud Download" }, null, note)
+                        add(href, text.ifBlank { "Cloud Download" }, null, note, bytes = bytes)
                         found++
                     }
                     href.contains("video-gen.xyz") -> {
@@ -1623,22 +1623,23 @@ class MoviesModProvider(private val prefs: SharedPreferences? = null) : MainAPI(
                             text.ifBlank { if (href.contains("cdn.")) "Instant Download" else "Instant Download V2" },
                             pageUrl,
                             note,
+                            bytes = bytes,
                         )
                         found++
                     }
                     href.contains("workers.dev") -> {
-                        add(href, text.ifBlank { "Mirror" }, pageUrl, note)
+                        add(href, text.ifBlank { "Mirror" }, pageUrl, note, bytes = bytes)
                         found++
                     }
                 }
             }
             if (found == 0) {
                 for (m in RE_R2_ANY.findAll(b)) {
-                    add(m.value, "Cloud Download", null, note)
+                    add(m.value, "Cloud Download", null, note, bytes = bytes)
                     found++
                 }
                 for (m in RE_VG_ANY.findAll(b)) {
-                    add(m.value, if (m.value.contains("cdn.")) "Instant Download" else "Instant Download V2", pageUrl, note)
+                    add(m.value, if (m.value.contains("cdn.")) "Instant Download" else "Instant Download V2", pageUrl, note, bytes = bytes)
                     found++
                 }
             }
@@ -1670,7 +1671,7 @@ class MoviesModProvider(private val prefs: SharedPreferences? = null) : MainAPI(
         // صفحات `/wfile/` و`/zfile/` تحمل المرايا حين لا يحملها `/file/`.
         // ★ الطلبات الأربعة متوازية: تسلسلها كان يُضيف ٤ أضعاف زمن الاستجابة
         // لكل ملفٍّ محجوب (والموسم كلّه ملفّات محجوبة).
-        suspend fun extras(pageUrl: String) {
+        suspend fun extras(pageUrl: String, bytes: Long?) {
             val id = pageUrl.substringAfter("/file/", "").substringBefore("?").substringBefore("/")
             if (id.isBlank()) return
             val targets = listOf(
@@ -1695,7 +1696,7 @@ class MoviesModProvider(private val prefs: SharedPreferences? = null) : MainAPI(
                         ?.let { unescapeText(it) }?.replace(RE_WS, "") ?: continue
                     if (!href.contains("workers.dev") && !href.contains(".r2.dev")) continue
                     val text = stripTags(a.groupValues[2]).trim()
-                    add(href, text.ifBlank { server }, u, null)
+                    add(href, text.ifBlank { server }, u, null, bytes = bytes ?: sizeOf(body))
                 }
             }
         }
@@ -1714,13 +1715,16 @@ class MoviesModProvider(private val prefs: SharedPreferences? = null) : MainAPI(
                 // ‎480p/720p/1080p‎ تحت عنوانٍ واحد، فيُقرأ أعلاها للجميع.
                 fileNote?.let { q -> qualityOf(q).takeIf { it != Qualities.Unknown.value }?.let { quality = it } }
                 val note = fileNote ?: baseNote
-                val found = collect(body, pageUrl, note)
+                // حجم الملفّ من صفحة `/file/` («Size : 187.93MB») يُلحق بكل
+                // مرايا الملفّ بلا طلبٍ إضافي، فيظهر الحجم مع كل جودة.
+                val pageBytes = sizeOf(body)
+                val found = collect(body, pageUrl, note, pageBytes)
 
                 if (pageUrl.contains("/file/")) {
-                    if (found == 0) {
-                        extras(pageUrl)
-                        if (cands.isEmpty()) addGated(pageUrl, body, note)
-                    }
+                    // دائماً: كل المرايا (Direct Links / Server 1/2 / Cloud Resume)
+                    // لا أوّلها فقط — المستخدم يريد كل الروابط دون استثناء.
+                    extras(pageUrl, pageBytes)
+                    if (found == 0 && cands.isEmpty()) addGated(pageUrl, body, note)
                     if (cands.isNotEmpty()) break
                 }
 
@@ -1764,7 +1768,7 @@ class MoviesModProvider(private val prefs: SharedPreferences? = null) : MainAPI(
                     // يُسقط روابط الأرشيف (‎zip‎) الواقعة بعد ملفّ الحلقة.
                     for ((fu, text) in subs) {
                         val fn = fileNameOf(text)?.let { displayName(it) }
-                        val ok = collect(text, fu, fn) > 0
+                        val ok = collect(text, fu, fn, sizeOf(text)) > 0
                         if (!ok && fu.contains("/file/")) addGated(fu, text, fn)
                     }
                     if (cands.isNotEmpty()) break
@@ -1784,14 +1788,16 @@ class MoviesModProvider(private val prefs: SharedPreferences? = null) : MainAPI(
         if (cands.isEmpty()) return emptyList()
 
         // حلّ 302 إلى رابط الوسائط الداخلي — والرابط الداخلي يُبَثّ بلا مُحيل.
+        // وإن تعذّر الحلّ يُبقى رابط `video-gen` الأصلي (المشغّل يتبع التحويلة)
+        // بدل إسقاطه، فلا يختفي سيرفر.
         return coroutineScope {
             cands.map { c ->
                 async(Dispatchers.IO) {
                     if (!c.url.contains("video-gen.xyz")) return@async c
-                    val inner = innerMedia(c.url, c.referer) ?: return@async null
+                    val inner = innerMedia(c.url, c.referer) ?: return@async c
                     c.copy(url = inner, referer = null, headers = emptyMap())
                 }
-            }.awaitAll().filterNotNull()
+            }.awaitAll()
         }
     }
 

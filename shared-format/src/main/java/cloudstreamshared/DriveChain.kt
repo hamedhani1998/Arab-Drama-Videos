@@ -415,7 +415,7 @@ object DriveChain {
             )
         }
 
-        fun collect(html: String, pageUrl: String, note: String?): Int {
+        fun collect(html: String, pageUrl: String, note: String?, bytes: Long?): Int {
             val b = html.replace("\\/", "/")
             var found = 0
             for (a in RE_ANCHOR.findAll(b)) {
@@ -425,7 +425,7 @@ object DriveChain {
                 val text = stripTags(a.groupValues[2]).trim()
                 when {
                     href.contains(".r2.dev") -> {
-                        add(href, text.ifBlank { "Cloud Download" }, null, note)
+                        add(href, text.ifBlank { "Cloud Download" }, null, note, bytes = bytes)
                         found++
                     }
                     href.contains("video-gen.xyz") -> {
@@ -437,18 +437,19 @@ object DriveChain {
                             },
                             pageUrl,
                             note,
+                            bytes = bytes,
                         )
                         found++
                     }
                     href.contains("workers.dev") -> {
-                        add(href, text.ifBlank { "Mirror" }, pageUrl, note)
+                        add(href, text.ifBlank { "Mirror" }, pageUrl, note, bytes = bytes)
                         found++
                     }
                 }
             }
             if (found == 0) {
                 for (m in RE_R2_ANY.findAll(b)) {
-                    add(m.value, "Cloud Download", null, note)
+                    add(m.value, "Cloud Download", null, note, bytes = bytes)
                     found++
                 }
                 for (m in RE_VG_ANY.findAll(b)) {
@@ -457,6 +458,7 @@ object DriveChain {
                         if (m.value.contains("cdn.")) "Instant Download" else "Instant Download V2",
                         pageUrl,
                         note,
+                        bytes = bytes,
                     )
                     found++
                 }
@@ -477,7 +479,7 @@ object DriveChain {
             )
         }
 
-        suspend fun extras(pageUrl: String) {
+        suspend fun extras(pageUrl: String, bytes: Long?) {
             val id = pageUrl.substringAfter("/file/", "").substringBefore("?").substringBefore("/")
             if (id.isBlank()) return
             val targets = listOf(
@@ -502,7 +504,7 @@ object DriveChain {
                         ?.let { unescapeText(it) }?.replace(RE_WS, "") ?: continue
                     if (!href.contains("workers.dev") && !href.contains(".r2.dev")) continue
                     val text = stripTags(a.groupValues[2]).trim()
-                    add(href, text.ifBlank { server }, u, null)
+                    add(href, text.ifBlank { server }, u, null, bytes = bytes ?: sizeOf(body))
                 }
             }
         }
@@ -521,12 +523,16 @@ object DriveChain {
                     qualityOf(q).takeIf { it != Qualities.Unknown.value }?.let { quality = it }
                 }
                 val note = fileNote ?: baseNote
-                val found = collect(body, pageUrl, note)
+                // حجم الملفّ من صفحة `/file/` نفسها («Size : 187.93MB») — يُلحق
+                // بكل مرايا الملفّ (‎r2‎/‎video-gen‎/‎workers‎) بلا طلبٍ إضافي،
+                // فيظهر الحجم بجوار كل جودة.
+                val pageBytes = sizeOf(body)
+                val found = collect(body, pageUrl, note, pageBytes)
 
                 if (pageUrl.contains("/file/")) {
                     // نجمع دائماً روابط «Direct Links / Server 1 / Server 2 /
                     // Cloud Resume» — المستخدم يريد **كل** الروابط لا أوّلها.
-                    extras(pageUrl)
+                    extras(pageUrl, pageBytes)
                     if (out.isEmpty()) addGated(pageUrl, body, note)
                     if (out.isNotEmpty()) break
                 }
@@ -557,7 +563,7 @@ object DriveChain {
                     }
                     for ((fu, text) in subs) {
                         val fn = fileNameOf(text)?.let { displayName(it) }
-                        val ok = collect(text, fu, fn) > 0
+                        val ok = collect(text, fu, fn, sizeOf(text)) > 0
                         if (!ok && fu.contains("/file/")) addGated(fu, text, fn)
                     }
                     if (out.isNotEmpty()) break
@@ -583,13 +589,29 @@ object DriveChain {
         return coroutineScope {
             out.map { c ->
                 async(Dispatchers.IO) {
-                    if (!c.url.contains("video-gen.xyz")) return@async c
-                    val inner = innerMedia(c.url, c.referer) ?: return@async c
-                    c.copy(
-                        url = inner,
-                        referer = null,
-                        downloadOnly = isDownload(inner, c.note),
-                    )
+                    var link = c
+                    if (link.url.contains("video-gen.xyz")) {
+                        val inner = innerMedia(link.url, link.referer)
+                        if (inner != null) {
+                            link = link.copy(
+                                url = inner,
+                                referer = null,
+                                downloadOnly = isDownload(inner, link.note),
+                            )
+                        }
+                    }
+                    // احتياطٌ للحجم: إن لم تُعلنه صفحة الملفّ، يُقاس بطلب
+                    // بايتين واحد (سقف ١٫٥ث) — فلا تظهر جودة بلا حجم.
+                    if (link.bytes == null && !link.gated) {
+                        val r = MediaProbe.probe(
+                            link.url,
+                            link.referer,
+                            emptyMap(),
+                            timeoutMs = 1500,
+                        )
+                        if (r.totalBytes != null) link = link.copy(bytes = r.totalBytes)
+                    }
+                    link
                 }
             }.awaitAll()
         }
