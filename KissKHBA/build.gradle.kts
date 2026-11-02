@@ -1,4 +1,4 @@
-version = 2
+version = 3
 
 cloudstream {
     description = "KissKH.ba — مسلسلات وأفلام وأنمي آسيوي بكل السيرفرات وملفات الترجمة"

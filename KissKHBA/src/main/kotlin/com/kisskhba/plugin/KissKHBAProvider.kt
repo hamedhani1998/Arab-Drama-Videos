@@ -32,11 +32,9 @@ import java.util.Locale
  *  - `megaplay` وغيرها ← استخراج رابط الوسائط من صفحة التضمين،
  *  - وإن لم يُستخرَج شيء **تُعرض صفحة التضمين نفسها** فلا يُخفي سيرفرًا.
  *
- * ملاحظة الترجمة (مهمّة): الخادم يُعيد ملفّ `.vtt` داخل مقاطعَه نصًّا مُشفّرًا
- * سطرًا سطرًا، ولا يفكّه إلا سكربت الموقع (`cryptoService.b2`). ولأن
- * `newSubtitleFile` لا يقبل إلا رابطًا (لا نصًّا جاهزًا) نعرض **رابط الترجمة
- * الأصلي** كما هو — يظهر في القائمة، لكن قارئ الترجمة في CloudStream لن يفكّ
- * محتواه.
+ * ملاحظة الترجمة (مهمّة): الخادم يُعيد ملفّ `.vtt` لكن **نصّ كل مقطعٍ مشفّر**
+ * (Base64 + AES‑256‑CBC بمفتاح `vidbasic`). يُفكّ في [SubText] ويُقدَّم عبر
+ * [SubProxy] على `127.0.0.1` لأنّ `newSubtitleFile` لا يقبل إلا رابطًا.
  */
 class KissKHBAProvider : MainAPI() {
 
@@ -192,7 +190,9 @@ class KissKHBAProvider : MainAPI() {
         if (episodes.isEmpty()) return null
 
         val eps = episodes.mapIndexed { idx, (num, link) ->
-            newEpisode("ep:$link") {
+            // نُسبق بـmainUrl بأنفسنا لأنّ `newEpisode` يمرّر البيانات على
+            // `fixUrl`؛ هكذا تبقى كما هي ويُزيلها [normalize] في [loadLinks].
+            newEpisode("$mainUrl/ep:$link") {
                 this.name = "الحلقة ${fmt(num)}"
                 this.episode = idx + 1
             }
@@ -259,10 +259,13 @@ class KissKHBAProvider : MainAPI() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit,
     ): Boolean {
+        // سلوك `newEpisode` قد يُسبق البيانات المخزَّنة (من نسخةٍ سابقة أو من
+        // «متابعة المشاهدة») بـmainUrl، فنزيلها كي لا تفشل المطابقة.
+        val key = normalize(data)
         val out = try {
             when {
-                data.startsWith("mov:") -> resolveMovie(data.removePrefix("mov:"))
-                data.startsWith("ep:") -> resolveEpisode(data.removePrefix("ep:"), null)
+                key.startsWith("mov:") -> resolveMovie(key.removePrefix("mov:"))
+                key.startsWith("ep:") -> resolveEpisode(key.removePrefix("ep:"), null)
                 else -> Resolved()
             }
         } catch (e: Exception) {
@@ -682,6 +685,11 @@ class KissKHBAProvider : MainAPI() {
     } catch (e: Exception) {
         s
     }
+
+    /** يزيل ما قد تسبقه به `fixUrl` من `mainUrl` عن بيانات الحلقة/الفيلم. */
+    private fun normalize(data: String): String =
+        if (data.startsWith("ep:") || data.startsWith("mov:")) data
+        else data.removePrefix("$mainUrl/").removePrefix(mainUrl)
 
     /**
      * جلب صفحةٍ بمحاولتين — انقطاعٌ عابر أو ردّ Cloudflare `522` (حصل فعلًا

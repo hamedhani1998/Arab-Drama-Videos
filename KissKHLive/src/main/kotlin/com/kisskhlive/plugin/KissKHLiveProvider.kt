@@ -128,7 +128,9 @@ class KissKHLiveProvider : MainAPI() {
         }
 
         val episodes = eps.mapIndexed { idx, (eid, num) ->
-            newEpisode("ep:$eid") {
+            // نُسبق بـmainUrl بأنفسنا لأنّ `newEpisode` يمرّر البيانات على
+            // `fixUrl`؛ هكذا تبقى كما هي ويُزيلها [normalize] في [loadLinks].
+            newEpisode("$mainUrl/ep:$eid") {
                 this.name = "الحلقة ${fmt(num)}"
                 this.episode = idx + 1
             }
@@ -151,11 +153,12 @@ class KissKHLiveProvider : MainAPI() {
         callback: (ExtractorLink) -> Unit,
     ): Boolean {
         val emitted = try {
-            if (data.startsWith("mov:")) {
-                loadMovie(data.removePrefix("mov:").toIntOrNull() ?: return false,
+            val key = normalize(data)
+            if (key.startsWith("mov:")) {
+                loadMovie(key.removePrefix("mov:").toIntOrNull() ?: return false,
                     subtitleCallback, callback)
             } else {
-                val epId = data.removePrefix("ep:").toIntOrNull() ?: return false
+                val epId = key.removePrefix("ep:").toIntOrNull() ?: return false
                 resolveEpisode(epId, null, subtitleCallback, callback)
             }
         } catch (e: Exception) {
@@ -166,13 +169,17 @@ class KissKHLiveProvider : MainAPI() {
         return emitted > 0
     }
 
+    /** يزيل ما قد تسبقه به `fixUrl` من `mainUrl` عن بيانات الحلقة/الفيلم. */
+    private fun normalize(data: String): String =
+        if (data.startsWith("ep:") || data.startsWith("mov:")) data
+        else data.removePrefix("$mainUrl/").removePrefix(mainUrl)
+
     /** فيلم قد يكون جزءًا واحدًا أو أجزاءً (بعض ما يُوسم Movie له عدّة حلقات). */
     private suspend fun loadMovie(
         dramaId: Int?,
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit,
-    ): Int {
-        if (dramaId == null) return 0
+    ): Int {        if (dramaId == null) return 0
         val o = try {
             JSONObject(app.get("$mainUrl$API/Drama/$dramaId?isq=false", headers = head).text)
         } catch (e: Exception) {
