@@ -47,6 +47,11 @@ object SubText {
                 i++
                 continue
             }
+            // بعض الملفّات تبدأ بترويسة WebVTT ونحن نكتبها في البداية.
+            if (t.equals("WEBVTT", true)) {
+                i++
+                continue
+            }
             if (t.contains(TIMESTAMP)) {
                 if (out.isNotEmpty() && !out.endsWith("\n\n")) out.append('\n')
                 out.append(t.replace(',', '.')).append('\n')

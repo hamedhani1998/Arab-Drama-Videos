@@ -7,11 +7,14 @@ import com.lagradost.cloudstream3.utils.*
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.runBlocking
 import org.json.JSONArray
 import org.json.JSONObject
 import java.net.URI
 import java.net.URLDecoder
 import java.net.URLEncoder
+import java.security.MessageDigest
 import java.util.Locale
 
 /**
@@ -138,7 +141,7 @@ class KissKHBAProvider : MainAPI() {
             .ifBlank { url }
 
         val html = try {
-            app.get(pageUrl, headers = head).text
+            fetchPage(pageUrl)
         } catch (e: Exception) {
             Log.i(TAG, "load FAIL ${e.javaClass.simpleName} ${e.message}")
             return null
@@ -267,14 +270,17 @@ class KissKHBAProvider : MainAPI() {
             Resolved()
         }
         val emitted = emit(out, subtitleCallback, callback)
-        Log.i(TAG, "loadLinks → $emitted رابط")
+        Log.i(
+            TAG,
+            "loadLinks ${data.take(60)} → $emitted رابط، ${out.subs.size} ترجمة"
+        )
         return emitted > 0
     }
 
     /** فيلم قد يكون جزءًا واحدًا أو أجزاءً؛ كل الأجزاء تُجلب وتُعرض. */
     private suspend fun resolveMovie(pageUrl: String): Resolved {
         val html = try {
-            app.get(pageUrl, headers = head).text
+            fetchPage(pageUrl)
         } catch (e: Exception) {
             return Resolved()
         }
@@ -303,7 +309,7 @@ class KissKHBAProvider : MainAPI() {
         note: String?,
     ): Resolved {
         val html = try {
-            app.get(epUrl, headers = head).text
+            fetchPage(epUrl)
         } catch (e: Exception) {
             Log.i(TAG, "episode FAIL ${e.javaClass.simpleName} ${e.message}")
             return Resolved()
@@ -431,7 +437,7 @@ class KissKHBAProvider : MainAPI() {
         note: String?,
     ): Resolved {
         val html = try {
-            app.get(embed, headers = head).text
+            fetchPage(embed, "https://kisskh.ba/")
         } catch (e: Exception) {
             ""
         }
@@ -454,7 +460,7 @@ class KissKHBAProvider : MainAPI() {
         referer: String,
     ): Resolved? {
         val player = try {
-            app.get(playerUrl, headers = head + mapOf("Referer" to referer)).text
+            fetchPage(playerUrl, referer)
         } catch (e: Exception) {
             ""
         }
@@ -468,10 +474,11 @@ class KissKHBAProvider : MainAPI() {
                 ?.groupValues?.get(1)?.let { urlDecode(it) }
 
         val out = Resolved()
-        // الترجمة: الوسيط `sub` مشفّر بالمفتاح نفسه وناتجه رابط vtt.
+        // الترجمة: الوسيط `sub` مشفّر بالمفتاح نفسه وناتجه رابط vtt، ومقاطعه
+        // مشفّرة أيضًا — فتُقدَّم مفكوكةً عبر [SubProxy].
         Regex("[?&]sub=([^&\"'\\s]+)").find(playerUrl)?.groupValues?.get(1)?.let { raw ->
             Vidbasic.decryptUrl(urlDecode(raw))?.let { subUrl ->
-                out.subs.add(Sub(subLabel(subUrl), subUrl))
+                out.subs.add(Sub(subLabel(subUrl), subtitleUrl(subUrl)))
             }
         }
 
@@ -676,7 +683,60 @@ class KissKHBAProvider : MainAPI() {
         s
     }
 
-    private fun refererFor(url: String): String = try {        val u = URI(url)
+    /**
+     * جلب صفحةٍ بمحاولتين — انقطاعٌ عابر أو ردّ Cloudflare `522` (حصل فعلًا
+     * أثناء اختبار الجهاز) لا يجب أن يُفرغ النتيجة.
+     */
+    private suspend fun fetchPage(url: String, referer: String? = null): String {
+        val h = if (referer == null) head else head + mapOf("Referer" to referer)
+        var last: Exception? = null
+        repeat(2) { attempt ->
+            try {
+                return app.get(url, headers = h).text
+            } catch (e: Exception) {
+                last = e
+                if (attempt == 0) delay(400)
+            }
+        }
+        throw last ?: IllegalStateException("fetch failed: $url")
+    }
+
+    /**
+     * يُعيد رابط ترجمة **قابلًا للقراءة**: ملفّات `kk.vidbasic.top/track/…`
+     * نصوصها مشفّرة، فتُقدَّم عبر [SubProxy] بعد فكّها ([SubText]). وإن تعذّر
+     * فتح الوسيط بقي الرابط الأصلي (مشفَّرًا) خيرًا من لا شيء.
+     */
+    private fun subtitleUrl(src: String): String {
+        val url = src.trim()
+        if (url.isBlank()) return url
+        if (!url.contains("vidbasic", true) && !url.contains("/track/", true)) return url
+
+        var cached: String? = null
+        val local = SubProxy.publish(md5(url)) {
+            cached ?: buildVtt(url)?.also { cached = it }
+        }
+        return local ?: url
+    }
+
+    private fun buildVtt(url: String): String? = try {
+        val raw = runBlocking {
+            app.get(url, headers = head + mapOf("Referer" to "https://vidbasic.top/")).text
+        }
+        SubText.toVtt(raw)
+    } catch (e: Exception) {
+        Log.i(TAG, "subtitle build FAIL ${e.javaClass.simpleName} ${e.message}")
+        null
+    }
+
+    private fun md5(s: String): String = try {
+        MessageDigest.getInstance("MD5").digest(s.toByteArray(Charsets.UTF_8))
+            .joinToString("") { "%02x".format(it.toInt() and 0xFF) }
+    } catch (e: Exception) {
+        Integer.toHexString(s.hashCode())
+    }
+
+    private fun refererFor(url: String): String = try {
+        val u = URI(url)
         if (u.host.isNullOrBlank()) "$mainUrl/" else "${u.scheme}://${u.host}/"
     } catch (e: Exception) {
         "$mainUrl/"
@@ -688,7 +748,9 @@ class KissKHBAProvider : MainAPI() {
         val code = Regex("\\.([a-zA-Z]{2,3})\\.(?:vtt|srt|ass|ssa)$")
             .find(file)?.groupValues?.get(1)?.lowercase(Locale.US)
         return when (code) {
-            null -> "Subtitle"
+            // مسارات `kk.vidbasic.top/track/…` لا تحمل رمز لغة في اسمها،
+            // والملفّ المرفق بها إنجليزيّ.
+            null -> if (url.contains("/track/", true)) "English" else "Subtitle"
             "en" -> "English"
             "ar" -> "Arabic"
             "id" -> "Indonesian"

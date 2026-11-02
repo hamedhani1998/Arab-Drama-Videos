@@ -52,4 +52,23 @@ object Vidbasic {
     /** يفكّ ثم يتحقّق أنّ الناتج رابط ويب — وإلا null. */
     fun decryptUrl(base64: String?): String? =
         decrypt(base64)?.takeIf { it.startsWith("http://") || it.startsWith("https://") }
+
+    /**
+     * فكّ **نصّ** (سطر ترجمة) بالمفتاح نفسه، بلا تقليم ولا استبدال فراغات —
+     * إذ إنّ [decrypt] مصمَّم لقيم URL حيث الفراغ يعني `+`. يُعيد null عند
+     * فشل الحشو.
+     */
+    fun decryptText(base64: String?): String? {
+        if (base64.isNullOrBlank()) return null
+        return try {
+            val clean = base64.trim().replace("\n", "").replace("\r", "")
+            val pad = (4 - clean.length % 4) % 4
+            val bytes = Base64.decode(clean + "=".repeat(pad), Base64.DEFAULT)
+            val cipher = Cipher.getInstance("AES/CBC/PKCS5Padding")
+            cipher.init(Cipher.DECRYPT_MODE, key, iv)
+            String(cipher.doFinal(bytes), Charsets.UTF_8)
+        } catch (e: Exception) {
+            null
+        }
+    }
 }
