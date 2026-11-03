@@ -84,11 +84,15 @@ class NartoDramaProvider(private val prefs: SharedPreferences? = null) : MainAPI
 
     // الصفوف التي لم يخفها المستخدم. إن أخفى الكل نُبقي صف «الاقتراحات» حتى لا تفرغ
     // الواجهة الرئيسية تماماً (وإلا لا يبقى للمستخدم طريق للرجوع من الإعدادات).
+    // اسم المزوّد يُضاف إلى عنوان كل صفّ: الرئيسية تعرض صفوف مزوّدٍ واحد فقط، ومع
+    // تشابه الأقسام بين المواقع (دراما/مدبلج/رومانسي) كان عنوان الصف لا يقول مصدره.
+    private fun rowTitle(label: String): String = "$name • $label"
+
     private fun visibleRows(): List<Pair<String, String>> {
         val shown = (listOf(suggestRow) + categoryRows).filter { (data, _) ->
             prefs?.getBoolean(rowKeyFor(data), true) != false
         }
-        return shown.ifEmpty { listOf(suggestRow) }
+        return shown.ifEmpty { listOf(suggestRow) }.map { (data, label) -> data to rowTitle(label) }
     }
 
     // Referer for all requests/links. This is just an HTTP Referer header the narto stream/
@@ -160,13 +164,18 @@ class NartoDramaProvider(private val prefs: SharedPreferences? = null) : MainAPI
     }
 
     // The edge home "/" feed (Block-1 CollectionPage ListItems), cached.
+    // نجرّب edge أولاً (الأسرع)، ثم apex: مضيف edge يسقط أحياناً على مستوى النقل
+    // (قِيس 2026-11-03: curl إلى edge "/" أعاد 000 مرتين قبل أن ينجح)، ولو بقي بلا بديل
+    // لصار صفّ «الاقتراحات» فارغاً وكل الصفوف معه لأنّه شبكة الأمان للبقية.
     private suspend fun fetchHomeFeed(): String? {
         homeFeedCache?.let { return it }
         try {
-            val html = nartoGetPage("$BRW_HOST/", nartoOrigin, "NartoDrama")
-            if (html != null && html.contains("\"@type\":\"ListItem\"")) {
-                homeFeedCache = html
-                return html
+            for (host in listOf(BRW_HOST, NARTO_HOST)) {
+                val html = nartoGetPage("$host/", nartoOrigin, "NartoDrama")
+                if (html != null && html.contains("\"@type\":\"ListItem\"")) {
+                    homeFeedCache = html
+                    return html
+                }
             }
         } catch (e: kotlinx.coroutines.CancellationException) {
             throw e // نفس قاعدة البحث أعلاه: الإلغاء ليس فشل شبكة

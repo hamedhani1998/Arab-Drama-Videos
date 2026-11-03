@@ -175,7 +175,7 @@ internal suspend fun nartoGetPage(
             val res = com.lagradost.cloudstream3.app.get(
                 url,
                 referer = referer,
-                headers = mapOf("User-Agent" to UA),
+                headers = ndCookieHeader(),
                 timeout = timeoutMs,
             )
             val code = res.code
@@ -184,7 +184,13 @@ internal suspend fun nartoGetPage(
                 // Some fronts answer 200 with an error document (a proxy's soft error). Treat
                 // it as a failure so the retry can find the real page.
                 if (!isErrorPage(body)) return body
-                lastWhy = "soft-error page (HTTP 200)"
+                if (isChallengePage(body)) {
+                    // صفحة الحماية بكوكي مرفوض: نُبدّل القيمة قبل المحاولة التالية.
+                    rotateNdCookie()
+                    lastWhy = "challenge page (cookie rotated)"
+                } else {
+                    lastWhy = "soft-error page (HTTP 200)"
+                }
             } else {
                 lastWhy = "HTTP $code"
                 // A real verdict on the URL — retrying a 404/410 only burns the budget.
@@ -221,8 +227,65 @@ internal fun isErrorPage(body: String): Boolean {
     val head = body.take(1200)
     return head.contains("Internal Server Error") ||
         head.contains("500 Internal Server Error") ||
-        Regex("""<title>\s*(500|502|503|504)\b""").containsMatchIn(head)
+        Regex("""<title>\s*(500|502|503|504)\b""").containsMatchIn(head) ||
+        isChallengePage(body)
 }
+
+// ---------------------------------------------------------------- كويكي الحماية nd_ck
+//
+// MEASURED 2026-11-03: كلا المضيفين (apex وedge) صارا يُعيدان صفحة حماية بحجم ١٧١٥ بايت
+// بدل الصفحة الحقيقية:
+//     <title>Loading</title> ... "Checking your browser..."
+// السكربت يكتب الكوكي بنفسه ثم يُعيد التحميل:
+//     document.cookie = "nd_ck=" + Date.now().toString(36) + Math.random().toString(36).slice(2,10)
+//
+// لماذا كانت هذه كارثة على المصدرين: الخادم لا يُرسل `Set-Cookie` إطلاقًا، ومخزن كوكيز
+// OkHttp لا يرى ما تكتبه JavaScript — أي أنّ *كل* طلب من التطبيق كان يستلم صفحة الحماية،
+// و`parseSearchItems` لا يجد فيها ListItem فيُعيد قائمة فارغة، فيبدو المصدر «ميتًا» بلا
+// أي خطأ شبكة يُسجَّل. قِيس: apex "/" بلا كوكي ⇒ ١٧١٥ بايت (حماية)، وبكوكي صحيح ⇒ ٤٦٥ كيلوبايت
+// (الصفحة الحقيقية) ٦/٦ محاولات. القيمة القصيرة «zz9» رُفضت، فالشكل مطلوب لا مجرد الوجود.
+//
+// هذه دالة نقية لا تعتمد على الشبكة: نولّد القيمة محليًّا بنفس صيغة السكربت.
+private const val B36 = "0123456789abcdefghijklmnopqrstuvwxyz"
+
+private fun Long.toBase36(): String {
+    if (this <= 0L) return "0"
+    var n = this
+    val sb = StringBuilder()
+    while (n > 0L) {
+        sb.append(B36[(n % 36L).toInt()])
+        n /= 36L
+    }
+    return sb.reverse().toString()
+}
+
+private fun randomBase36(len: Int): String {
+    val rnd = java.util.Random()
+    val sb = StringBuilder(len)
+    repeat(len) { sb.append(B36[rnd.nextInt(36)]) }
+    return sb.toString()
+}
+
+internal fun buildNdCookie(): String =
+    System.currentTimeMillis().toBase36() + randomBase36(8)
+
+// القيمة تُعاد استخدامها كي لا نولّد كوكيًا جديدًا مع كل طلب (الموقع يمنحها عمر ساعتين).
+private var ndCookieValue: String? = null
+
+internal fun ndCookie(): String =
+    ndCookieValue ?: buildNdCookie().also { ndCookieValue = it }
+
+// بعد ردٍّ محميّ نُبدّل القيمة: الحماية قد تكون رفضت القيمة الحالية (جلسة قديمة/عمر منتهٍ).
+internal fun rotateNdCookie(): String =
+    buildNdCookie().also { ndCookieValue = it }
+
+internal fun ndCookieHeader(): Map<String, String> =
+    mapOf("User-Agent" to UA, "Cookie" to "nd_ck=${ndCookie()}")
+
+// صفحة «Checking your browser...» ليست صفحة خطأ HTTP — كودها 200. تُعامَل كفشل كي
+// يعيد nartoGetPage المحاولة بكوكي جديد بدل أن يُسلّم نصًّا لا يحتوي أي بطاقة.
+internal fun isChallengePage(body: String): Boolean =
+    body.length < 8_000 && body.contains("Checking your browser")
 
 // The server messages that mean "no playable source right now", as opposed to a network failure.
 internal val UNAVAILABLE_MESSAGES = setOf(

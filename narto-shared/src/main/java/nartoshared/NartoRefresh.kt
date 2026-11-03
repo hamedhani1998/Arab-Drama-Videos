@@ -135,6 +135,7 @@ internal class NartoFetch(
                     val body = app.get(
                         "$h/e/rs/detail/watch/$slug/$ep/refresh-source?rs_ctx=$fakeRsCtx",
                         referer = referer,
+                        headers = ndCookieHeader(),
                         timeout = 30000L
                     ).text
                     val ms = System.currentTimeMillis() - tl0
@@ -216,6 +217,7 @@ internal class NartoFetch(
                         val body = app.get(
                             "$h/e/rs/detail/watch/$slug/$ep/refresh-source?rs_ctx=$fakeRsCtx",
                             referer = referer,
+                            headers = ndCookieHeader(),
                             timeout = 30000L
                         ).text
                         val resp = mapper.readValue(body, NartoResponse::class.java)

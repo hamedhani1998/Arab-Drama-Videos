@@ -81,11 +81,14 @@ class EdgeNartoProvider(private val prefs: SharedPreferences? = null) : MainAPI(
 
     // الصفوف التي لم يخفها المستخدم. إن أخفى الكل نُبقي صف «الاقتراحات» حتى لا تفرغ
     // الواجهة الرئيسية تماماً (وإلا لا يبقى للمستخدم طريق للرجوع من الإعدادات).
+    // اسم المزوّد يُضاف إلى عنوان كل صفّ كي يُعرف مصدره من العنوان نفسه.
+    private fun rowTitle(label: String): String = "$name • $label"
+
     private fun visibleRows(): List<Pair<String, String>> {
         val shown = (listOf(suggestRow) + categoryRows).filter { (data, _) ->
             prefs?.getBoolean(rowKeyFor(data), true) != false
         }
-        return shown.ifEmpty { listOf(suggestRow) }
+        return shown.ifEmpty { listOf(suggestRow) }.map { (data, label) -> data to rowTitle(label) }
     }
 
     // Referer for all requests/links — the apex domain. This is the ONLY value shared in spirit
