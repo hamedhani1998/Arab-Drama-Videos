@@ -18,6 +18,13 @@ private const val EDGE_HOST = "https://edge.narto-drama.com"
 // بحث عربي (البادئة /* تعني: هذا صفّ الموجز لا بحث). getMainPage يتفرّع عليها.
 private const val SUGGEST_ROW = "/*suggest*/"
 
+// ★ سقف زمني صارم لكل صفّ من صفوف الرئيسية (نفس تعليل NartoDrama):
+// التطبيق يرسم الرئيسية بعد اكتمال كل الصفوف، وكل صفحة كانت تُطلب بـ٤ محاولات × ٣٠ ثانية،
+// فصفٌّ واحد على شبكة متعثّرة كان يؤجّل الرسم دقائق فيبدو أنّ «الواجهة الرئيسية لا تظهر».
+private const val ROW_BUDGET_MS = 25_000L
+private const val ROW_GET_TIMEOUT_MS = 12_000L
+private const val ROW_GET_ATTEMPTS = 2
+
 // Standalone "Edge Narto Drama" extension — pinned to https://edge.narto-drama.com ONLY.
 // This provider is 100% independent: its own cache, its own refresh channel, its own cooldown
 // handling — it never treats the apex host as its own.
@@ -145,7 +152,8 @@ class EdgeNartoProvider(private val prefs: SharedPreferences? = null) : MainAPI(
         try {
             val html = nartoGetPage(
                 "$mainUrl/search?lang=ar-SA&q=$urlEncQ&page=1&perPage=12",
-                nartoOrigin, "EdgeNarto"
+                nartoOrigin, "EdgeNarto",
+                timeoutMs = ROW_GET_TIMEOUT_MS, attempts = ROW_GET_ATTEMPTS,
             )
             if (html != null && html.contains("\"@type\":\"ListItem\"")) {
                 searchCache[q] = html
@@ -167,7 +175,10 @@ class EdgeNartoProvider(private val prefs: SharedPreferences? = null) : MainAPI(
     private suspend fun fetchHomeFeed(): String? {
         homeFeedCache?.let { return it }
         try {
-            val html = nartoGetPage("$mainUrl/", nartoOrigin, "EdgeNarto")
+            val html = nartoGetPage(
+                "$mainUrl/", nartoOrigin, "EdgeNarto",
+                timeoutMs = 12_000L, attempts = 2,
+            )
             if (html != null && html.contains("\"@type\":\"ListItem\"")) {
                 homeFeedCache = html
                 return html
@@ -194,22 +205,27 @@ class EdgeNartoProvider(private val prefs: SharedPreferences? = null) : MainAPI(
             // asked the slow server for the same pages twice (measured on device: a 37.9 s row,
             // with the home screen painted only after it). Each call now fetches its own row
             // immediately; searchCache/homeFeedCache keep tab-hops and re-renders instant.
-            var html = if (isSuggest) fetchHomeFeed() else fetchSearch(q)
+            //
+            // ★ And every fetch is wrapped in withTimeoutOrNull: even a frozen network can never
+            // hold a row longer than ROW_BUDGET_MS, so the home screen always paints.
             var fromFallback = false
-            if (html == null || parseSearchItems(html).isEmpty()) {
-                // Tab's own feed failed/empty — never blank the screen: serve the shared home
-                // feed instead (always present).
-                android.util.Log.e("EdgeNarto", "getMainPage q=$q empty/failed -> fallback home feed")
-                html = fetchHomeFeed()
-                fromFallback = true
-                if (html == null) {
-                    android.util.Log.e("EdgeNarto", "getMainPage fetch failed q=$q")
-                    // صفٌّ فارغ بدل null: انظر التعليق المطابق في NartoDrama.
-                    return newHomePageResponse(request.name, emptyList())
-                }
+            var html: String? = kotlinx.coroutines.withTimeoutOrNull(ROW_BUDGET_MS) {
+                if (isSuggest) fetchHomeFeed()
+                else fetchSearch(q) ?: homeFeedCache?.also { fromFallback = true }
             }
-            android.util.Log.e("EdgeNarto", "getMainPage q=$q fetchMs=${System.currentTimeMillis() - t0} len=${html.length} fallback=$fromFallback")
-            val items = parseSearchItems(html)
+            if (html == null && !isSuggest) {
+                android.util.Log.e("EdgeNarto", "getMainPage q=$q -> fallback home feed")
+                html = kotlinx.coroutines.withTimeoutOrNull(ROW_BUDGET_MS) { fetchHomeFeed() }
+                fromFallback = html != null
+            }
+            if (html == null) {
+                android.util.Log.e("EdgeNarto", "getMainPage fetch failed q=$q")
+                // صفٌّ فارغ بدل null: انظر التعليق المطابق في NartoDrama.
+                return newHomePageResponse(request.name, emptyList())
+            }
+            val feed = html
+            android.util.Log.e("EdgeNarto", "getMainPage q=$q fetchMs=${System.currentTimeMillis() - t0} len=${feed.length} fallback=$fromFallback")
+            val items = parseSearchItems(feed)
             if (items.isEmpty()) {
                 android.util.Log.e("EdgeNarto", "getMainPage q=$q no items")
                 return newHomePageResponse(request.name, emptyList())
