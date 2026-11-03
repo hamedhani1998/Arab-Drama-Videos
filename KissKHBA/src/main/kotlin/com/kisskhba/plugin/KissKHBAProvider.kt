@@ -343,9 +343,9 @@ class KissKHBAProvider : MainAPI() {
 
         // روابط التحميل تُضاف كروابط مستقلة معلَّمة DOWNLOAD.
         for (d in downloads) {
-            val linkUrl = d.optString("url").trim().ifBlank { continue }
-            val label = d.optString("label").trim().ifBlank { "Download" }
-            val quality = d.optString("quality").trim().ifBlank { null }
+            val linkUrl = text(d, "url").ifBlank { continue }
+            val label = text(d, "label").ifBlank { "Download" }
+            val quality = text(d, "quality").ifBlank { null }
             out.links.add(
                 Link(
                     server = label,
@@ -374,7 +374,9 @@ class KissKHBAProvider : MainAPI() {
         for (s in r.subs) {
             if (s.url.isBlank() || !seenSub.add(s.url)) continue
             try {
-                subtitleCallback(newSubtitleFile(s.label, s.url))
+                subtitleCallback(newSubtitleFile(s.label, s.url) {
+                    s.headers?.let { this.headers = it }
+                })
             } catch (e: Exception) {
                 Log.i(TAG, "subtitle skip ${e.javaClass.simpleName}")
             }
@@ -410,13 +412,13 @@ class KissKHBAProvider : MainAPI() {
     // -------------------------------------------------------------- السيرفرات
 
     private suspend fun resolveServer(server: JSONObject, note: String?): Resolved {
-        val srvName = server.optString("name").trim()
-            .ifBlank { server.optString("type").trim() }
+        val srvName = text(server, "name")
+            .ifBlank { text(server, "type") }
             .ifBlank { "Server" }
-        var src = server.optString("src").trim()
+        var src = text(server, "src")
         if (src.isBlank()) {
             // بعض السيرفرات تُرسل HTML جاهزًا بدل رابط.
-            src = Regex("https?://[^\"'\\s<>]+").find(server.optString("html"))
+            src = Regex("https?://[^\"'\\s<>]+").find(text(server, "html"))
                 ?.value.orEmpty()
         }
         if (src.isBlank()) return Resolved()
@@ -446,10 +448,18 @@ class KissKHBAProvider : MainAPI() {
         }
 
         val playerUrl = findPlayerUrl(html)?.let { absolute(it, embed) }
+        var playerOnly: Resolved? = null
         if (playerUrl != null) {
-            resolvePlayer(playerUrl, server, note, "https://vidbasic.top/")?.let { return it }
+            val r = resolvePlayer(playerUrl, server, note, "https://vidbasic.top/")
+            if (r != null && r.links.isNotEmpty()) return r
+            playerOnly = r
         }
-        return resolveGeneric(embed, server, note)
+        // مهما كان، لا نُسقط الترجمة إن فشل استخراج الوسائط.
+        val generic = resolveGeneric(embed, server, note)
+        playerOnly?.subs?.forEach { s ->
+            if (generic.subs.none { it.url == s.url }) generic.subs.add(s)
+        }
+        return generic
     }
 
     /**
@@ -485,7 +495,8 @@ class KissKHBAProvider : MainAPI() {
             }
         }
 
-        val mediaUrl = crypto?.let { Vidbasic.decryptUrl(it) } ?: return null
+        val mediaUrl = crypto?.let { Vidbasic.decryptUrl(it) }
+            ?: return out.takeIf { it.subs.isNotEmpty() }
 
         val r = media(mediaUrl, server, note, referer)
         out.links.addAll(r.links)
@@ -522,6 +533,19 @@ class KissKHBAProvider : MainAPI() {
             .toList()
 
         val out = Resolved()
+        // مشغّلاتٌ مثل megaplay تُضمّن إعدادها كاملًا (المصدر + **كل** لغات
+        // الترجمة) في `player-payload`، فأولى من التقاط رابط الوسائط وحده.
+        parsePayload(html)?.let { p ->
+            if (p.source.isNotBlank()) {
+                val r = media(p.source, server, note, refererFor(p.source))
+                out.links.addAll(r.links)
+                r.subs.forEach { s -> if (out.subs.none { it.url == s.url }) out.subs.add(s) }
+            }
+            p.tracks.forEach { s ->
+                if (out.subs.none { it.url == s.url }) out.subs.add(s)
+            }
+            if (out.links.isNotEmpty()) return out
+        }
         for (m in found) {
             val r = media(m, server, note, refererFor(m))
             r.subs.forEach { s -> if (out.subs.none { it.url == s.url }) out.subs.add(s) }
@@ -572,7 +596,7 @@ class KissKHBAProvider : MainAPI() {
             }
             variants = parseVariants(txt, url)
             parseMediaSubtitles(txt, url).forEach { (label, sub) ->
-                out.subs.add(Sub(label ?: subLabel(sub), sub))
+                out.subs.add(Sub(label ?: subLabel(sub), sub, mapOf("Referer" to referer)))
             }
         }
         if (variants.isEmpty()) variants = listOf(0 to url)
@@ -596,7 +620,57 @@ class KissKHBAProvider : MainAPI() {
 
     // -------------------------------------------------------------- أدوات
 
-    private class Sub(val label: String, val url: String)
+    private class Sub(
+        val label: String,
+        val url: String,
+        val headers: Map<String, String>? = null,
+    )
+
+    /** إعداد مشغّلٍ مضمَّن في الصفحة: مصدر الوسائط + كل ملفات الترجمة. */
+    private class Payload(val source: String, val tracks: List<Sub>)
+
+    /**
+     * يقرأ `<script type="application/json" id="player-payload">` (megaplay
+     * وغيرها): `source` هو master، و`tracks` كل لغات الترجمة المتاحة.
+     * ملفّات هذه الترجمات محميّة بـReferer فتُمرَّر رؤوسها معها.
+     */
+    private fun parsePayload(html: String): Payload? {
+        val raw = Regex(
+            "<script[^>]*id=\"player-payload\"[^>]*>(.*?)</script>",
+            setOf(RegexOption.DOT_MATCHES_ALL),
+        ).find(html)?.groupValues?.get(1) ?: return null
+        val o = try {
+            JSONObject(raw)
+        } catch (e: Exception) {
+            return null
+        }
+        val source = o.optString("source").trim()
+        val tracks = ArrayList<Sub>()
+        val arr = o.optJSONArray("tracks")
+        if (arr != null) {
+            for (i in 0 until arr.length()) {
+                val t = arr.optJSONObject(i) ?: continue
+                val u = t.optString("file").trim()
+                if (u.isBlank()) continue
+                val label = t.optString("label").trim().ifBlank { subLabel(u) }
+                tracks.add(Sub(label, u, mapOf("Referer" to refererFor(u))))
+            }
+        }
+        if (source.isBlank() && tracks.isEmpty()) return null
+        return Payload(source, tracks)
+    }
+
+    /** قيمةٌ نصّية من JSON، مع اعتبار `null`/`None`/`undefined` غيابًا. */
+    private fun text(o: JSONObject?, key: String): String {
+        val v = o?.opt(key) ?: return ""
+        if (v == JSONObject.NULL) return ""
+        val s = v.toString().trim()
+        return if (
+            s.equals("null", true) || s.equals("none", true) ||
+            s.equals("undefined", true)
+        ) "" else s
+    }
+
 
     private class Link(
         val server: String,

@@ -9,6 +9,7 @@ import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.runBlocking
 import org.json.JSONArray
 import org.json.JSONObject
+import java.net.URI
 import java.net.URLEncoder
 import java.security.MessageDigest
 import java.util.Locale
@@ -252,9 +253,9 @@ class KissKHLiveProvider : MainAPI() {
             // عدّاد تنازليّ لا فيديو). ولا نُخفي رابطًا حقيقيًّا: كل ما يشبه
             // وسائط يُعرض ولو كان النوع غير معروف.
             val typeNum = o.optInt("Type", 1)
-            val video = normUrl(o.optString("Video"))
-            val alt = normUrl(o.optString("Video_tmp"))
-            val third = normUrl(o.optString("ThirdParty"))
+            val video = normUrl(optText(o, "Video"))
+            val alt = normUrl(optText(o, "Video_tmp"))
+            val third = normUrl(optText(o, "ThirdParty"))
 
             if (video.isNotBlank() && (typeNum == 1 || looksMedia(video))) {
                 emitted += emitStream(video, "KISSKH", note, subtitleCallback, callback)
@@ -276,6 +277,17 @@ class KissKHLiveProvider : MainAPI() {
             t.startsWith("//") -> "https:$t"
             else -> t
         }
+    }
+
+    /** قيمةٌ نصّية من JSON، مع اعتبار `null`/`None`/`undefined` غيابًا. */
+    private fun optText(o: JSONObject?, key: String): String {
+        val v = o?.opt(key) ?: return ""
+        if (v == JSONObject.NULL) return ""
+        val s = v.toString().trim()
+        return if (
+            s.equals("null", true) || s.equals("none", true) ||
+            s.equals("undefined", true)
+        ) "" else s
     }
 
     private fun looksMedia(url: String): Boolean {
@@ -348,6 +360,53 @@ class KissKHLiveProvider : MainAPI() {
         Integer.toHexString(s.hashCode())
     }
 
+    /** مرجعٌ مناسب لرابط: أصل مضيفه، وإلا مضيف الموقع. */
+    private fun refFor(url: String): String = try {
+        val u = URI(url)
+        if (u.host.isNullOrBlank()) "$mainUrl/" else "${u.scheme}://${u.host}/"
+    } catch (e: Exception) {
+        "$mainUrl/"
+    }
+
+    private class MirrorSub(
+        val label: String,
+        val url: String,
+        val headers: Map<String, String>? = null,
+    )
+
+    /** إعداد مشغّلٍ مضمَّن في الصفحة: مصدر الوسائط + كل ملفات الترجمة. */
+    private class Payload(val source: String, val tracks: List<MirrorSub>)
+
+    /**
+     * يقرأ `<script type="application/json" id="player-payload">` (megaplay
+     * وغيرها): `source` هو master، و`tracks` كل لغات الترجمة المتاحة.
+     */
+    private fun parsePayload(html: String): Payload? {
+        val raw = Regex(
+            "<script[^>]*id=\"player-payload\"[^>]*>(.*?)</script>",
+            setOf(RegexOption.DOT_MATCHES_ALL),
+        ).find(html)?.groupValues?.get(1) ?: return null
+        val o = try {
+            JSONObject(raw)
+        } catch (e: Exception) {
+            return null
+        }
+        val source = o.optString("source").trim()
+        val tracks = ArrayList<MirrorSub>()
+        val arr = o.optJSONArray("tracks")
+        if (arr != null) {
+            for (i in 0 until arr.length()) {
+                val t = arr.optJSONObject(i) ?: continue
+                val u = t.optString("file").trim()
+                if (u.isBlank()) continue
+                val label = t.optString("label").trim().ifBlank { "Subtitle" }
+                tracks.add(MirrorSub(label, u, mapOf("Referer" to refFor(u))))
+            }
+        }
+        if (source.isBlank() && tracks.isEmpty()) return null
+        return Payload(source, tracks)
+    }
+
     // -------------------------------------------------------------- الروابط
 
     /** يفتح رابط بث (m3u8 أو ملف) ويعرض كل جودةٍ بداخله. */
@@ -357,6 +416,7 @@ class KissKHLiveProvider : MainAPI() {
         note: String?,
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit,
+        referer: String = "$mainUrl/",
     ): Int {
         if (url.isBlank()) return 0
         val isHls = url.contains(".m3u8", true)
@@ -364,7 +424,7 @@ class KissKHLiveProvider : MainAPI() {
         var variants: List<Pair<Int, String>> = emptyList()
         if (isHls) {
             val txt = try {
-                app.get(url, headers = head + mapOf("Referer" to "$mainUrl/")).text
+                app.get(url, headers = head + mapOf("Referer" to referer)).text
             } catch (e: Exception) {
                 Log.i(TAG, "playlist FAIL ${e.javaClass.simpleName}")
                 ""
@@ -372,7 +432,9 @@ class KissKHLiveProvider : MainAPI() {
             variants = parseVariants(txt, url)
             parseMediaSubtitles(txt, url).forEach { (label, sub) ->
                 try {
-                    subtitleCallback(newSubtitleFile(label ?: "Subtitle", sub))
+                    subtitleCallback(newSubtitleFile(label ?: "Subtitle", sub) {
+                        this.headers = mapOf("Referer" to referer)
+                    })
                 } catch (e: Exception) {
                 }
             }
@@ -397,8 +459,8 @@ class KissKHLiveProvider : MainAPI() {
                     type = type,
                 ) {
                     this.quality = height
-                    this.referer = "$mainUrl/"
-                    this.headers = mapOf("Referer" to "$mainUrl/")
+                    this.referer = referer
+                    this.headers = mapOf("Referer" to referer)
                 }
             )
         }
@@ -424,12 +486,31 @@ class KissKHLiveProvider : MainAPI() {
         } catch (e: Exception) {
             ""
         }
+        // مشغّلاتٌ مثل megaplay تُضمّن المصدر و**كل** لغات الترجمة في
+        // `player-payload`، فأولى من التقاط رابط الوسائط وحده.
+        parsePayload(html)?.let { p ->
+            for (t in p.tracks) {
+                try {
+                    subtitleCallback(newSubtitleFile(t.label, t.url) {
+                        t.headers?.let { h -> this.headers = h }
+                    })
+                } catch (e: Exception) {
+                }
+            }
+            if (p.source.isNotBlank()) {
+                val n = emitStream(
+                    p.source, "KISSKH MIRROR", note, subtitleCallback, callback,
+                    refFor(p.source),
+                )
+                if (n > 0) return n
+            }
+        }
         val media = Regex("""https?://[^"'\\\s<>]+\.(?:m3u8|mp4)[^"'\\\s<>]*""")
             .findAll(html).map { it.value }.distinct().toList()
 
         if (media.isNotEmpty()) {
             return media.sumOf {
-                emitStream(it, "KISSKH MIRROR", note, subtitleCallback, callback)
+                emitStream(it, "KISSKH MIRROR", note, subtitleCallback, callback, refFor(it))
             }
         }
         callback(
