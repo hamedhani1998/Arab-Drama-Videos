@@ -1,5 +1,6 @@
 package com.kisskhba.plugin
 
+import android.content.SharedPreferences
 import android.util.Log
 import cloudstreamshared.MediaProbe
 import com.lagradost.cloudstream3.*
@@ -36,7 +37,7 @@ import java.util.Locale
  * (Base64 + AES‑256‑CBC بمفتاح `vidbasic`). يُفكّ في [SubText] ويُقدَّم عبر
  * [SubProxy] على `127.0.0.1` لأنّ `newSubtitleFile` لا يقبل إلا رابطًا.
  */
-class KissKHBAProvider : MainAPI() {
+class KissKHBAProvider(private val prefs: SharedPreferences? = null) : MainAPI() {
 
     override var mainUrl = "https://kisskh.ba"
     override var name = "KissKH.ba"
@@ -47,6 +48,35 @@ class KissKHBAProvider : MainAPI() {
         setOf(TvType.TvSeries, TvType.Movie, TvType.Anime)
 
     private val TAG = "KissKHBA"
+
+    // -------------------------------------------------------------- الإعدادات
+
+    private fun prefStr(key: String, def: String): String =
+        prefs?.getString(key, def) ?: def
+
+    private fun prefBool(key: String, def: Boolean): Boolean =
+        prefs?.getBoolean(key, def) ?: def
+
+    private fun showSubs(): Boolean =
+        prefBool(KissKHBASettings.KEY_SHOW_SUBS, true)
+
+    private fun showAllQualities(): Boolean =
+        prefStr(KissKHBASettings.KEY_QUALITY, "all") != "best"
+
+    /** هل تُعرض ترجمةٌ بهذه اللغة وفق اختيار المستخدم؟ */
+    private fun langOk(label: String?, url: String): Boolean =
+        when (prefStr(KissKHBASettings.KEY_LANG, "all")) {
+            "ar" -> isArabic(label, url)
+            "en" -> isEnglish(label, url)
+            "ar_en" -> isArabic(label, url) || isEnglish(label, url)
+            else -> true
+        }
+
+    private fun isArabic(label: String?, url: String): Boolean =
+        label?.contains("arab", true) == true || url.contains(".ar.", true)
+
+    private fun isEnglish(label: String?, url: String): Boolean =
+        label?.contains("english", true) == true || url.contains(".en.", true)
 
     private val UA =
         "Mozilla/5.0 (Linux; Android 14; Pixel 7) AppleWebKit/537.36 " +
@@ -331,8 +361,17 @@ class KissKHBAProvider : MainAPI() {
             ).find(html)?.groupValues?.get(1)
         )
 
+        // اختيار السيرفرات: كلها (الافتراضي) أو HD (megaplay) أو Standard
+        // (vidbasic). نطابق `src` لا الاسم لأنّ الأسماء تتبدّل بين الحلقات.
+        val serverMode = prefStr(KissKHBASettings.KEY_SERVERS, "all")
+        val chosen = when (serverMode) {
+            "hd" -> servers.filter { text(it, "src").contains("megaplay", true) }
+            "standard" -> servers.filter { text(it, "src").contains("vidbasic", true) }
+            else -> servers
+        }.ifEmpty { servers }
+
         val resolved = coroutineScope {
-            servers.map { server -> async { resolveServer(server, note) } }.awaitAll()
+            chosen.map { server -> async { resolveServer(server, note) } }.awaitAll()
         }
 
         val out = Resolved()
@@ -342,22 +381,24 @@ class KissKHBAProvider : MainAPI() {
         }
 
         // روابط التحميل تُضاف كروابط مستقلة معلَّمة DOWNLOAD.
-        for (d in downloads) {
-            val linkUrl = text(d, "url").ifBlank { continue }
-            val label = text(d, "label").ifBlank { "Download" }
-            val quality = text(d, "quality").ifBlank { null }
-            out.links.add(
-                Link(
-                    server = label,
-                    url = linkUrl,
-                    type = if (linkUrl.contains(".m3u8", true)) ExtractorLinkType.M3U8
-                    else ExtractorLinkType.VIDEO,
-                    quality = 0,
-                    note = quality,
-                    referer = "$mainUrl/",
-                    use = MediaProbe.Use.DOWNLOAD,
+        if (prefBool(KissKHBASettings.KEY_SHOW_DOWNLOADS, true)) {
+            for (d in downloads) {
+                val linkUrl = text(d, "url").ifBlank { continue }
+                val label = text(d, "label").ifBlank { "Download" }
+                val quality = text(d, "quality").ifBlank { null }
+                out.links.add(
+                    Link(
+                        server = label,
+                        url = linkUrl,
+                        type = if (linkUrl.contains(".m3u8", true)) ExtractorLinkType.M3U8
+                        else ExtractorLinkType.VIDEO,
+                        quality = 0,
+                        note = quality,
+                        referer = "$mainUrl/",
+                        use = MediaProbe.Use.DOWNLOAD,
+                    )
                 )
-            )
+            }
         }
 
         return out
@@ -372,6 +413,7 @@ class KissKHBAProvider : MainAPI() {
         var n = 0
         val seenSub = HashSet<String>()
         for (s in r.subs) {
+            if (!showSubs() || !langOk(s.label, s.url)) continue
             if (s.url.isBlank() || !seenSub.add(s.url)) continue
             try {
                 subtitleCallback(newSubtitleFile(s.label, s.url) {
@@ -600,6 +642,11 @@ class KissKHBAProvider : MainAPI() {
             }
         }
         if (variants.isEmpty()) variants = listOf(0 to url)
+        // «أعلى جودة فقط» اختياري؛ الافتراضي إظهار كل الجودات.
+        if (!showAllQualities() && variants.size > 1) {
+            val top = variants.maxByOrNull { it.first }
+            if (top != null && top.first > 0) variants = listOf(top)
+        }
 
         val type = if (isHls) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
         for ((height, link) in variants) {

@@ -1,5 +1,6 @@
 package com.kisskhlive.plugin
 
+import android.content.SharedPreferences
 import android.util.Log
 import cloudstreamshared.MediaProbe
 import com.lagradost.cloudstream3.*
@@ -27,7 +28,7 @@ import java.util.Locale
  * كل ما يعيده الموقع يُعرض: كل سيرفر (`Video` و`Video_tmp` و`ThirdParty`)
  * وكل جودة داخل الـmaster إن وُجدت، وكل ملف ترجمة بلا استثناء.
  */
-class KissKHLiveProvider : MainAPI() {
+class KissKHLiveProvider(private val prefs: SharedPreferences? = null) : MainAPI() {
 
     override var mainUrl = "https://kisskh.la"
     override var name = "KissKH.la"
@@ -37,6 +38,35 @@ class KissKHLiveProvider : MainAPI() {
     override val supportedTypes = setOf(TvType.TvSeries, TvType.Movie)
 
     private val TAG = "KissKHLive"
+
+    // -------------------------------------------------------------- الإعدادات
+
+    private fun prefStr(key: String, def: String): String =
+        prefs?.getString(key, def) ?: def
+
+    private fun prefBool(key: String, def: Boolean): Boolean =
+        prefs?.getBoolean(key, def) ?: def
+
+    private fun showSubs(): Boolean =
+        prefBool(KissKHLiveSettings.KEY_SHOW_SUBS, true)
+
+    private fun showAllQualities(): Boolean =
+        prefStr(KissKHLiveSettings.KEY_QUALITY, "all") != "best"
+
+    /** هل تُعرض ترجمةٌ بهذه اللغة وفق اختيار المستخدم؟ */
+    private fun langOk(label: String?, url: String): Boolean =
+        when (prefStr(KissKHLiveSettings.KEY_LANG, "all")) {
+            "ar" -> isArabic(label, url)
+            "en" -> isEnglish(label, url)
+            "ar_en" -> isArabic(label, url) || isEnglish(label, url)
+            else -> true
+        }
+
+    private fun isArabic(label: String?, url: String): Boolean =
+        label?.contains("arab", true) == true || url.contains(".ar.", true)
+
+    private fun isEnglish(label: String?, url: String): Boolean =
+        label?.contains("english", true) == true || url.contains(".en.", true)
     private val API = "/api/DramaList"
 
     private val UA =
@@ -260,10 +290,13 @@ class KissKHLiveProvider : MainAPI() {
             if (video.isNotBlank() && (typeNum == 1 || looksMedia(video))) {
                 emitted += emitStream(video, "KISSKH", note, subtitleCallback, callback)
             }
-            if (alt.isNotBlank() && alt != video && (typeNum == 1 || looksMedia(alt))) {
+            if (alt.isNotBlank() && alt != video &&
+                prefBool(KissKHLiveSettings.KEY_SHOW_ALT, true) &&
+                (typeNum == 1 || looksMedia(alt))
+            ) {
                 emitted += emitStream(alt, "KISSKH ALT", note, subtitleCallback, callback)
             }
-            if (third.isNotBlank()) {
+            if (third.isNotBlank() && prefBool(KissKHLiveSettings.KEY_SHOW_MIRROR, true)) {
                 emitted += emitMirror(third, note, subtitleCallback, callback)
             }
         }
@@ -296,21 +329,27 @@ class KissKHLiveProvider : MainAPI() {
     }
 
     /** ترجمات الحلقة: كل ما يعيده `/api/Sub/{id}` بلا تصفية. */
-    private suspend fun fetchSubtitles(epId: Int): List<Pair<String, String>> = try {
-        val arr = JSONArray(
-            app.get("$mainUrl/api/Sub/$epId?kkey=${Kkey.forSub(epId)}", headers = head).text
-        )
-        (0 until arr.length()).mapNotNull { i ->
-            val o = arr.optJSONObject(i) ?: return@mapNotNull null
-            val src = o.optString("src").trim()
-            if (src.isEmpty()) return@mapNotNull null
-            val label = o.optString("label").trim().ifBlank {
-                o.optString("land").trim().ifBlank { "Subtitle" }
+    private suspend fun fetchSubtitles(epId: Int): List<Pair<String, String>> {
+        if (!showSubs()) return emptyList()
+        return try {
+            val arr = JSONArray(
+                app.get("$mainUrl/api/Sub/$epId?kkey=${Kkey.forSub(epId)}", headers = head).text
+            )
+            (0 until arr.length()).mapNotNull { i ->
+                val o = arr.optJSONObject(i) ?: return@mapNotNull null
+                val src = o.optString("src").trim()
+                if (src.isEmpty()) return@mapNotNull null
+                val label = o.optString("label").trim().ifBlank {
+                    o.optString("land").trim().ifBlank { "Subtitle" }
+                }
+                label to src
             }
-            label to subtitleUrl(src)
+                // التصفية قبل إنشاء روابط الوسيط كي لا نُجهّز ما لن يُعرض.
+                .filter { langOk(it.first, it.second) }
+                .map { (label, src) -> label to subtitleUrl(src) }
+        } catch (e: Exception) {
+            emptyList()
         }
-    } catch (e: Exception) {
-        emptyList()
     }
 
     /**
@@ -431,6 +470,7 @@ class KissKHLiveProvider : MainAPI() {
             }
             variants = parseVariants(txt, url)
             parseMediaSubtitles(txt, url).forEach { (label, sub) ->
+                if (!showSubs() || !langOk(label, sub)) return@forEach
                 try {
                     subtitleCallback(newSubtitleFile(label ?: "Subtitle", sub) {
                         this.headers = mapOf("Referer" to referer)
@@ -440,6 +480,11 @@ class KissKHLiveProvider : MainAPI() {
             }
         }
         if (variants.isEmpty()) variants = listOf(0 to url)
+        // «أعلى جودة فقط» اختياري؛ الافتراضي إظهار كل الجودات.
+        if (!showAllQualities() && variants.size > 1) {
+            val top = variants.maxByOrNull { it.first }
+            if (top != null && top.first > 0) variants = listOf(top)
+        }
 
         val type = if (isHls) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
         for ((height, link) in variants) {
@@ -489,12 +534,15 @@ class KissKHLiveProvider : MainAPI() {
         // مشغّلاتٌ مثل megaplay تُضمّن المصدر و**كل** لغات الترجمة في
         // `player-payload`، فأولى من التقاط رابط الوسائط وحده.
         parsePayload(html)?.let { p ->
-            for (t in p.tracks) {
-                try {
-                    subtitleCallback(newSubtitleFile(t.label, t.url) {
-                        t.headers?.let { h -> this.headers = h }
-                    })
-                } catch (e: Exception) {
+            if (showSubs()) {
+                for (t in p.tracks) {
+                    if (!langOk(t.label, t.url)) continue
+                    try {
+                        subtitleCallback(newSubtitleFile(t.label, t.url) {
+                            t.headers?.let { h -> this.headers = h }
+                        })
+                    } catch (e: Exception) {
+                    }
                 }
             }
             if (p.source.isNotBlank()) {

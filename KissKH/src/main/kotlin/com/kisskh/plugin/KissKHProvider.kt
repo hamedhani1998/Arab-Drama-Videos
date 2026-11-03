@@ -1,5 +1,6 @@
 package com.kisskh.plugin
 
+import android.content.SharedPreferences
 import android.util.Log
 import cloudstreamshared.MediaProbe
 import com.lagradost.cloudstream3.*
@@ -24,7 +25,7 @@ import java.net.URLEncoder
  *      subtitles[]   = كل ملفات الترجمة المتاحة (url + label)
  *    فتُقرأ الجودات من متغيّرات الـmaster وتُعرض كلها، وتُمرَّر كل الترجمات.
  */
-class KissKHProvider : MainAPI() {
+class KissKHProvider(private val prefs: SharedPreferences? = null) : MainAPI() {
 
     override var mainUrl = "https://kisskh.bz"
     override var name = "KissKH"
@@ -43,6 +44,29 @@ class KissKHProvider : MainAPI() {
     )
 
     private val TAG = "KissKH"
+
+    // -------------------------------------------------------------- الإعدادات
+
+    private fun prefStr(key: String, def: String): String =
+        prefs?.getString(key, def) ?: def
+
+    private fun prefBool(key: String, def: Boolean): Boolean =
+        prefs?.getBoolean(key, def) ?: def
+
+    /** هل تُعرض ترجمةٌ بهذه اللغة وفق اختيار المستخدم في إعدادات هذه الإضافة؟ */
+    private fun langOk(label: String?, url: String): Boolean =
+        when (prefStr(KissKHSettings.KEY_LANG, "all")) {
+            "ar" -> isArabic(label, url)
+            "en" -> isEnglish(label, url)
+            "ar_en" -> isArabic(label, url) || isEnglish(label, url)
+            else -> true
+        }
+
+    private fun isArabic(label: String?, url: String): Boolean =
+        label?.contains("arab", true) == true || url.contains(".ar.", true)
+
+    private fun isEnglish(label: String?, url: String): Boolean =
+        label?.contains("english", true) == true || url.contains(".en.", true)
 
     override val mainPage = mainPageOf(
         "" to "الرئيسية",
@@ -226,10 +250,12 @@ class KissKHProvider : MainAPI() {
         // كل ملفات الترجمة المتاحة على الموقع لهذه الحلقة/الفيلم.
         val subSeen = HashSet<String>()
         suspend fun emitSub(label: String?, url: String, base: String) {
+            if (!prefBool(KissKHSettings.KEY_SHOW_SUBS, true)) return
             if (url.isBlank()) return
             val abs = resolve(base, url)
             if (!subSeen.add(abs)) return
             val name = label?.trim()?.ifBlank { null } ?: "Subtitle"
+            if (!langOk(name, abs)) return
             try {
                 subtitleCallback(newSubtitleFile(name, abs))
             } catch (e: Exception) {
@@ -290,7 +316,12 @@ class KissKHProvider : MainAPI() {
             }
 
             val variants = parseVariants(masterText, masterUrl)
-            val links = if (variants.isEmpty()) listOf(0 to masterUrl) else variants
+            var links = if (variants.isEmpty()) listOf(0 to masterUrl) else variants
+            // «أعلى جودة فقط» اختياري؛ الافتراضي إظهار كل الجودات.
+            if (prefStr(KissKHSettings.KEY_QUALITY, "all") == "best" && links.size > 1) {
+                val top = links.maxByOrNull { it.first }
+                if (top != null && top.first > 0) links = listOf(top)
+            }
             val server = if (embeds.size > 1) "HNVID ${index + 1}" else "HNVID"
 
             for ((height, url) in links) {
