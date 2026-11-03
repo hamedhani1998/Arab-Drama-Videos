@@ -214,24 +214,26 @@ class NartoDramaProvider(private val prefs: SharedPreferences? = null) : MainAPI
                 fromFallback = true
                 if (html == null) {
                     android.util.Log.e("NartoDrama", "getMainPage fetch failed q=$q")
-                    return null
+                    // صفٌّ فارغ أفضل من null: بعض إصدارات التطبيق تُسقط رسم الرئيسية كلها
+                    // حين يُرجع صفٌّ واحد null، فيختفي كل شيء بدل أن يظهر قسمٌ فارغ وحده.
+                    return newHomePageResponse(request.name, emptyList())
                 }
             }
             android.util.Log.e("NartoDrama", "getMainPage q=$q fetchMs=${System.currentTimeMillis() - t0} len=${html.length} fallback=$fromFallback")
             val items = parseSearchItems(html)
             if (items.isEmpty()) {
                 android.util.Log.e("NartoDrama", "getMainPage q=$q no items")
-                return null
+                return newHomePageResponse(request.name, emptyList())
             }
             val list = items.take(12).mapNotNull { it.toSearchResponse() }
-            if (list.isEmpty()) null else newHomePageResponse(request.name, list)
+            newHomePageResponse(request.name, list)
         } catch (e: kotlinx.coroutines.CancellationException) {
             // لُغي النداء (تغيّر القسم أو غادر المستخدم): نُعيده كما هو بدل تسجيله
             // «getMainPage ERROR» — سجلٌّ مليء بـCANCELLED يُخفي الأخطاء الحقيقية.
             throw e
         } catch (e: Exception) {
             android.util.Log.e("NartoDrama", "getMainPage ERROR", e)
-            null
+            newHomePageResponse(request.name, emptyList())
         }
     }
 

@@ -204,24 +204,25 @@ class EdgeNartoProvider(private val prefs: SharedPreferences? = null) : MainAPI(
                 fromFallback = true
                 if (html == null) {
                     android.util.Log.e("EdgeNarto", "getMainPage fetch failed q=$q")
-                    return null
+                    // صفٌّ فارغ بدل null: انظر التعليق المطابق في NartoDrama.
+                    return newHomePageResponse(request.name, emptyList())
                 }
             }
             android.util.Log.e("EdgeNarto", "getMainPage q=$q fetchMs=${System.currentTimeMillis() - t0} len=${html.length} fallback=$fromFallback")
             val items = parseSearchItems(html)
             if (items.isEmpty()) {
                 android.util.Log.e("EdgeNarto", "getMainPage q=$q no items")
-                return null
+                return newHomePageResponse(request.name, emptyList())
             }
             val list = items.take(12).mapNotNull { it.toSearchResponse() }
-            if (list.isEmpty()) null else newHomePageResponse(request.name, list)
+            newHomePageResponse(request.name, list)
         } catch (e: kotlinx.coroutines.CancellationException) {
             // لُغي النداء (تغيّر القسم أو غادر المستخدم): نُعيده كما هو بدل تسجيله
             // «getMainPage ERROR» — سجلٌّ مليء بـCANCELLED يُخفي الأخطاء الحقيقية.
             throw e
         } catch (e: Exception) {
             android.util.Log.e("EdgeNarto", "getMainPage ERROR", e)
-            null
+            newHomePageResponse(request.name, emptyList())
         }
     }
 
