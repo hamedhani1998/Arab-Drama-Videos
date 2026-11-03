@@ -150,14 +150,14 @@ class NartoDramaProvider(private val prefs: SharedPreferences? = null) : MainAPI
         }
     }
 
-    private suspend fun fetchSearch(q: String): String? {
+    private suspend fun fetchSearch(q: String, timeoutMs: Long = ROW_GET_TIMEOUT_MS, attempts: Int = ROW_GET_ATTEMPTS): String? {
         searchCache[q]?.let { return it }
         val urlEncQ = java.net.URLEncoder.encode(q, "UTF-8")
         try {
             val html = nartoGetPage(
                 "$BRW_HOST/search?lang=ar-SA&q=$urlEncQ&page=1&perPage=12",
                 nartoOrigin, "NartoDrama",
-                timeoutMs = ROW_GET_TIMEOUT_MS, attempts = ROW_GET_ATTEMPTS,
+                timeoutMs = timeoutMs, attempts = attempts,
             )
             if (html != null && html.contains("\"@type\":\"ListItem\"")) {
                 searchCache[q] = html
@@ -175,31 +175,39 @@ class NartoDramaProvider(private val prefs: SharedPreferences? = null) : MainAPI
         return null
     }
 
-    // The edge home "/" feed (Block-1 CollectionPage ListItems), cached.
-    // نجرّب edge أولاً (الأسرع)، ثم apex: مضيف edge يسقط أحياناً على مستوى النقل
-    // (قِيس 2026-11-03: curl إلى edge "/" أعاد 000 مرتين قبل أن ينجح)، ولو بقي بلا بديل
-    // لصار صفّ «الاقتراحات» فارغاً وكل الصفوف معه لأنّه شبكة الأمان للبقية.
-    private suspend fun fetchHomeFeed(): String? {
-        homeFeedCache?.let { return it }
+    // ★ طلبٌ واحد مشترك لموجز الصفحة (single-flight).
+    //
+    // قِيس على الجهاز 2026-11-03: صفحة الموجز ٤٥٧ كيلوبايت وتستغرق ~٣٥ ثانية على شبكة
+    // المستخدم. وكان كل صفّ من الصفوف الخمسة يفتح تنزيله الخاص عند الفشل، أي خمسة تنزيلات
+    // متزامنة لنفس الملف: تتزاحم على النطاق فينجح بعضها ويفشل بعضها (سجلّ الجهاز:
+    // صفّان نجحا وصفّان فشلا في اللحظة نفسها). الآن التنزيل واحد، والبقية تنتظره ثم تقرأ
+    // من الذاكرة، ويُخزَّن المحتوى **محلَّلًا** كي لا يُعاد تحليل ٤٥٧KB خمس مرات.
+    private val homeFeedLock = kotlinx.coroutines.sync.Mutex()
+    private var homeFeedItems: List<SearchHit>? = null
+
+    private suspend fun fetchHomeItems(): List<SearchHit>? {
+        homeFeedItems?.let { return it }
+        homeFeedLock.lock()
         try {
-            // محاولة واحدة لكل مضيف (٩ ثوانٍ): المضيفان معًا ≤ ١٨ ثانية، داخل ميزانية
-            // الصفّ ٢٥ ثانية. المحاولات الأربع السابقة كانت تسمح بـ٨٠ ثانية لصفٍّ واحد.
+            homeFeedItems?.let { return it } // امتلأت الذاكرة أثناء الانتظار
             for (host in listOf(BRW_HOST, NARTO_HOST)) {
                 val html = nartoGetPage(
                     "$host/", nartoOrigin, "NartoDrama",
-                    timeoutMs = 9_000L, attempts = 1,
+                    timeoutMs = 10_000L, attempts = 1,
                 )
                 if (html != null && html.contains("\"@type\":\"ListItem\"")) {
-                    homeFeedCache = html
-                    return html
+                    val parsed = parseSearchItems(html)
+                    if (parsed.isNotEmpty()) {
+                        homeFeedCache = html
+                        homeFeedItems = parsed
+                        return parsed
+                    }
                 }
             }
-        } catch (e: kotlinx.coroutines.CancellationException) {
-            throw e // نفس قاعدة البحث أعلاه: الإلغاء ليس فشل شبكة
-        } catch (e: Exception) {
-            android.util.Log.e("NartoDrama", "home feed fetch error", e)
+            return null
+        } finally {
+            homeFeedLock.unlock()
         }
-        return null
     }
 
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse? {
@@ -214,36 +222,37 @@ class NartoDramaProvider(private val prefs: SharedPreferences? = null) : MainAPI
             // أي أنّ أول رسم ينتظر *آخر* صفّ. ثم إنّ CloudStream نفسه يستدعي getMainPage
             // لكل صفوف mainPage معاً عند كل رسم — فالتسخين كان يطلب من السيرفر البطيء
             // الطلبات نفسها مرّتين (قِسنا على الجهاز: صفّ 37.9ث، فكانت الواجهة تُرسم بعده).
-            // الآن كل نداء يجلب صفّه وحده فوراً، والذاكرتان (searchCache/homeFeedCache)
-            // تجعلان التنقّل بين الصفوف وإعادة الرسم فوريّين.
+            // الآن كل نداء يجلب صفّه وحده فوراً.
             //
-            // ★ وكل الجلب محصور بـwithTimeoutOrNull: حتى لو تجمّدت الشبكة لا يتجاوز
-            // الصفّ ROW_BUDGET_MS، فالرئيسية تُرسم دائمًا بدل أن تبقى على مؤشّر التحميل.
+            // ★ ميزانية واحدة لكل صفّ (ROW_BUDGET_MS) تشمل محاولة القسم والبديل معًا؛
+            // قبل ذلك كانت ميزانيتان متتاليتان (٢٥+٢٥) فقِيس على الجهاز صفٌّ استغرق ٥٠ ثانية.
             var fromFallback = false
-            var html: String? = kotlinx.coroutines.withTimeoutOrNull(ROW_BUDGET_MS) {
-                if (isSuggest) fetchHomeFeed()
-                else fetchSearch(q) ?: homeFeedCache?.also { fromFallback = true }
-            }
-            if (html == null && !isSuggest) {
-                android.util.Log.e("NartoDrama", "getMainPage q=$q -> fallback home feed")
-                html = kotlinx.coroutines.withTimeoutOrNull(ROW_BUDGET_MS) { fetchHomeFeed() }
-                fromFallback = html != null
-            }
-            if (html == null) {
-                android.util.Log.e("NartoDrama", "getMainPage fetch failed q=$q")
+            val items: List<SearchHit> = kotlinx.coroutines.withTimeoutOrNull(ROW_BUDGET_MS) {
+                if (isSuggest) {
+                    fetchHomeItems()
+                } else {
+                    // محاولة قصيرة (٦ث، طلب واحد) لقسم هذا الصفّ: إن نجحت ظهر محتواه
+                    // الخاص، وإلا نخدم الموجز المشترك فورًا بدل حرق الميزانية كلها.
+                    val own = fetchSearch(q, timeoutMs = 6_000L, attempts = 1)
+                        ?.let { parseSearchItems(it) }
+                    if (!own.isNullOrEmpty()) own
+                    else {
+                        fromFallback = true
+                        fetchHomeItems()
+                    }
+                }
+            } ?: emptyList()
+
+            android.util.Log.e(
+                "NartoDrama",
+                "getMainPage q=$q ms=${System.currentTimeMillis() - t0} items=${items.size} fallback=$fromFallback"
+            )
+            if (items.isEmpty()) {
                 // صفٌّ فارغ أفضل من null: بعض إصدارات التطبيق تُسقط رسم الرئيسية كلها
                 // حين يُرجع صفٌّ واحد null، فيختفي كل شيء بدل أن يظهر قسمٌ فارغ وحده.
                 return newHomePageResponse(request.name, emptyList())
             }
-            val feed = html
-            android.util.Log.e("NartoDrama", "getMainPage q=$q fetchMs=${System.currentTimeMillis() - t0} len=${feed.length} fallback=$fromFallback")
-            val items = parseSearchItems(feed)
-            if (items.isEmpty()) {
-                android.util.Log.e("NartoDrama", "getMainPage q=$q no items")
-                return newHomePageResponse(request.name, emptyList())
-            }
-            val list = items.take(12).mapNotNull { it.toSearchResponse() }
-            newHomePageResponse(request.name, list)
+            newHomePageResponse(request.name, items.take(12).mapNotNull { it.toSearchResponse() })
         } catch (e: kotlinx.coroutines.CancellationException) {
             // لُغي النداء (تغيّر القسم أو غادر المستخدم): نُعيده كما هو بدل تسجيله
             // «getMainPage ERROR» — سجلٌّ مليء بـCANCELLED يُخفي الأخطاء الحقيقية.

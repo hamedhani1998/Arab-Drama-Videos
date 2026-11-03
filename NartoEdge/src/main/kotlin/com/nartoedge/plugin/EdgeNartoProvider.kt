@@ -146,14 +146,14 @@ class EdgeNartoProvider(private val prefs: SharedPreferences? = null) : MainAPI(
         }
     }
 
-    private suspend fun fetchSearch(q: String): String? {
+    private suspend fun fetchSearch(q: String, timeoutMs: Long = ROW_GET_TIMEOUT_MS, attempts: Int = ROW_GET_ATTEMPTS): String? {
         searchCache[q]?.let { return it }
         val urlEncQ = java.net.URLEncoder.encode(q, "UTF-8")
         try {
             val html = nartoGetPage(
                 "$mainUrl/search?lang=ar-SA&q=$urlEncQ&page=1&perPage=12",
                 nartoOrigin, "EdgeNarto",
-                timeoutMs = ROW_GET_TIMEOUT_MS, attempts = ROW_GET_ATTEMPTS,
+                timeoutMs = timeoutMs, attempts = attempts,
             )
             if (html != null && html.contains("\"@type\":\"ListItem\"")) {
                 searchCache[q] = html
@@ -171,24 +171,33 @@ class EdgeNartoProvider(private val prefs: SharedPreferences? = null) : MainAPI(
         return null
     }
 
-    // The edge home "/" feed (Block-1 CollectionPage ListItems), cached.
-    private suspend fun fetchHomeFeed(): String? {
-        homeFeedCache?.let { return it }
+    // ★ طلبٌ واحد مشترك لموجز الصفحة (single-flight) — نفس تعليل NartoDrama:
+    // الموجز ٤٥٧KB/٣٥ث على شبكة المستخدم، ولو طلبه كل صفٍّ عند فشله لتزاحمت خمسة
+    // تنزيلات لنفس الملف وسقط بعضها. الآن تنزيل واحد، والبقية تقرأه من الذاكرة محلَّلًا.
+    private val homeFeedLock = kotlinx.coroutines.sync.Mutex()
+    private var homeFeedItems: List<SearchHit>? = null
+
+    private suspend fun fetchHomeItems(): List<SearchHit>? {
+        homeFeedItems?.let { return it }
+        homeFeedLock.lock()
         try {
+            homeFeedItems?.let { return it }
             val html = nartoGetPage(
                 "$mainUrl/", nartoOrigin, "EdgeNarto",
-                timeoutMs = 12_000L, attempts = 2,
+                timeoutMs = 12_000L, attempts = 1,
             )
             if (html != null && html.contains("\"@type\":\"ListItem\"")) {
-                homeFeedCache = html
-                return html
+                val parsed = parseSearchItems(html)
+                if (parsed.isNotEmpty()) {
+                    homeFeedCache = html
+                    homeFeedItems = parsed
+                    return parsed
+                }
             }
-        } catch (e: kotlinx.coroutines.CancellationException) {
-            throw e // نفس قاعدة البحث أعلاه: الإلغاء ليس فشل شبكة
-        } catch (e: Exception) {
-            android.util.Log.e("EdgeNarto", "home feed fetch error", e)
+            return null
+        } finally {
+            homeFeedLock.unlock()
         }
-        return null
     }
 
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse? {
@@ -206,32 +215,34 @@ class EdgeNartoProvider(private val prefs: SharedPreferences? = null) : MainAPI(
             // with the home screen painted only after it). Each call now fetches its own row
             // immediately; searchCache/homeFeedCache keep tab-hops and re-renders instant.
             //
-            // ★ And every fetch is wrapped in withTimeoutOrNull: even a frozen network can never
-            // hold a row longer than ROW_BUDGET_MS, so the home screen always paints.
+            // ★ And every fetch is wrapped in a single withTimeoutOrNull budget: even a frozen
+            // network can never hold a row longer than ROW_BUDGET_MS, so the home screen always
+            // paints. (It used to be two sequential budgets, 25+25 — measured 50 s per row.)
             var fromFallback = false
-            var html: String? = kotlinx.coroutines.withTimeoutOrNull(ROW_BUDGET_MS) {
-                if (isSuggest) fetchHomeFeed()
-                else fetchSearch(q) ?: homeFeedCache?.also { fromFallback = true }
-            }
-            if (html == null && !isSuggest) {
-                android.util.Log.e("EdgeNarto", "getMainPage q=$q -> fallback home feed")
-                html = kotlinx.coroutines.withTimeoutOrNull(ROW_BUDGET_MS) { fetchHomeFeed() }
-                fromFallback = html != null
-            }
-            if (html == null) {
-                android.util.Log.e("EdgeNarto", "getMainPage fetch failed q=$q")
+            val items: List<SearchHit> = kotlinx.coroutines.withTimeoutOrNull(ROW_BUDGET_MS) {
+                if (isSuggest) {
+                    fetchHomeItems()
+                } else {
+                    // محاولة قصيرة (٦ث، طلب واحد) لقسم هذا الصفّ ثم الموجز المشترك.
+                    val own = fetchSearch(q, timeoutMs = 6_000L, attempts = 1)
+                        ?.let { parseSearchItems(it) }
+                    if (!own.isNullOrEmpty()) own
+                    else {
+                        fromFallback = true
+                        fetchHomeItems()
+                    }
+                }
+            } ?: emptyList()
+
+            android.util.Log.e(
+                "EdgeNarto",
+                "getMainPage q=$q ms=${System.currentTimeMillis() - t0} items=${items.size} fallback=$fromFallback"
+            )
+            if (items.isEmpty()) {
                 // صفٌّ فارغ بدل null: انظر التعليق المطابق في NartoDrama.
                 return newHomePageResponse(request.name, emptyList())
             }
-            val feed = html
-            android.util.Log.e("EdgeNarto", "getMainPage q=$q fetchMs=${System.currentTimeMillis() - t0} len=${feed.length} fallback=$fromFallback")
-            val items = parseSearchItems(feed)
-            if (items.isEmpty()) {
-                android.util.Log.e("EdgeNarto", "getMainPage q=$q no items")
-                return newHomePageResponse(request.name, emptyList())
-            }
-            val list = items.take(12).mapNotNull { it.toSearchResponse() }
-            newHomePageResponse(request.name, list)
+            newHomePageResponse(request.name, items.take(12).mapNotNull { it.toSearchResponse() })
         } catch (e: kotlinx.coroutines.CancellationException) {
             // لُغي النداء (تغيّر القسم أو غادر المستخدم): نُعيده كما هو بدل تسجيله
             // «getMainPage ERROR» — سجلٌّ مليء بـCANCELLED يُخفي الأخطاء الحقيقية.

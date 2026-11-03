@@ -1,4 +1,4 @@
-version = 9
+version = 10
 
 // Shared Narto playback code, compiled INTO this module (not a dependency).
 // ../narto-shared has no build.gradle.kts, so settings.gradle.kts never treats it
