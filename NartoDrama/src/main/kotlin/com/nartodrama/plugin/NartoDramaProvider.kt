@@ -170,8 +170,13 @@ class NartoDramaProvider(private val prefs: SharedPreferences? = null) : MainAPI
     private suspend fun fetchHomeFeed(): String? {
         homeFeedCache?.let { return it }
         try {
+            // محاولتان لكل مضيف (لا ٤+٤): الأصل كان ٤ لمضيفٍ واحد، وميزانية الصفّ
+            // لا تتغيّر لكن إن سقط edge بسرعة يصل الدور إلى apex بلا انتظارٍ مضاعف.
             for (host in listOf(BRW_HOST, NARTO_HOST)) {
-                val html = nartoGetPage("$host/", nartoOrigin, "NartoDrama")
+                val html = nartoGetPage(
+                    "$host/", nartoOrigin, "NartoDrama",
+                    timeoutMs = 20_000L, attempts = 2,
+                )
                 if (html != null && html.contains("\"@type\":\"ListItem\"")) {
                     homeFeedCache = html
                     return html

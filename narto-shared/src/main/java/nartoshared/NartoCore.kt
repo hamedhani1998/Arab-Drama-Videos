@@ -168,14 +168,19 @@ internal suspend fun nartoGetPage(
     referer: String,
     tag: String,
     timeoutMs: Long = 30_000L,
+    attempts: Int = PAGE_GET_ATTEMPTS,
 ): String? {
     var lastWhy = "-"
-    for (attempt in 1..PAGE_GET_ATTEMPTS) {
+    // الكوكي يُرسَل افتراضًا، فإن ردّ الموقع بصفحة الحماية نجرّب الوضع الآخر (بلا كوكي)
+    // في المحاولة التالية: بعض الواجهات ترفض طلبًا فيه Cookie بلا بقية كوكيز المتصفح،
+    // وحينها إصرارنا على الكوكي وحده كان يُفشل الطلب أربع مرات ويُفرغ الصفّ.
+    var useCookie = true
+    for (attempt in 1..attempts) {
         try {
             val res = com.lagradost.cloudstream3.app.get(
                 url,
                 referer = referer,
-                headers = ndCookieHeader(),
+                headers = if (useCookie) ndCookieHeader() else mapOf("User-Agent" to UA),
                 timeout = timeoutMs,
             )
             val code = res.code
@@ -185,9 +190,10 @@ internal suspend fun nartoGetPage(
                 // it as a failure so the retry can find the real page.
                 if (!isErrorPage(body)) return body
                 if (isChallengePage(body)) {
-                    // صفحة الحماية بكوكي مرفوض: نُبدّل القيمة قبل المحاولة التالية.
+                    // صفحة الحماية: نُبدّل قيمة الكوكي ونعكس وضع الإرسال للمحاولة التالية.
                     rotateNdCookie()
-                    lastWhy = "challenge page (cookie rotated)"
+                    useCookie = !useCookie
+                    lastWhy = "challenge page (cookie=${if (useCookie) "on" else "off"})"
                 } else {
                     lastWhy = "soft-error page (HTTP 200)"
                 }
@@ -207,9 +213,9 @@ internal suspend fun nartoGetPage(
         }
         android.util.Log.e(
             tag,
-            "page GET attempt=$attempt/$PAGE_GET_ATTEMPTS failed ($lastWhy) url=${url.take(90)}"
+            "page GET attempt=$attempt/$attempts failed ($lastWhy) url=${url.take(90)}"
         )
-        if (attempt < PAGE_GET_ATTEMPTS) {
+        if (attempt < attempts) {
             try {
                 kotlinx.coroutines.delay(PAGE_GET_RETRY_GAP_MS * attempt)
             } catch (e: kotlinx.coroutines.CancellationException) {
@@ -217,7 +223,7 @@ internal suspend fun nartoGetPage(
             }
         }
     }
-    android.util.Log.e(tag, "page GET gave up after $PAGE_GET_ATTEMPTS ($lastWhy) url=${url.take(90)}")
+    android.util.Log.e(tag, "page GET gave up after $attempts ($lastWhy) url=${url.take(90)}")
     return null
 }
 
