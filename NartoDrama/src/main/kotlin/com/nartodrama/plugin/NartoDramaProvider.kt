@@ -26,9 +26,9 @@ private const val SUGGEST_ROW = "/*suggest*/"
 // واحدًا يمكن أن يستهلك ~١٢٤ ثانية على شبكة تفشل فيها بعض الطلبات (قِيس 000 على apex)،
 // فيبدو للمستخدم أنّ «الواجهة الرئيسية لا تظهر» — بينما الصفوف تُجلب فعلًا، فقط بعد دقائق.
 // الآن أي صفّ ينتهي خلال ٢٥ ثانية كحد أقصى: إمّا ببطاقاته أو بصفٍّ فارغ.
-private const val ROW_BUDGET_MS = 25_000L
-private const val ROW_GET_TIMEOUT_MS = 12_000L
-private const val ROW_GET_ATTEMPTS = 2
+private const val ROW_BUDGET_MS = 40_000L
+private const val ROW_GET_TIMEOUT_MS = 10_000L
+private const val ROW_GET_ATTEMPTS = 1
 
 // Standalone "Narto Drama" extension, pinned to the apex host for playback. v46: this provider
 // carries its OWN domain — all links/cards/detail/refresh URLs use the apex host
@@ -190,17 +190,21 @@ class NartoDramaProvider(private val prefs: SharedPreferences? = null) : MainAPI
         homeFeedLock.lock()
         try {
             homeFeedItems?.let { return it } // امتلأت الذاكرة أثناء الانتظار
-            for (host in listOf(BRW_HOST, NARTO_HOST)) {
-                val html = nartoGetPage(
-                    "$host/", nartoOrigin, "NartoDrama",
-                    timeoutMs = 10_000L, attempts = 1,
-                )
-                if (html != null && html.contains("\"@type\":\"ListItem\"")) {
-                    val parsed = parseSearchItems(html)
-                    if (parsed.isNotEmpty()) {
-                        homeFeedCache = html
-                        homeFeedItems = parsed
-                        return parsed
+            // دورتان على المضيفين (edge ثم apex، ثم مرة أخرى): أقصى ٤ محاولات × ١٠ث.
+            // صفحة الموجز هي المصدر الوحيد لكل الصفوف، ففشلها مرة لا يجب أن يُفرغ الشاشة.
+            for (round in 1..2) {
+                for (host in listOf(BRW_HOST, NARTO_HOST)) {
+                    val html = nartoGetPage(
+                        "$host/", nartoOrigin, "NartoDrama",
+                        timeoutMs = 10_000L, attempts = 1,
+                    )
+                    if (html != null && html.contains("\"@type\":\"ListItem\"")) {
+                        val parsed = parseSearchItems(html)
+                        if (parsed.isNotEmpty()) {
+                            homeFeedCache = html
+                            homeFeedItems = parsed
+                            return parsed
+                        }
                     }
                 }
             }

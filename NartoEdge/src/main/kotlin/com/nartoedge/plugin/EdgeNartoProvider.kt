@@ -21,9 +21,9 @@ private const val SUGGEST_ROW = "/*suggest*/"
 // ★ سقف زمني صارم لكل صفّ من صفوف الرئيسية (نفس تعليل NartoDrama):
 // التطبيق يرسم الرئيسية بعد اكتمال كل الصفوف، وكل صفحة كانت تُطلب بـ٤ محاولات × ٣٠ ثانية،
 // فصفٌّ واحد على شبكة متعثّرة كان يؤجّل الرسم دقائق فيبدو أنّ «الواجهة الرئيسية لا تظهر».
-private const val ROW_BUDGET_MS = 25_000L
-private const val ROW_GET_TIMEOUT_MS = 12_000L
-private const val ROW_GET_ATTEMPTS = 2
+private const val ROW_BUDGET_MS = 40_000L
+private const val ROW_GET_TIMEOUT_MS = 10_000L
+private const val ROW_GET_ATTEMPTS = 1
 
 // Standalone "Edge Narto Drama" extension — pinned to https://edge.narto-drama.com ONLY.
 // This provider is 100% independent: its own cache, its own refresh channel, its own cooldown
@@ -182,16 +182,19 @@ class EdgeNartoProvider(private val prefs: SharedPreferences? = null) : MainAPI(
         homeFeedLock.lock()
         try {
             homeFeedItems?.let { return it }
-            val html = nartoGetPage(
-                "$mainUrl/", nartoOrigin, "EdgeNarto",
-                timeoutMs = 12_000L, attempts = 1,
-            )
-            if (html != null && html.contains("\"@type\":\"ListItem\"")) {
-                val parsed = parseSearchItems(html)
-                if (parsed.isNotEmpty()) {
-                    homeFeedCache = html
-                    homeFeedItems = parsed
-                    return parsed
+            // دورتان (محاولتان × ١٢ث): الموجز هو مصدر كل الصفوف، فلا نسقط بعد فشل واحد.
+            for (round in 1..2) {
+                val html = nartoGetPage(
+                    "$mainUrl/", nartoOrigin, "EdgeNarto",
+                    timeoutMs = 12_000L, attempts = 1,
+                )
+                if (html != null && html.contains("\"@type\":\"ListItem\"")) {
+                    val parsed = parseSearchItems(html)
+                    if (parsed.isNotEmpty()) {
+                        homeFeedCache = html
+                        homeFeedItems = parsed
+                        return parsed
+                    }
                 }
             }
             return null
