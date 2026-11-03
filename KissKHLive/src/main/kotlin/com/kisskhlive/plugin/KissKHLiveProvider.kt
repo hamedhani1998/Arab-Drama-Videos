@@ -80,17 +80,40 @@ class KissKHLiveProvider(private val prefs: SharedPreferences? = null) : MainAPI
         "Referer" to "$mainUrl/",
     )
 
+    /**
+     * أقسام الرئيسية كما في الموقع: الأحدث، جديد وشائع، مسلسلات، أفلام، أنمي،
+     * ثم حالات العرض (مستمرة/مكتملة). القيم هنا هي معاملات واجهة
+     * `/api/DramaList/List` نفسها، و[getMainPage] يدمجها مع الافتراضيات.
+     */
     override val mainPage = mainPageOf(
         "order=1" to "الأحدث",
         "order=2" to "جديد وشائع",
         "type=1&order=1" to "مسلسلات",
         "type=2&order=1" to "أفلام",
+        "type=3&order=1" to "أنمي",
+        "status=1&order=1" to "مستمرة الآن",
+        "status=2&order=1" to "مكتملة",
     )
 
     // -------------------------------------------------------------- الفهرس
 
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
-        val url = "$mainUrl$API/List?page=$page&pageSize=24&sub=0&country=0&status=0&${request.data}"
+        // نبدأ من الافتراضيات ثم نُطبّق معاملات القسم فوقها، لأنّ بعض الأقسام
+        // تغيّر status أو type (مكتملة/مستمرة/أنمي) وكانت الافتراضيات تُلغيها.
+        val q = LinkedHashMap<String, String>()
+        q["page"] = page.toString()
+        q["pageSize"] = "24"
+        q["sub"] = "0"
+        q["country"] = "0"
+        q["type"] = "0"
+        q["status"] = "0"
+        q["order"] = "1"
+        request.data.split("&").forEach { part ->
+            val eq = part.indexOf('=')
+            if (eq > 0) q[part.substring(0, eq)] = part.substring(eq + 1)
+        }
+        val query = q.entries.joinToString("&") { "${it.key}=${it.value}" }
+        val url = "$mainUrl$API/List?$query"
         val items = try {
             val txt = app.get(url, headers = head).text
             val arr = JSONObject(txt).optJSONArray("data") ?: JSONArray()

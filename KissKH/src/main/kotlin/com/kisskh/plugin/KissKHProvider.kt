@@ -68,11 +68,24 @@ class KissKHProvider(private val prefs: SharedPreferences? = null) : MainAPI() {
     private fun isEnglish(label: String?, url: String): Boolean =
         label?.contains("english", true) == true || url.contains(".en.", true)
 
+    /**
+     * أقسام الشاشة الرئيسية مطابقة لما يعرضه الموقع نفسه: شريط التصفّح
+     * (الرئيسية / جديد وشائع / مسلسلات / أفلام) ثم كتلة «Browse by Genre»
+     * بكل تصنيفاتها الظاهرة هناك. كل قسمٍ صفٌّ مستقلّ في الرئيسية.
+     */
     override val mainPage = mainPageOf(
         "" to "الرئيسية",
         "/new-popular/" to "جديد وشائع",
         "/tv/" to "مسلسلات",
         "/movies/" to "أفلام",
+        "/genres/drama/" to "دراما",
+        "/genres/romance/" to "رومانسي",
+        "/genres/comedy/" to "كوميدي",
+        "/genres/thriller/" to "إثارة",
+        "/genres/horror/" to "رعب",
+        "/genres/crime/" to "جريمة",
+        "/genres/fantasy/" to "فانتازيا",
+        "/genres/action/" to "أكشن",
     )
 
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {

@@ -89,12 +89,24 @@ class KissKHBAProvider(private val prefs: SharedPreferences? = null) : MainAPI()
         "Referer" to "$mainUrl/",
     )
 
+    /**
+     * أقسام الرئيسية كما في الموقع: الأحدث، الأكثر مشاهدة، الأعلى تقييمًا،
+     * أفلام، مسلسلات، أنمي، ثم التصنيفات. القيم معاملات REST نفسها
+     * (`order` / `type` / `genre`).
+     */
     override val mainPage = mainPageOf(
         "order=latest_update" to "الأحدث",
+        "order=views" to "الأكثر مشاهدة",
+        "order=rating" to "الأعلى تقييمًا",
         "type=Movie&order=latest_update" to "أفلام",
         "type=TVSeries&order=latest_update" to "مسلسلات",
         "type=Anime&order=latest_update" to "أنمي",
-        "order=views" to "الأكثر مشاهدة",
+        "genre=drama&order=latest_update" to "دراما",
+        "genre=romance&order=latest_update" to "رومانسي",
+        "genre=comedy&order=latest_update" to "كوميدي",
+        "genre=thriller&order=latest_update" to "إثارة",
+        "genre=horror&order=latest_update" to "رعب",
+        "genre=action&order=latest_update" to "أكشن",
     )
 
     // -------------------------------------------------------------- الفهرس
