@@ -376,7 +376,131 @@ class ArabShortDramaProvider(private val prefs: SharedPreferences? = null) : Mai
             }
         } catch (_: Exception) {
         }
+        // احتياط: إن فشل NewPipe (يوتيوب يحجب عميله أحيانًا) لا نُعيد صفرًا —
+        // نقرأ صفحة `watch` ونبثّ كل تسمية جودة عبر `serverAbrStreamingUrl`،
+        // وهو نفس مسار ARY العربية المُثبت على الجهاز.
+        if (produced == 0) produced = emitYoutubeAbr(videoId, callback)
         return produced
+    }
+
+    /**
+     * مانيفست يوتيوب المتكيّف (`serverAbrStreamingUrl`) — الاحتياط الأخير.
+     *
+     * لماذا: صفحة `watch` اليوم تحمل `adaptiveFormats` **بلا `url`**، أي أن
+     * الروابط المباشرة مخفيّة ولا يصلح معها أي استخراج ساذج. المانيفست المتكيّف
+     * هو الرابط الوحيد المتاح، ويُبثّ مرة لكل تسمية جودة كي يرى المستخدم كل
+     * الجودات في قائمة الاختيار (نفس أسلوب ARY).
+     */
+    private suspend fun emitYoutubeAbr(
+        videoId: String,
+        callback: (ExtractorLink) -> Unit
+    ): Int {
+        var produced = 0
+        try {
+            val watchUrl = "https://www.youtube.com/watch?v=$videoId"
+            val html = app.get(
+                watchUrl,
+                headers = mapOf(
+                    "User-Agent" to UA,
+                    "Accept-Language" to "ar,en;q=0.8",
+                    "Accept" to "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
+                )
+            ).text
+            val player = ytPlayerJson(html) ?: return 0
+            if (player["playabilityStatus"]?.get("status")?.asText() != "OK") return 0
+            val sd = player["streamingData"] ?: return 0
+            val abr = sd["serverAbrStreamingUrl"]?.asText().orEmpty()
+            if (abr.isBlank()) return 0
+
+            val labels = LinkedHashMap<String, Int>()
+            for (key in listOf("formats", "adaptiveFormats")) {
+                val arr = sd[key] ?: continue
+                if (!arr.isArray) continue
+                for (f in arr) {
+                    val q = f["qualityLabel"]?.asText().orEmpty()
+                    if (q.isBlank()) continue
+                    val h = f["height"]?.asInt() ?: 0
+                    labels[q] = maxOf(h, labels[q] ?: 0)
+                }
+            }
+
+            if (labels.isEmpty()) {
+                produced++
+                callback(
+                    newExtractorLink(
+                        name,
+                        FormatTag.tagged("يوتيوب ABR", abr, ExtractorLinkType.VIDEO),
+                        abr,
+                        type = ExtractorLinkType.VIDEO
+                    ) {
+                        referer = "https://www.youtube.com/"
+                    }
+                )
+            } else {
+                for ((label, h) in labels.entries.sortedByDescending { it.value }) {
+                    produced++
+                    callback(
+                        newExtractorLink(
+                            name,
+                            FormatTag.tagged("يوتيوب $label (ABR)", abr, ExtractorLinkType.VIDEO),
+                            abr,
+                            type = ExtractorLinkType.VIDEO
+                        ) {
+                            referer = "https://www.youtube.com/"
+                            quality = h
+                        }
+                    )
+                }
+            }
+        } catch (_: Exception) {
+        }
+        return produced
+    }
+
+    /**
+     * `ytInitialPlayerResponse` من HTML بأقواس متوازنة (يتجاهل الأقواس داخل
+     * السلاسل النصية). Jackson لأن الوحدة تستعمله أصلًا.
+     */
+    private fun ytPlayerJson(html: String): JsonNode? {
+        val markers = listOf(
+            "var ytInitialPlayerResponse = ",
+            "window[\"ytInitialPlayerResponse\"] = ",
+            "\"ytInitialPlayerResponse\"] = ",
+            "ytInitialPlayerResponse = "
+        )
+        for (m in markers) {
+            val idx = html.indexOf(m)
+            if (idx < 0) continue
+            val start = idx + m.length
+            if (start >= html.length || html[start] != '{') continue
+            var depth = 0
+            var inStr = false
+            var esc = false
+            var i = start
+            while (i < html.length) {
+                val c = html[i]
+                if (inStr) {
+                    if (esc) esc = false
+                    else if (c == '\\') esc = true
+                    else if (c == '"') inStr = false
+                } else {
+                    when (c) {
+                        '"' -> inStr = true
+                        '{' -> depth++
+                        '}' -> {
+                            depth--
+                            if (depth == 0) {
+                                return runCatching {
+                                    mapper.readTree(html.substring(start, i + 1))
+                                }.getOrNull()
+                            }
+                        }
+                    }
+                }
+                i++
+            }
+        }
+        return null
     }
 
     override suspend fun loadLinks(

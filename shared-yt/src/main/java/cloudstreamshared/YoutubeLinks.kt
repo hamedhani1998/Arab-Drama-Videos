@@ -301,32 +301,171 @@ object YoutubeLinks {
                 Log.w(logTag, "playabilityStatus=$status reason=${player.optJSONObject("playabilityStatus")?.optString("reason")}")
                 return 0
             }
-            val formats = player.optJSONObject("streamingData")?.optJSONArray("formats") ?: return 0
-            var produced = 0
-            val headers = mapOf("Referer" to YT_REFERER, "User-Agent" to UA)
-            for (i in 0 until formats.length()) {
-                val f = formats.optJSONObject(i) ?: continue
-                val rawUrl = f.optString("url")
-                if (rawUrl.isBlank()) continue
-                val height = f.optInt("height")
-                if (options.maxHeight > 0 && height > options.maxHeight) continue
-                val url = withCpn(rawUrl)
-                if (!seen.add(url)) continue
-                val label = f.optString("qualityLabel").ifBlank { f.optInt("itag").toString() }
-                callback(
-                    newExtractorLink(
-                        source = sourceName,
-                        name = "YouTube · $label",
-                        url = url,
-                        type = ExtractorLinkType.VIDEO,
-                    ) {
-                        this.quality = height
-                        this.referer = YT_REFERER
-                        this.headers = headers
-                    }
-                )
-                produced++
+            val sd = player.optJSONObject("streamingData") ?: return 0
+
+            // منذ أواخر 2025 يوتيوب لا يضع `url` في `adaptiveFormats`، بل يكتفي
+            // بـ`serverAbrStreamingUrl` (مانيفست متكيّف واحد). ولذلك نقرأ
+            // القائمتين معًا ونرتّب الاحتياط: DASH حقيقي ← مدمج ← ABR.
+            val all = ArrayList<JSONObject>()
+            sd.optJSONArray("formats")?.let { a ->
+                for (i in 0 until a.length()) a.optJSONObject(i)?.let { all.add(it) }
             }
+            sd.optJSONArray("adaptiveFormats")?.let { a ->
+                for (i in 0 until a.length()) a.optJSONObject(i)?.let { all.add(it) }
+            }
+
+            val headers = mapOf("Referer" to YT_REFERER, "User-Agent" to UA)
+            val durationSeconds = player.optJSONObject("videoDetails")
+                ?.optString("lengthSeconds")?.toLongOrNull()?.takeIf { it > 0 } ?: 3600L
+
+            var produced = 0
+
+            // (1) روابط فيديو حقيقية (نادرة اليوم): نبني لها مانيفست DASH محليًا
+            //     مع أفضل صوت، فتُعرض كل الجودة **بصوتها** لا صامتة.
+            val videoTracks = all.mapNotNull { f ->
+                val u = f.optString("url")
+                if (u.isBlank() || !f.optString("mimeType").startsWith("video/")) return@mapNotNull null
+                val h = f.optInt("height")
+                if (options.maxHeight > 0 && h > options.maxHeight) return@mapNotNull null
+                val mime = f.optString("mimeType").ifBlank { YoutubeDashServer.mimeFromUrl(u, false) }
+                val initR = rangeOf(f.optJSONObject("initRange"))
+                val indexR = rangeOf(f.optJSONObject("indexRange"))
+                YtVideoTrack(
+                    url = withCpn(u),
+                    mimeType = mime,
+                    height = h,
+                    label = qualityLabel(h, u, mime),
+                    initRange = initR,
+                    indexRange = indexR,
+                    codec = codecFromMime(mime),
+                )
+            }.distinctBy { it.url }
+
+            val audioTracks = all.mapNotNull { f ->
+                val u = f.optString("url")
+                if (u.isBlank() || !f.optString("mimeType").startsWith("audio/")) return@mapNotNull null
+                val mime = f.optString("mimeType").ifBlank { YoutubeDashServer.mimeFromUrl(u, true) }
+                var lang = f.optJSONObject("audioTrack")?.optString("id").orEmpty()
+                if (lang.isBlank()) lang = "DEFAULT"
+                if (lang.contains(".")) lang = lang.substringBefore(".")
+                YtAudioTrack(
+                    url = withCpn(u),
+                    mimeType = mime,
+                    bitrate = f.optInt("bitrate").takeIf { it > 0 } ?: 128000,
+                    initRange = rangeOf(f.optJSONObject("initRange")),
+                    indexRange = rangeOf(f.optJSONObject("indexRange")),
+                    language = lang.uppercase(),
+                    codec = codecFromMime(mime),
+                )
+            }.distinctBy { it.url }
+
+            if (videoTracks.isNotEmpty()) {
+                YoutubeDashServer.ensureStarted()
+                val audiosByLanguage = audioTracks.groupBy { it.language }
+                for (video in videoTracks) {
+                    val bestAudios = audiosByLanguage.values.mapNotNull { pickAudio(it, video) }
+                    val local = YoutubeDashServer.buildAndRegister(video, bestAudios, durationSeconds) ?: continue
+                    if (!seen.add(local)) continue
+                    callback(
+                        newExtractorLink(
+                            source = sourceName,
+                            name = "YouTube · ${video.label}",
+                            url = local,
+                            type = ExtractorLinkType.DASH,
+                        ) {
+                            this.quality = video.height
+                            this.referer = YT_REFERER
+                            this.headers = headers
+                        }
+                    )
+                    produced++
+                }
+                Log.d(logTag, "YouTube watch DASH links=$produced qualities=${videoTracks.size}")
+            }
+
+            // (2) تنسيقات مدمجة (فيها صوت أصلًا) — إن لم توجد مسارات فيديو.
+            if (produced == 0) {
+                sd.optJSONArray("formats")?.let { a ->
+                    for (i in 0 until a.length()) {
+                        val f = a.optJSONObject(i) ?: continue
+                        val rawUrl = f.optString("url")
+                        if (rawUrl.isBlank()) continue
+                        val height = f.optInt("height")
+                        if (options.maxHeight > 0 && height > options.maxHeight) continue
+                        val url = withCpn(rawUrl)
+                        if (!seen.add(url)) continue
+                        val label = f.optString("qualityLabel").ifBlank { f.optInt("itag").toString() }
+                        callback(
+                            newExtractorLink(
+                                source = sourceName,
+                                name = "YouTube · $label",
+                                url = url,
+                                type = ExtractorLinkType.VIDEO,
+                            ) {
+                                this.quality = height
+                                this.referer = YT_REFERER
+                                this.headers = headers
+                            }
+                        )
+                        produced++
+                    }
+                }
+            }
+
+            // (3) احتياط ABR: لا `url` لأي تنسيق، لكن `serverAbrStreamingUrl`
+            //     موجود. نُظهر **كل** تسمية جودة (وإن شاركت الرابط) لأن المشغّل
+            //     يعرض التسميات في القائمة، والمانيفست المتكيّف يتكفّل بالجودة.
+            //     هذا هو نفس مسار ARY العربية المُثبت على الجهاز.
+            if (produced == 0) {
+                val abr = sd.optString("serverAbrStreamingUrl")
+                if (abr.isNotBlank()) {
+                    val labels = LinkedHashMap<String, Int>()
+                    for (f in all) {
+                        val q = f.optString("qualityLabel")
+                        if (q.isBlank() || q == "undefined") continue
+                        val h = f.optInt("height")
+                        if (options.maxHeight > 0 && h > options.maxHeight) continue
+                        labels[q] = maxOf(h, labels[q] ?: 0)
+                    }
+                    val ordered = labels.entries.sortedByDescending { it.value }
+                    val url = withCpn(abr)
+                    if (ordered.isEmpty()) {
+                        if (seen.add("$url#abr")) {
+                            callback(
+                                newExtractorLink(
+                                    source = sourceName,
+                                    name = "YouTube · ABR",
+                                    url = url,
+                                    type = ExtractorLinkType.VIDEO,
+                                ) {
+                                    this.referer = YT_REFERER
+                                    this.headers = headers
+                                }
+                            )
+                            produced++
+                        }
+                    } else {
+                        for ((label, h) in ordered) {
+                            if (!seen.add("$url#abr:$label")) continue
+                            callback(
+                                newExtractorLink(
+                                    source = sourceName,
+                                    name = "YouTube · $label (ABR)",
+                                    url = url,
+                                    type = ExtractorLinkType.VIDEO,
+                                ) {
+                                    this.quality = h
+                                    this.referer = YT_REFERER
+                                    this.headers = headers
+                                }
+                            )
+                            produced++
+                        }
+                    }
+                    Log.d(logTag, "YouTube watch ABR entries=$produced labels=${labels.size}")
+                }
+            }
+
             Log.d(logTag, "YouTube watch page links=$produced")
             produced
         } catch (e: kotlinx.coroutines.CancellationException) {
@@ -414,6 +553,15 @@ object YoutubeLinks {
         if (i < 0) return null
         val v = mime.substring(i + "codecs=".length).trim().removeSurrounding("\"")
         return v.ifBlank { null }
+    }
+
+    /** `{"start":"0","end":"738"}` → `"0-738"` (صيغة SegmentBase في المانيفست). */
+    private fun rangeOf(o: JSONObject?): String? {
+        if (o == null) return null
+        val start = o.optString("start")
+        val end = o.optString("end")
+        if (start.isBlank() || end.isBlank()) return null
+        return "$start-$end"
     }
 
     /** صوت متوافق مع حاوية الفيديو أولًا، ثم الأعلى bitrate. */
