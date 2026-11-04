@@ -18,6 +18,7 @@ import com.lagradost.cloudstream3.utils.ExtractorLink
 import com.lagradost.cloudstream3.utils.ExtractorLinkType
 import com.lagradost.cloudstream3.utils.loadExtractor
 import com.lagradost.cloudstream3.utils.newExtractorLink
+import cloudstreamshared.YoutubeLinks
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
@@ -227,45 +228,74 @@ class KingdomDramaProvider : MainAPI() {
         if (!data.startsWith("http")) return false
 
         return try {
-            val doc = app.get(data, referer = "$mainUrl/").document
+            // يوتيوب يُحلّ بمُحلِّل المصدر «ARY العربية» (NewPipe → صفحة watch →
+            // المُستخرِج المدمج) لأن مُستخرِج يوتيوب المدمج وحده يعيد صفر روابط
+            // على كثير من الأجهزة فتظهر البطاقة بلا تشغيل.
+            val ytIds = LinkedHashSet<String>()
+            val others = LinkedHashSet<String>()
 
-            // 1) لاعب الموقع: Plyr على يوتيوب (data-plyr-provider / embed-id).
-            val candidates = LinkedHashSet<String>()
-            for (el in doc.select("div[data-plyr-embed-id], [data-plyr-provider]")) {
-                val id = el.attr("data-plyr-embed-id").trim()
-                if (id.isBlank()) continue
-                when (el.attr("data-plyr-provider").trim().lowercase()) {
-                    "youtube" -> candidates.add("https://www.youtube.com/watch?v=$id")
-                    "vimeo" -> candidates.add("https://vimeo.com/$id")
-                    else -> if (id.startsWith("http")) candidates.add(id)
+            fun addCandidate(raw: String) {
+                val u = raw.trim()
+                if (u.isEmpty()) return
+                if (YoutubeLinks.isYoutube(u)) {
+                    YoutubeLinks.videoIdOf(u)?.let { ytIds.add(it) }
+                } else if (u.startsWith("http")) {
+                    others.add(u)
                 }
             }
 
-            // 2) احتياط: iframe أو عنصر فيديو مباشر.
-            for (el in doc.select("iframe[src]")) {
-                val src = el.attr("src").trim()
-                if (src.startsWith("http")) candidates.add(src)
-            }
-            for (el in doc.select("video[src], video source[src]")) {
-                val src = el.attr("src").trim()
-                if (src.startsWith("http")) candidates.add(src)
+            val doc = try {
+                app.get(data, referer = "$mainUrl/").document
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                Log.e(TAG, "loadLinks page fetch FAILED $data", e)
+                null
             }
 
-            // 3) احتياط أخير: أي رابط وسائط صريح داخل الصفحة.
-            Regex("""https?://[^"'\s<>]+\.(?:m3u8|mp4|webm)""")
-                .findAll(doc.html())
-                .map { it.value }
-                .forEach { candidates.add(it) }
+            if (doc != null) {
+                // 1) لاعب الموقع: Plyr على يوتيوب (data-plyr-provider / embed-id).
+                for (el in doc.select("div[data-plyr-embed-id], [data-plyr-provider]")) {
+                    val id = el.attr("data-plyr-embed-id").trim()
+                    if (id.isBlank()) continue
+                    when (el.attr("data-plyr-provider").trim().lowercase()) {
+                        "youtube" -> YoutubeLinks.videoIdOf(id)?.let { ytIds.add(it) }
+                        "vimeo" -> others.add("https://vimeo.com/$id")
+                        else -> addCandidate(id)
+                    }
+                }
 
-            if (candidates.isEmpty()) {
+                // 2) احتياط: iframe أو عنصر فيديو مباشر.
+                for (el in doc.select("iframe[src]")) addCandidate(el.attr("src"))
+                for (el in doc.select("video[src], video source[src]")) addCandidate(el.attr("src"))
+
+                // 3) احتياط أخير: أي رابط وسائط صريح داخل الصفحة.
+                Regex("""https?://[^"'\s<>]+\.(?:m3u8|mp4|webm)""")
+                    .findAll(doc.html())
+                    .map { it.value }
+                    .forEach { addCandidate(it) }
+            }
+
+            // الصفحة نفسها قد تكون رابط يوتيوب (نادرًا).
+            addCandidate(data)
+
+            if (ytIds.isEmpty() && others.isEmpty()) {
                 Log.e(TAG, "loadLinks no players data=$data")
                 return false
             }
 
-            Log.d(TAG, "loadLinks candidates=${candidates.size} data=$data")
+            Log.d(TAG, "loadLinks yt=${ytIds.size} others=${others.size} data=$data")
+
+            var any = false
+
+            for (vid in ytIds) {
+                val n = YoutubeLinks.resolve(vid, name, TAG, subtitleCallback, callback)
+                Log.d(TAG, "YouTube $vid links=$n")
+                if (n > 0) any = true
+            }
 
             val results = coroutineScope {
-                candidates.map { u ->
+                others.map { u ->
                     async {
                         val links = mutableListOf<ExtractorLink>()
                         var ok = false
@@ -293,7 +323,6 @@ class KingdomDramaProvider : MainAPI() {
                 }.awaitAll()
             }
 
-            var any = false
             for ((ok, links) in results) {
                 for (link in links) {
                     any = true

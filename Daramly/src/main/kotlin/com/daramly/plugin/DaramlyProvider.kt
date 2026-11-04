@@ -21,6 +21,7 @@ import com.lagradost.cloudstream3.utils.ExtractorLinkType
 import com.lagradost.cloudstream3.utils.getQualityFromName
 import com.lagradost.cloudstream3.utils.loadExtractor
 import com.lagradost.cloudstream3.utils.newExtractorLink
+import cloudstreamshared.YoutubeLinks
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
@@ -173,9 +174,12 @@ class DaramlyProvider : MainAPI() {
         val title = card.selectFirst("span.card__title")?.text()?.trim()?.takeIf { it.isNotBlank() }
             ?: card.selectFirst("img")?.attr("alt")?.trim()?.takeIf { it.isNotBlank() }
             ?: return null
+        // الصور في الموقع نسبية (`/uploads/xxx.webp`): بلا `fixUrl` تظهر البطاقات
+        // بلا أيقونة في التطبيق.
         val poster = card.selectFirst("img")?.attr("src")?.trim()?.ifBlank { null }
+            ?: card.selectFirst("img")?.attr("data-src")?.trim()?.ifBlank { null }
         return newMovieSearchResponse(title, fixUrl(href), TvType.Movie) {
-            this.posterUrl = poster
+            this.posterUrl = poster?.let { fixUrl(it) }
         }
     }
 
@@ -205,8 +209,10 @@ class DaramlyProvider : MainAPI() {
                 ?: doc.selectFirst("h1")?.text()?.trim()?.takeIf { it.isNotBlank() }
                 ?: return null
 
-            val poster = doc.selectFirst("meta[property=og:image]")?.attr("content")?.trim()?.ifBlank { null }
+            // الغلاف قد يكون نسبيًا كذلك (`/uploads/…`)، فمرّره على `fixUrl`.
+            val rawPoster = doc.selectFirst("meta[property=og:image]")?.attr("content")?.trim()?.ifBlank { null }
                 ?: doc.selectFirst("div.player img")?.attr("src")?.trim()?.ifBlank { null }
+            val poster = rawPoster?.let { fixUrl(it) }
             // الوصف الكامل في فقرات `p.film__story`؛ وصف og مقتطع بـ«…».
             val plot = doc.select("p.film__story").joinToString("\n") { it.text().trim() }
                 .trim().ifBlank { null }
@@ -357,6 +363,27 @@ class DaramlyProvider : MainAPI() {
     ): List<ExtractorLink> {
         if (url.contains("rumble.com", ignoreCase = true)) {
             return resolveRumble(url, label, subtitleCallback)
+        }
+
+        // يوتيوب: بعض السيرفرات تُضمّن فيديو يوتيوب مباشرةً؛ نحلّه بمُحلِّل
+        // المصدر «ARY العربية» (NewPipe → صفحة watch → المُستخرِج المدمج).
+        if (YoutubeLinks.isYoutube(url)) {
+            val vid = YoutubeLinks.videoIdOf(url) ?: return emptyList()
+            val out = mutableListOf<ExtractorLink>()
+            YoutubeLinks.resolve(vid, name, TAG, { subtitleCallback(it) }) { out.add(it) }
+            return out.map { l ->
+                newExtractorLink(
+                    source = name,
+                    name = if (l.name.isBlank()) label else "$label · ${l.name}",
+                    url = l.url,
+                    type = l.type,
+                ) {
+                    this.quality = l.quality
+                    this.referer = l.referer
+                    this.headers = l.headers
+                    this.extractorData = l.extractorData
+                }
+            }
         }
 
         val produced = mutableListOf<ExtractorLink>()

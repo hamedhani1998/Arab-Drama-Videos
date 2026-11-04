@@ -67,6 +67,12 @@ subprojects {
             rootProject.file("shared-format/src/main/java")
         )
 
+        // حلّ روابط يوتيوب المشترك (NewPipe → صفحة watch → المُستخرِج المدمج):
+        // كل مصدر يعرض أعمالًا على يوتيوب يحتاجه، ولا يجوز أن يعطي صفر روابط.
+        sourceSets.getByName("main").java.srcDir(
+            rootProject.file("shared-yt/src/main/java")
+        )
+
         defaultConfig {
             minSdk = 21
             compileSdkVersion(36)
