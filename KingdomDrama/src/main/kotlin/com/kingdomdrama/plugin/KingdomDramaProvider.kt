@@ -1,5 +1,6 @@
 package com.kingdomdrama.plugin
 
+import android.content.SharedPreferences
 import android.util.Log
 import com.lagradost.cloudstream3.HomePageResponse
 import com.lagradost.cloudstream3.LoadResponse
@@ -31,8 +32,6 @@ import java.net.URLEncoder
 
 private const val TAG = "KingdomDrama"
 
-private const val HOME_TTL_MS = 10 * 60_000L
-
 /**
  * KingDomDrama — `kingdomdramaapp.com` (دراما قصيرة مترجمة ومدبلجة).
  *
@@ -52,7 +51,7 @@ private const val HOME_TTL_MS = 10 * 60_000L
  * لذلك كل الروابط تُحلّ عبر المُستخرِج المدمج (YouTube)، مع فحص احتياطي
  * لأي `iframe`/`video`/رابط mp4-m3u8 قد يظهر مستقبلًا.
  */
-class KingdomDramaProvider : MainAPI() {
+class KingdomDramaProvider(private val prefs: SharedPreferences? = null) : MainAPI() {
 
     override var mainUrl = "https://kingdomdramaapp.com"
     override var name = "KingdomDrama"
@@ -78,6 +77,50 @@ class KingdomDramaProvider : MainAPI() {
         "path|year/2026" to "أعمال 2026",
     )
 
+    /** ترتيب الصفوف في القائمة أعلاه — لتطبيق حدّ الصفوف من الإعدادات. */
+    private val rowOrder: List<String> = mainPage.map { it.data }
+
+    // =============================== الإعدادات ===============================
+
+    private fun homeTtl(): Long {
+        val min = prefs?.getString(KingdomDramaSettingsBottomSheet.KEY_CACHE_MIN, "10")
+            ?.trim()?.toIntOrNull() ?: 10
+        return min.coerceIn(1, 24 * 60) * 60_000L
+    }
+
+    private fun rowLimit(): Int =
+        prefs?.getString(KingdomDramaSettingsBottomSheet.KEY_ROW_LIMIT, "all")
+            ?.trim()?.toIntOrNull() ?: 0
+
+    private fun cardsPerRow(): Int =
+        prefs?.getString(KingdomDramaSettingsBottomSheet.KEY_CARDS_PER_ROW, "50")
+            ?.trim()?.toIntOrNull()?.takeIf { it > 0 } ?: Int.MAX_VALUE
+
+    private fun rowHidden(data: String): Boolean = when {
+        data.startsWith("pane|") ->
+            prefs?.getBoolean(KingdomDramaSettingsBottomSheet.KEY_SHOW_PANES, true) == false
+        data.startsWith("path|country/") ->
+            prefs?.getBoolean(KingdomDramaSettingsBottomSheet.KEY_SHOW_COUNTRIES, true) == false
+        data.startsWith("path|year/") ->
+            prefs?.getBoolean(KingdomDramaSettingsBottomSheet.KEY_SHOW_YEAR, true) == false
+        else -> false
+    }
+
+    /** خيارات حلّ يوتيوب من ملف إعدادات المصدر. */
+    private fun ytOptions(): YoutubeLinks.Options {
+        val langs = prefs?.getString(KingdomDramaSettingsBottomSheet.KEY_SUB_LANGS, "") ?: ""
+        return YoutubeLinks.Options(
+            mode = prefs?.getString(KingdomDramaSettingsBottomSheet.KEY_YT_MODE, "auto") ?: "auto",
+            maxHeight = prefs?.getString(KingdomDramaSettingsBottomSheet.KEY_MAX_HEIGHT, "0")
+                ?.trim()?.toIntOrNull() ?: 0,
+            subtitles = prefs?.getBoolean(KingdomDramaSettingsBottomSheet.KEY_SUBS, true) != false,
+            subLangs = langs.split(',')
+                .map { it.trim().lowercase() }
+                .filter { it.isNotEmpty() }
+                .toSet(),
+        )
+    }
+
     @Volatile
     private var homeDoc: Document? = null
 
@@ -90,12 +133,13 @@ class KingdomDramaProvider : MainAPI() {
 
     private suspend fun getHomeDoc(): Document? {
         val now = System.currentTimeMillis()
-        homeDoc?.let { if (now - homeAt < HOME_TTL_MS) return it }
+        val ttl = homeTtl()
+        homeDoc?.let { if (now - homeAt < ttl) return it }
 
         return homeLock.withLock {
             val t = System.currentTimeMillis()
             val cached = homeDoc
-            if (cached != null && t - homeAt < HOME_TTL_MS) return@withLock cached
+            if (cached != null && t - homeAt < ttl) return@withLock cached
 
             val fetched = app.get("$mainUrl/", referer = "$mainUrl/").document
             homeDoc = fetched
@@ -107,6 +151,13 @@ class KingdomDramaProvider : MainAPI() {
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
         return try {
             val data = request.data
+
+            // الإعدادات: صف مخفي أو تجاوز حدّ الصفوف → لا طلب شبكة أصلًا.
+            if (rowHidden(data)) return newHomePageResponse(request.name, emptyList())
+            val limit = rowLimit()
+            val index = rowOrder.indexOf(data)
+            if (limit > 0 && index >= limit) return newHomePageResponse(request.name, emptyList())
+
             if (page > 1) return newHomePageResponse(request.name, emptyList())
 
             if (data.startsWith("pane|")) {
@@ -143,6 +194,7 @@ class KingdomDramaProvider : MainAPI() {
         root.select("div.latest-movie-img-container")
             .mapNotNull { cardToSearch(it) }
             .distinctBy { it.url }
+            .let { if (it.size > cardsPerRow()) it.take(cardsPerRow()) else it }
 
     private fun cardToSearch(container: Element): SearchResponse? {
         val anchor = container.selectFirst("div.movie-title h3 a")
@@ -289,7 +341,7 @@ class KingdomDramaProvider : MainAPI() {
             var any = false
 
             for (vid in ytIds) {
-                val n = YoutubeLinks.resolve(vid, name, TAG, subtitleCallback, callback)
+                val n = YoutubeLinks.resolve(vid, name, TAG, subtitleCallback, callback, ytOptions())
                 Log.d(TAG, "YouTube $vid links=$n")
                 if (n > 0) any = true
             }

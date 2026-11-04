@@ -1,5 +1,6 @@
 package com.daramly.plugin
 
+import android.content.SharedPreferences
 import android.util.Base64
 import android.util.Log
 import com.fasterxml.jackson.databind.ObjectMapper
@@ -34,8 +35,30 @@ import java.net.URLEncoder
 
 private const val TAG = "Daramly"
 
-/** ذاكرة صفحة الرئيسية: كل صفوف الرئيسية تُبنى من طلبٍ واحد فقط. */
-private const val HOME_TTL_MS = 10 * 60_000L
+/** مسار تصنيف مُرمَّز (الموقع يفكّ `%20` وليس `+`). */
+private fun catPath(name: String): String =
+    "/category/" + URLEncoder.encode(name, "UTF-8").replace("+", "%20")
+
+/**
+ * صفوف الرئيسية بالترتيب الذي تعرضه إعدادات المصدر أيضًا:
+ * أول أربعة أقسام من صفحة الموقع، ثم عشر صفحات تصنيف.
+ */
+val DARAMLY_ROWS: List<Pair<String, String>> = listOf(
+    "sec|🚀 الأكثر مشاهدة اليوم" to "الأكثر مشاهدة اليوم",
+    "sec|أحدث الإضافات" to "أحدث الإضافات",
+    "sec|🔥 الأكثر مشاهدة هذا الأسبوع" to "الأكثر مشاهدة هذا الأسبوع",
+    "sec|🎙️ مسلسلات مدبلجة بالعربية" to "مسلسلات مدبلجة",
+    catPath("مسلسل") to "مسلسل",
+    catPath("مسلسل دراما") to "مسلسل دراما",
+    catPath("صيني") to "صيني",
+    catPath("مسلسل مترجم") to "مسلسل مترجم",
+    catPath("دراما") to "دراما",
+    catPath("مسلسل رومانسي") to "مسلسل رومانسي",
+    catPath("رومانسي") to "رومانسي",
+    catPath("مسلسل أكشن") to "مسلسل أكشن",
+    catPath("أكشن") to "أكشن",
+    catPath("مسلسل مدبلج") to "مسلسل مدبلج",
+)
 
 /**
  * Daramly — `daramly.com` (دراما قصيرة صينية مترجمة ومدبلجة).
@@ -54,7 +77,7 @@ private const val HOME_TTL_MS = 10 * 60_000L
  * لا توجد ملفات ترجمة منفصلة على الموقع (الترجمة مدموجة في الفيديو)، ولذلك
  * لا نرسل أي `SubtitleFile` ونكتفي بكل سيرفرات التشغيل وجوداتها.
  */
-class DaramlyProvider : MainAPI() {
+class DaramlyProvider(private val prefs: SharedPreferences? = null) : MainAPI() {
 
     override var mainUrl = "https://daramly.com"
     override var name = "Daramly"
@@ -64,24 +87,48 @@ class DaramlyProvider : MainAPI() {
     override val supportedTypes = setOf(TvType.Movie, TvType.TvSeries)
 
     /** مسار تصنيف مُرمَّز (الموقع يفكّ `%20` وليس `+`). */
-    private fun cat(name: String): String =
-        "/category/" + URLEncoder.encode(name, "UTF-8").replace("+", "%20")
+    private fun cat(name: String): String = catPath(name)
 
-    override val mainPage = mainPageOf(
-        "sec|🚀 الأكثر مشاهدة اليوم" to "الأكثر مشاهدة اليوم",
-        "sec|أحدث الإضافات" to "أحدث الإضافات",
-        "sec|🔥 الأكثر مشاهدة هذا الأسبوع" to "الأكثر مشاهدة هذا الأسبوع",
-        "sec|🎙️ مسلسلات مدبلجة بالعربية" to "مسلسلات مدبلجة",
-        cat("مسلسل") to "مسلسل",
-        cat("مسلسل دراما") to "مسلسل دراما",
-        cat("صيني") to "صيني",
-        cat("مسلسل مترجم") to "مسلسل مترجم",
-        cat("دراما") to "دراما",
-        cat("مسلسل رومانسي") to "مسلسل رومانسي",
-        cat("رومانسي") to "رومانسي",
-        cat("مسلسل أكشن") to "مسلسل أكشن",
-        cat("أكشن") to "أكشن",
-        cat("مسلسل مدبلج") to "مسلسل مدبلج",
+    override val mainPage = mainPageOf(*DARAMLY_ROWS.toTypedArray())
+
+    // =============================== الإعدادات ===============================
+
+    private fun homeTtl(): Long {
+        val min = prefs?.getString(DaramlySettingsBottomSheet.KEY_CACHE_MIN, "10")
+            ?.trim()?.toIntOrNull() ?: 10
+        return min.coerceIn(1, 24 * 60) * 60_000L
+    }
+
+    private fun rowLimit(): Int =
+        prefs?.getString(DaramlySettingsBottomSheet.KEY_ROW_LIMIT, "all")
+            ?.trim()?.toIntOrNull() ?: 0
+
+    private fun cardsPerRow(): Int =
+        prefs?.getString(DaramlySettingsBottomSheet.KEY_CARDS_PER_ROW, "36")
+            ?.trim()?.toIntOrNull()?.takeIf { it > 0 } ?: Int.MAX_VALUE
+
+    private fun rowVisible(index: Int): Boolean =
+        prefs?.getBoolean(DaramlySettingsBottomSheet.rowKey(index), true) != false
+
+    private fun extraServersEnabled(): Boolean =
+        prefs?.getBoolean(DaramlySettingsBottomSheet.KEY_EXTRA_SERVERS, true) != false
+
+    private fun extraPages(): Int =
+        prefs?.getString(DaramlySettingsBottomSheet.KEY_EXTRA_PAGES, "3")
+            ?.trim()?.toIntOrNull()?.coerceIn(0, 3) ?: 3
+
+    private fun rumbleAutoEnabled(): Boolean =
+        prefs?.getBoolean(DaramlySettingsBottomSheet.KEY_RUMBLE_AUTO, true) != false
+
+    private fun subtitlesEnabled(): Boolean =
+        prefs?.getBoolean(DaramlySettingsBottomSheet.KEY_SUBS, true) != false
+
+    private fun qualityOrder(): String =
+        prefs?.getString(DaramlySettingsBottomSheet.KEY_QUALITY_ORDER, "site") ?: "site"
+
+    private fun ytOptions(): YoutubeLinks.Options = YoutubeLinks.Options(
+        mode = prefs?.getString(DaramlySettingsBottomSheet.KEY_YT_MODE, "auto") ?: "auto",
+        subtitles = subtitlesEnabled(),
     )
 
     private val mapper = ObjectMapper()
@@ -99,12 +146,13 @@ class DaramlyProvider : MainAPI() {
     /** صفحة الرئيسية مرة واحدة لكل الصفوف (single-flight + صلاحية قصيرة). */
     private suspend fun getHomeDoc(): Document? {
         val now = System.currentTimeMillis()
-        homeDoc?.let { if (now - homeAt < HOME_TTL_MS) return it }
+        val ttl = homeTtl()
+        homeDoc?.let { if (now - homeAt < ttl) return it }
 
         return homeLock.withLock {
             val t = System.currentTimeMillis()
             val cached = homeDoc
-            if (cached != null && t - homeAt < HOME_TTL_MS) return@withLock cached
+            if (cached != null && t - homeAt < ttl) return@withLock cached
 
             val fetched = app.get("$mainUrl/", referer = "$mainUrl/").document
             homeDoc = fetched
@@ -116,6 +164,17 @@ class DaramlyProvider : MainAPI() {
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
         return try {
             val data = request.data
+            val index = DARAMLY_ROWS.indexOfFirst { it.first == data }
+
+            // الإعدادات: صف مخفي أو تجاوز حدّ الصفوف → بلا أي طلب شبكة.
+            if (index >= 0 && !rowVisible(index)) {
+                return newHomePageResponse(request.name, emptyList())
+            }
+            val limit = rowLimit()
+            if (limit > 0 && index >= limit) {
+                return newHomePageResponse(request.name, emptyList())
+            }
+
             if (data.startsWith("sec|")) {
                 if (page > 1) return newHomePageResponse(request.name, emptyList())
                 val doc = getHomeDoc()
@@ -160,13 +219,15 @@ class DaramlyProvider : MainAPI() {
         }
         val items = chosen.first.select("a.card").mapNotNull { cardToSearch(it) }.distinctBy { it.url }
         if (items.isEmpty()) Log.w(TAG, "section empty title=$title heading=${chosen.third}")
-        return items
+        return if (items.size > cardsPerRow()) items.take(cardsPerRow()) else items
     }
 
     // ============================== البطاقات ==============================
 
-    private fun parseCards(root: Element): List<SearchResponse> =
-        root.select("a.card").mapNotNull { cardToSearch(it) }.distinctBy { it.url }
+    private fun parseCards(root: Element): List<SearchResponse> {
+        val all = root.select("a.card").mapNotNull { cardToSearch(it) }.distinctBy { it.url }
+        return if (all.size > cardsPerRow()) all.take(cardsPerRow()) else all
+    }
 
     private fun cardToSearch(card: Element): SearchResponse? {
         val href = card.attr("href").trim()
@@ -270,15 +331,17 @@ class DaramlyProvider : MainAPI() {
             collectServers(doc) { u, label -> if (!servers.containsKey(u)) servers[u] = label }
 
             // صفحات «سيرفرات إضافية» التي يعلنها الموقع لنفس العمل.
-            val extras = doc.select("a.version-link")
-                .filter { it.text().contains("إضافية") }
-                .mapNotNull { a ->
-                    val href = a.attr("href").trim()
-                    if (href.isBlank()) null else fixUrl(href)
-                }
-                .filter { it.startsWith("http") && it != pageUrl }
-                .distinct()
-                .take(3)
+            val extras = if (!extraServersEnabled() || extraPages() <= 0) emptyList() else {
+                doc.select("a.version-link")
+                    .filter { it.text().contains("إضافية") }
+                    .mapNotNull { a ->
+                        val href = a.attr("href").trim()
+                        if (href.isBlank()) null else fixUrl(href)
+                    }
+                    .filter { it.startsWith("http") && it != pageUrl }
+                    .distinct()
+                    .take(extraPages())
+            }
 
             var any = emitAll(servers, subtitleCallback, callback)
 
@@ -316,12 +379,17 @@ class DaramlyProvider : MainAPI() {
         val results = coroutineScope {
             servers.map { (u, label) -> async { resolveServer(u, label, subtitleCallback) } }.awaitAll()
         }
+        var all = results.flatten()
+        // ترتيب الجودات حسب إعداد المصدر.
+        all = when (qualityOrder()) {
+            "desc" -> all.sortedByDescending { it.quality }
+            "asc" -> all.sortedBy { it.quality }
+            else -> all
+        }
         var any = false
-        for (links in results) {
-            for (link in links) {
-                any = true
-                callback(link)
-            }
+        for (link in all) {
+            any = true
+            callback(link)
         }
         return any
     }
@@ -370,7 +438,7 @@ class DaramlyProvider : MainAPI() {
         if (YoutubeLinks.isYoutube(url)) {
             val vid = YoutubeLinks.videoIdOf(url) ?: return emptyList()
             val out = mutableListOf<ExtractorLink>()
-            YoutubeLinks.resolve(vid, name, TAG, { subtitleCallback(it) }) { out.add(it) }
+            YoutubeLinks.resolve(vid, name, TAG, { subtitleCallback(it) }, { out.add(it) }, ytOptions())
             return out.map { l ->
                 newExtractorLink(
                     source = name,
@@ -490,7 +558,7 @@ class DaramlyProvider : MainAPI() {
         }
 
         val auto = ua.get("hls")?.get("auto")?.get("url")?.asText()?.replace("\\/", "/")
-        if (!auto.isNullOrBlank()) {
+        if (rumbleAutoEnabled() && !auto.isNullOrBlank()) {
             val qName = if (topH > 0) "${topH}p" else "تلقائي"
             out.add(
                 newExtractorLink(
@@ -506,7 +574,7 @@ class DaramlyProvider : MainAPI() {
 
         // ترجمات التضمين إن وُجدت (`cc`: [{language, url}]) — فارغة في معظم المقاطع.
         val cc = ua.get("cc")
-        if (cc != null && cc.isArray) {
+        if (subtitlesEnabled() && cc != null && cc.isArray) {
             for (n in cc) {
                 val u = n.get("url")?.asText()?.replace("\\/", "/")?.trim()?.takeIf { it.isNotBlank() }
                     ?: continue
