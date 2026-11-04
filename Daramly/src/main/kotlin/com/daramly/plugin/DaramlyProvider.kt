@@ -62,15 +62,25 @@ class DaramlyProvider : MainAPI() {
     override val hasQuickSearch = false
     override val supportedTypes = setOf(TvType.Movie, TvType.TvSeries)
 
+    /** مسار تصنيف مُرمَّز (الموقع يفكّ `%20` وليس `+`). */
+    private fun cat(name: String): String =
+        "/category/" + URLEncoder.encode(name, "UTF-8").replace("+", "%20")
+
     override val mainPage = mainPageOf(
         "sec|🚀 الأكثر مشاهدة اليوم" to "الأكثر مشاهدة اليوم",
         "sec|أحدث الإضافات" to "أحدث الإضافات",
         "sec|🔥 الأكثر مشاهدة هذا الأسبوع" to "الأكثر مشاهدة هذا الأسبوع",
         "sec|🎙️ مسلسلات مدبلجة بالعربية" to "مسلسلات مدبلجة",
-        "/category/%D9%85%D8%B3%D9%84%D8%B3%D9%84%20%D8%AF%D8%B1%D8%A7%D9%85%D8%A7" to "مسلسل دراما",
-        "/category/%D9%85%D8%B3%D9%84%D8%B3%D9%84%20%D8%B1%D9%88%D9%85%D8%A7%D9%86%D8%B3%D9%8A" to "مسلسل رومانسي",
-        "/category/%D9%85%D8%B3%D9%84%D8%B3%D9%84%20%D8%A3%D9%83%D8%B4%D9%86" to "مسلسل أكشن",
-        "/category/%D9%85%D8%B3%D9%84%D8%B3%D9%84%20%D9%85%D8%AF%D8%A8%D9%84%D8%AC" to "مسلسل مدبلج",
+        cat("مسلسل") to "مسلسل",
+        cat("مسلسل دراما") to "مسلسل دراما",
+        cat("صيني") to "صيني",
+        cat("مسلسل مترجم") to "مسلسل مترجم",
+        cat("دراما") to "دراما",
+        cat("مسلسل رومانسي") to "مسلسل رومانسي",
+        cat("رومانسي") to "رومانسي",
+        cat("مسلسل أكشن") to "مسلسل أكشن",
+        cat("أكشن") to "أكشن",
+        cat("مسلسل مدبلج") to "مسلسل مدبلج",
     )
 
     private val mapper = ObjectMapper()
@@ -131,16 +141,25 @@ class DaramlyProvider : MainAPI() {
 
     private fun sectionItems(doc: Document, title: String): List<SearchResponse> {
         val want = norm(title)
-        for (sec in doc.select("section.sec")) {
-            val heading = sec.selectFirst("h2")?.text() ?: continue
+        if (want.isEmpty()) return emptyList()
+        val sections = doc.select("section.sec").mapNotNull { sec ->
+            val heading = sec.selectFirst("h2")?.text() ?: return@mapNotNull null
             val have = norm(heading)
-            if (have.isNotEmpty() && (have == want || have.contains(want))) {
-                val items = sec.select("a.card").mapNotNull { cardToSearch(it) }.distinctBy { it.url }
-                if (items.isNotEmpty()) return items
-            }
+            if (have.isEmpty()) null else Triple(sec, have, heading)
         }
-        Log.w(TAG, "section not found title=$title")
-        return emptyList()
+
+        // مطابقة تامة أولًا: أسماءٌ مثل «دراما» و«أكشن» هي بادئات/أجزاء من عناوين
+        // أقسامٍ أخرى («مسلسل دراما»)، فالمطابقة الجزئية وحدها تُظهر القسم الخطأ.
+        val exact = sections.firstOrNull { it.second == want }
+        val chosen = exact ?: sections.firstOrNull { it.second.contains(want) }
+
+        if (chosen == null) {
+            Log.w(TAG, "section not found title=$title")
+            return emptyList()
+        }
+        val items = chosen.first.select("a.card").mapNotNull { cardToSearch(it) }.distinctBy { it.url }
+        if (items.isEmpty()) Log.w(TAG, "section empty title=$title heading=${chosen.third}")
+        return items
     }
 
     // ============================== البطاقات ==============================
@@ -337,7 +356,7 @@ class DaramlyProvider : MainAPI() {
         subtitleCallback: (SubtitleFile) -> Unit,
     ): List<ExtractorLink> {
         if (url.contains("rumble.com", ignoreCase = true)) {
-            return resolveRumble(url, label)
+            return resolveRumble(url, label, subtitleCallback)
         }
 
         val produced = mutableListOf<ExtractorLink>()
@@ -385,7 +404,11 @@ class DaramlyProvider : MainAPI() {
      * و`hls.auto` (بثّ تلقائي). لا يوجد مُستخرِج مدمج لرامبل في التطبيق،
      * فنحلّها هنا كي لا يضيع السيرفر.
      */
-    private suspend fun resolveRumble(embedUrl: String, label: String): List<ExtractorLink> {
+    private suspend fun resolveRumble(
+        embedUrl: String,
+        label: String,
+        subtitleCallback: (SubtitleFile) -> Unit,
+    ): List<ExtractorLink> {
         val html = try {
             app.get(embedUrl, referer = "$mainUrl/").text
         } catch (e: CancellationException) {
@@ -416,7 +439,11 @@ class DaramlyProvider : MainAPI() {
                 val node = tar.get(key) ?: continue
                 val u = node.get("url")?.asText()?.replace("\\/", "/")?.takeIf { it.isNotBlank() } ?: continue
                 val meta = node.get("meta")
-                val h = meta?.get("h")?.asInt() ?: key.toIntOrNull() ?: 0
+                // مفتاح `tar` هو تسمية رامبل للجودة (240/360/480/720…)؛ و`meta.h`
+                // ارتفاعٌ فعليّ قد يكون رأسيًّا (640 لحلقة 360p عمودية) فلا يصلح
+                // للتسمية إلا عند غياب المفتاح الرقمي.
+                val labeled = key.toIntOrNull()
+                val h = labeled ?: (meta?.get("h")?.asInt() ?: 0)
                 val size = meta?.get("size")?.asLong() ?: 0L
                 if (h in 1..199) continue
                 topH = maxOf(topH, h)
@@ -448,6 +475,18 @@ class DaramlyProvider : MainAPI() {
                     this.quality = getQualityFromName(qName)
                 },
             )
+        }
+
+        // ترجمات التضمين إن وُجدت (`cc`: [{language, url}]) — فارغة في معظم المقاطع.
+        val cc = ua.get("cc")
+        if (cc != null && cc.isArray) {
+            for (n in cc) {
+                val u = n.get("url")?.asText()?.replace("\\/", "/")?.trim()?.takeIf { it.isNotBlank() }
+                    ?: continue
+                val full = if (u.startsWith("http")) u else "https://rumble.com/" + u.trimStart('/')
+                val lang = n.get("language")?.asText()?.trim()?.takeIf { it.isNotBlank() } ?: "ar"
+                subtitleCallback(SubtitleFile(lang, full))
+            }
         }
 
         Log.d(TAG, "rumble $label links=${out.size}")

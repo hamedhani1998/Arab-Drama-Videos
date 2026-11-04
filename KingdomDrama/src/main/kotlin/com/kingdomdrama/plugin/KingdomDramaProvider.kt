@@ -61,12 +61,19 @@ class KingdomDramaProvider : MainAPI() {
     override val supportedTypes = setOf(TvType.Movie, TvType.TvSeries)
 
     override val mainPage = mainPageOf(
+        "pane|*" to "كل الأعمال",
         "pane|latest-all" to "أحدث الأعمال",
         "pane|billionaire" to "دراما الملياردير",
         "pane|ai-universe" to "عالم دراما الذكاء الاصطناعي",
         "pane|mystery" to "الولادة من جديد وانتقام",
         "path|country/chinese" to "مسلسلات صينية",
         "path|country/korean" to "مسلسلات كورية",
+        "path|country/japanese" to "مسلسلات يابانية",
+        "path|country/hong-kong" to "دراما هونغ كونغ",
+        "path|country/western" to "أفلام ومسلسلات غربية",
+        "path|country/thai" to "مسلسلات تايلاندية",
+        "path|country/indian" to "أفلام ومسلسلات هندية",
+        "path|country/vietnamese" to "مسلسلات فيتنامية",
         "path|year/2026" to "أعمال 2026",
     )
 
@@ -104,8 +111,17 @@ class KingdomDramaProvider : MainAPI() {
             if (data.startsWith("pane|")) {
                 val id = data.removePrefix("pane|")
                 val doc = getHomeDoc()
-                val pane = doc?.selectFirst("div#$id")
-                val items = if (pane == null) emptyList() else parseCards(pane)
+                val items = when {
+                    // «كل الأعمال» = كل تبويبات الرئيسية مدموجة (لا تُكرِّر البطاقة).
+                    id == "*" -> doc?.select("div.movies-list")
+                        ?.flatMap { parseCards(it) }
+                        ?.distinctBy { it.url }
+                        ?: emptyList()
+                    else -> {
+                        val pane = doc?.selectFirst("div#$id")
+                        if (pane == null) emptyList() else parseCards(pane)
+                    }
+                }
                 newHomePageResponse(request.name, items)
             } else {
                 val path = data.removePrefix("path|")
