@@ -1,4 +1,4 @@
-version = 1
+version = 2
 
 cloudstream {
     description = "KingdomDrama - كينجدوم دراما: مسلسلات دراما قصيرة مترجمة ومدبلجة"

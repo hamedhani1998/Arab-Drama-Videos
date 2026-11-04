@@ -156,7 +156,7 @@ class KingdomDramaProvider : MainAPI() {
         val q = query.trim()
         if (q.isEmpty()) return null
         return try {
-            val url = "$mainUrl/search?q=" + URLEncoder.encode(q, "UTF-8")
+            val url = "$mainUrl/search?q=" + URLEncoder.encode(q, "UTF-8").replace("+", "%20")
             val doc = app.get(url, referer = "$mainUrl/").document
             parseCards(doc).ifEmpty { null }
         } catch (e: CancellationException) {
