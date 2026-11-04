@@ -152,6 +152,15 @@ class RimShortProvider(private val prefs: SharedPreferences? = null) : MainAPI()
         null
     }
 
+    /**
+     * تفاصيل العمل. **بلا `lang`**: نقطة `/api/drama/{id}` صارت تردّ 404
+     * «Drama not found» إذا جاءها `?lang=ar` (قيس 2026-11-04)، بينما بلا
+     * المعامل تردّ 200 بالعربية نفسها. بقية النقاط (home/search/video) ما
+     * زالت تقبل `lang` — فلا نُغيّرها.
+     */
+    private suspend fun detailJson(id: String): String? =
+        apiJson("/api/drama/$id") ?: apiJson("/api/drama/$id?lang=$API_LANG")
+
     // ============================== Main page ==============================
 
     /** استجابة واحدة تُطعم كل الصفوف: البانرات ثم أقسام الموقع كما هي ترتيبها. */
@@ -258,7 +267,7 @@ class RimShortProvider(private val prefs: SharedPreferences? = null) : MainAPI()
                 Log.e(TAG, "load no book id url=$url")
                 return null
             }
-            val text = apiJson("/api/drama/$id?lang=$API_LANG") ?: return null
+            val text = detailJson(id) ?: return null
             val d = mapper.readValue(text, DramaDetail::class.java)
             val title = d.title?.trim().takeUnless { it.isNullOrBlank() } ?: return null
 
@@ -297,7 +306,7 @@ class RimShortProvider(private val prefs: SharedPreferences? = null) : MainAPI()
 
     /** إيجاد `chapterId` لحلقةٍ جاء رابطها بلا `ch` — نفس ما تفعله الصفحة نفسها. */
     private suspend fun resolveChapterId(id: String, ep: Int): String? {
-        val text = apiJson("/api/drama/$id?lang=$API_LANG") ?: return null
+        val text = detailJson(id) ?: return null
         return mapper.readValue(text, DramaDetail::class.java).episodes.orEmpty()
             .firstOrNull { it.number == ep }
             ?.chapterId

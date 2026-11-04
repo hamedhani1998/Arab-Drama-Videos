@@ -266,7 +266,7 @@ object RimShortProxy {
         val segs = path.trim('/').split('/')
         val id = if (segs.size >= 2 && segs[0] == "x") segs[1] else null
         val root = id?.let { registry[it] }
-        if (root == null) {
+        if (root == null || id == null) {
             respond(socket, "404 Not Found", "text/plain", "unknown stream".toByteArray(), null)
             return
         }
@@ -317,7 +317,7 @@ object RimShortProxy {
                 val body = out.toByteArray()
                 if (playlistCache.size >= PLAYLIST_CACHE_MAX) playlistCache.clear()
                 playlistCache[target] = String(body, Charsets.UTF_8)
-                val rewritten = rewrite(body, target, root, indices)
+                val rewritten = rewrite(body, target, id, indices)
                 respond(socket, "200 OK", "application/vnd.apple.mpegurl", rewritten, null)
             } else if (rangeHeader != null) {
                 // طلبٌ مُنَوَّع: يُخزَّن كاملاً ثم يُقطَّع (الجسم في الذاكرة أصلاً).
@@ -382,11 +382,11 @@ object RimShortProxy {
     private fun streamToClient(socket: Socket, mime: String, peek: ByteArray, peekLen: Int, ins: InputStream) {
         val out = socket.getOutputStream()
         val header = StringBuilder()
-            .append("HTTP/1.1 200 OK\n")
-            .append("Content-Type: ").append(mime).append('\n')
-            .append("Connection: close\n")
-            .append("Access-Control-Allow-Origin: *\n")
-            .append('\n')
+            .append("HTTP/1.1 200 OK\r\n")
+            .append("Content-Type: ").append(mime).append("\r\n")
+            .append("Connection: close\r\n")
+            .append("Access-Control-Allow-Origin: *\r\n")
+            .append("\r\n")
             .toString()
         out.write(header.toByteArray(Charsets.US_ASCII))
         if (peekLen > 0) out.write(peek, 0, peekLen)
@@ -403,8 +403,13 @@ object RimShortProxy {
     /**
      * إعادة كتابة القائمة: كل سطر ابنٍ ← رابط الوسيط المطلق بفهرس سلسلته،
      * وكل وسمٍ يحوي `URI="…"` ← مسارٌ مطلق مقابل مجلّد القائمة الأصلي.
+     *
+     * **`id` هو مفتاح التسجيل، لا رابط الأصل.** كان يُمرَّر رابط الأصل هنا
+     * فيصير الابن `/x/https://cdn/…/file.m3u8/0`، و`route` يقرأ `segs[1]`
+     * («https:») فلا يجده في السجلّ ويردّ 404 — فيُحمَّل الماستر ثم يموت
+     * التشغيل عند أول مقطع. هذا سبب «روابط سيرفرات التشغيل لا تعمل».
      */
-    private fun rewrite(body: ByteArray, playlistUrl: String, root: String, chain: List<Int>): ByteArray {
+    private fun rewrite(body: ByteArray, playlistUrl: String, id: String, chain: List<Int>): ByteArray {
         val dir = dirOf(playlistUrl)
         val suffix = chain.joinToString("") { "/$it" }
         val out = StringBuilder(body.size + 128)
@@ -415,7 +420,7 @@ object RimShortProxy {
                 line.isEmpty() -> Unit
                 line.startsWith("#") -> out.append(absoluteizeUriAttr(line, dir))
                 else -> {
-                    out.append("http://127.0.0.1:$serverPort/x/$root$suffix/$childIdx")
+                    out.append("http://127.0.0.1:$serverPort/x/$id$suffix/$childIdx")
                     childIdx++
                 }
             }
@@ -436,13 +441,13 @@ object RimShortProxy {
         extraHeaders: List<String>?,
     ) {
         val sb = StringBuilder()
-        sb.append("HTTP/1.1 ").append(status).append('\n')
-        sb.append("Content-Type: ").append(contentType).append('\n')
-        sb.append("Content-Length: ").append(body.size).append('\n')
-        sb.append("Connection: close").append('\n')
-        sb.append("Access-Control-Allow-Origin: *").append('\n')
-        extraHeaders?.forEach { sb.append(it).append('\n') }
-        sb.append('\n')
+        sb.append("HTTP/1.1 ").append(status).append("\r\n")
+        sb.append("Content-Type: ").append(contentType).append("\r\n")
+        sb.append("Content-Length: ").append(body.size).append("\r\n")
+        sb.append("Connection: close").append("\r\n")
+        sb.append("Access-Control-Allow-Origin: *").append("\r\n")
+        extraHeaders?.forEach { sb.append(it).append("\r\n") }
+        sb.append("\r\n")
         val out = socket.getOutputStream()
         out.write(sb.toString().toByteArray(Charsets.US_ASCII))
         if (body.isNotEmpty()) out.write(body)

@@ -1,15 +1,20 @@
-package com.dramadunyam.plugin
+﻿package com.dramadunyam.plugin
 
 import android.content.SharedPreferences
 import android.util.Log
 import cloudstreamshared.FormatTag
+import cloudstreamshared.YoutubeSubServer
 import com.fasterxml.jackson.annotation.JsonProperty
 import com.fasterxml.jackson.databind.DeserializationFeature
+import com.fasterxml.jackson.databind.JsonNode
 import com.fasterxml.jackson.databind.ObjectMapper
 import com.fasterxml.jackson.module.kotlin.registerKotlinModule
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.GlobalScope
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.coroutines.sync.Semaphore
@@ -65,6 +70,13 @@ private data class PlayResponse(
     @JsonProperty("source_tag") val sourceTag: String? = null,
     @JsonProperty("expires_at") val expiresAt: String? = null,
     val altyazilar: List<DunSubtitle>? = null,
+    /**
+     * ترجمات HLS التي أضافها الموقع (2026-11): قد تكون قائمة كائنات
+     * `{dil/src}` أو قائمة روابط نصّية أو خريطة `{لغة: رابط}` — لا شكل
+     * واحد مضمون، فنقرأها كشجرة JSON بدل نموذجٍ يفشل على شكلٍ آخر.
+     */
+    @JsonProperty("hls_subtitles") val hlsSubtitles: JsonNode? = null,
+    @JsonProperty("altyazi_modu") val subtitleMode: String? = null,
 )
 
 // ★ إشارات صفوف القسم الأمامي — محمولة في `MainPageData.data` لصفّي
@@ -143,10 +155,15 @@ private val NATIVE_SUB_LANG = mapOf(
  * فالرمز هو المُدخل والتسمية العربية هي المخرج — لا تُمرَّر التسمية كما هي.
  */
 private fun normalizeSubLang(raw: String): String? {
-    if (raw.isEmpty()) return null
-    if (SubtitleHelper.fromCodeToLangTagIETF(raw) != null) return raw
-    NATIVE_SUB_LANG[raw.lowercase()]?.let { return it }
-    return SubtitleHelper.fromLanguageToTagIETF(raw, true)
+    val trimmed = raw.trim()
+    if (trimmed.isEmpty()) return null
+    if (SubtitleHelper.fromCodeToLangTagIETF(trimmed) != null) return trimmed
+    // الموقع يرسل «AR»/«EN» بأحرف كبيرة؛ الخريطة تعرف الصغيرة غالباً.
+    val lower = trimmed.lowercase()
+    if (lower != trimmed && SubtitleHelper.fromCodeToLangTagIETF(lower) != null) return lower
+    NATIVE_SUB_LANG[lower]?.let { return it }
+    return SubtitleHelper.fromLanguageToTagIETF(trimmed, true)
+        ?: SubtitleHelper.fromLanguageToTagIETF(lower, true)
 }
 
 class DramadunyamProvider(private val prefs: SharedPreferences? = null) : MainAPI() {
@@ -246,6 +263,18 @@ class DramadunyamProvider(private val prefs: SharedPreferences? = null) : MainAP
     // الخادم لطلبٍ عادٍ. صلاحيتها 12 ساعة؛ وعند 412 نُعيد التسخين مرةً واحدة.
     private var cachedTicket: String? = null
 
+    /**
+     * رؤوس متصفّح حقيقي على أندرويد. Cloudflare يرفض طلبات NiceHttp
+     * الافتراضية أحياناً بردّ 403 «Attention Required» (قيس 2026-11-04)،
+     * والرؤوس وحدها لا تحلّ التحدّي لكنها تُقلّل الرفض وتُبقي التذكرة صالحة.
+     */
+    private val browserHeaders = mapOf(
+        "User-Agent" to "Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 " +
+            "(KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36",
+        "Accept" to "application/json, text/plain, */*",
+        "Accept-Language" to "ar,en;q=0.8,tr;q=0.6",
+    )
+
     // ★ تسخين أحادي: الصفوف تُطلَق متزامنة، ولو دخل 40 طلباً `warmTicket` معاً
     //   لأُنزلت 40 طلباً على `/api/config` دفعة واحدة وهي أول ما يثير Turnstile.
     //   القفل يجعل الأول يسخّن والبقية تنتظره ثم تقرأ النتيجة من الذاكرة.
@@ -257,12 +286,13 @@ class DramadunyamProvider(private val prefs: SharedPreferences? = null) : MainAP
             cachedTicket?.takeIf { it.isNotBlank() }?.let { return it }
             val t = try {
                 // المصدر المقيس للتذكرة اليوم. `/ar/` احتياطٌ لأيامٍ سابقة كان يسقطها.
-                val rConfig = app.get("$mainUrl/api/config", referer = mainUrl)
+                val rConfig = app.get("$mainUrl/api/config", referer = mainUrl, headers = browserHeaders)
                 val c1 = rConfig.cookies["dd_bilet"]?.takeIf { it.isNotBlank() }
                 if (c1 != null) {
                     c1
                 } else {
-                    app.get("$mainUrl/ar/", referer = mainUrl).cookies["dd_bilet"]
+                    app.get("$mainUrl/ar/", referer = mainUrl, headers = browserHeaders)
+                        .cookies["dd_bilet"]
                         ?.takeIf { it.isNotBlank() }
                 }
             } catch (e: kotlinx.coroutines.CancellationException) {
@@ -281,14 +311,19 @@ class DramadunyamProvider(private val prefs: SharedPreferences? = null) : MainAP
     private fun authHeaders(extra: Map<String, String>): Map<String, String>? {
         val t = cachedTicket?.takeIf { it.isNotBlank() }
             ?: return null
-        return extra + mapOf("Cookie" to "dd_bilet=$t")
+        return browserHeaders + extra + mapOf("Cookie" to "dd_bilet=$t")
     }
 
-    /** 412 = تذكرة فاسدة/منتهية؛ صفحة تحدّي = يعترض الخادم. كلاهما يُعاد تسخينه. */
+    /**
+     * 412 = تذكرة فاسدة/منتهية، و403/429 = حاجز Cloudflare (نصّه
+     * «Attention Required» لا «Just a moment» فقط). كلاهما يُعاد تسخينه.
+     */
     private fun needsRewarm(r: com.lagradost.nicehttp.NiceResponse): Boolean {
-        if (r.code == 412) return true
+        if (r.code == 412 || r.code == 403 || r.code == 429) return true
         val txt = r.text
-        return txt.contains("Just a moment", ignoreCase = true)
+        return txt.contains("Just a moment", ignoreCase = true) ||
+            txt.contains("Attention Required", ignoreCase = true) ||
+            txt.contains("cdn-cgi/challenge-platform", ignoreCase = true)
     }
 
     /**
@@ -333,10 +368,14 @@ class DramadunyamProvider(private val prefs: SharedPreferences? = null) : MainAP
             Log.d(TAG, "re-warm cycle=$cycle after ${r.code} $url")
             cachedTicket = null
             warmTicket() ?: return r
-            // فاصل قصير: الرفض يتغيّر مع الزمن لا مع التذكرة وحدها (قِيس).
-            if (cycle < 3) kotlinx.coroutines.delay(1500)
+            // فاصل: حاجز Cloudflare يحتاج ثوانيَ لا أجزاءها، ورفض التذكرة
+            // يتغيّر مع الزمن لا مع التذكرة وحدها (قِيس).
+            if (cycle < 3) {
+                val wait = if (r.code == 403 || r.code == 429) 2_500L else 1_500L
+                kotlinx.coroutines.delay(wait)
+            }
         }
-        Log.e(TAG, "getWithTicket persistent 412 after 3 cycles $url")
+        Log.e(TAG, "getWithTicket persistent ${last?.code} after 3 cycles $url")
         return last
     }
 
@@ -557,6 +596,265 @@ class DramadunyamProvider(private val prefs: SharedPreferences? = null) : MainAP
         }
     }
 
+    // ============================ الترجمات ============================
+
+    /**
+     * كل مسارات الترجمة في استجابة `/play`: `altyazilar` (الشكل القديم)
+     * و`hls_subtitles` (أضافه الموقع 2026-11 بشكلٍ غير موثَّق). نقرأ الثاني
+     * كشجرة JSON لأن أشكاله المحتملة ثلاثة: قائمة كائنات، قائمة روابط، أو
+     * خريطة `{لغة: رابط}`. اللغة تُؤخذ من الكائن أو من اسم الملف، وإن غابت
+     * تبقى فارغة ويسمّيها المُستدعي «ترجمة».
+     */
+    private fun collectPlaySubtitles(p: PlayResponse): List<Pair<String, String>> {
+        val out = ArrayList<Pair<String, String>>()
+        val seen = HashSet<String>()
+
+        fun add(rawLang: String?, rawSrc: String?) {
+            val src = rawSrc?.trim().orEmpty()
+            if (src.isEmpty()) return
+            val full = abs(src)
+            if (!seen.add(full)) return
+            out.add(rawLang?.trim().orEmpty() to full)
+        }
+
+        p.altyazilar.orEmpty().forEach { add(it.dil, it.src) }
+        collectSubsNode(p.hlsSubtitles, null, ::add)
+        return out
+    }
+
+    private fun collectSubsNode(
+        node: JsonNode?,
+        inheritedLang: String?,
+        add: (String?, String?) -> Unit,
+    ) {
+        if (node == null || node.isNull || node.isMissingNode) return
+        when {
+            node.isArray -> node.forEach { collectSubsNode(it, inheritedLang, add) }
+            node.isTextual -> {
+                val url = node.asText().trim()
+                if (url.isNotEmpty()) add(inheritedLang ?: langFromSubUrl(url), url)
+            }
+            node.isObject -> {
+                val lang = firstText(node, "dil", "lang", "language", "locale", "label", "name")
+                    ?: inheritedLang
+                val src = firstText(node, "src", "url", "uri", "file", "vtt", "subtitle", "path")
+                if (!src.isNullOrBlank()) {
+                    add(lang ?: langFromSubUrl(src), src)
+                } else {
+                    // خريطة لغة ← رابط، أو كائنات متداخلة.
+                    val fields = node.fields()
+                    while (fields.hasNext()) {
+                        val (key, value) = fields.next()
+                        if (value.isTextual) add(key, value.asText())
+                        else collectSubsNode(value, key, add)
+                    }
+                }
+            }
+        }
+    }
+
+    private fun firstText(node: JsonNode, vararg keys: String): String? {
+        for (key in keys) {
+            val v = node.get(key) ?: continue
+            if (v.isTextual && v.asText().isNotBlank()) return v.asText()
+        }
+        return null
+    }
+
+    /** `…/ar.vtt` أو `…/subtitle_x/ar.m3u8` ← `ar`. */
+    private fun langFromSubUrl(url: String): String? =
+        Regex("""/([A-Za-z]{2,3}(?:[-_][A-Za-z]{2,4})?)(?:[-.]\d+)?\.(?:vtt|srt|m3u8)""")
+            .find(url)?.groupValues?.get(1)
+
+    /**
+     * إخراج الترجمات **بعد** بثّ الرابط، في خيطٍ منفصل: الجلب والتحويل قد
+     * يستغرقان ثوانيَ على شبكةٍ بطيئة، والتشغيل لا ينتظرهما.
+     *
+     * لماذا لا نسلّم رابط `dramaflix.net` كما هو؟ لأن الخادم يخضع لحاجز
+     * Cloudflare يردّ 403 على عناوين مراكز البيانات (قِيس 2026-11-04)،
+     * ولأن المشغّل قد لا يرسل `Referer`. نجلب النص هنا حيث تصل الكوكيز
+     * والرؤوس، نحوّله WebVTT نظيفاً، ونقدّمه من خادم محلي. وإن فشل الجلب
+     * يبقى الرابط الأصلي بديلاً — لا نُسقط ترجمةً لأن التحسين تعذّر.
+     */
+    private fun emitSubtitlesAsync(
+        subs: List<Pair<String, String>>,
+        subtitleCallback: (SubtitleFile) -> Unit,
+    ) {
+        if (subs.isEmpty()) return
+        val cookie = cachedTicket
+        GlobalScope.launch(Dispatchers.IO) {
+            val seenLang = HashSet<String>()
+            for ((rawLang, url) in subs) {
+                try {
+                    val lang = normalizeSubLang(rawLang)
+                        ?: rawLang.trim().ifEmpty { langFromSubUrl(url) ?: "und" }
+                    if (!seenLang.add(lang.lowercase())) continue
+
+                    val vtt = fetchSubtitleVtt(url, cookie)
+                    val local = vtt?.let { YoutubeSubServer.register(it) }
+                    val target = local ?: url
+                    subtitleCallback(
+                        newSubtitleFile(subLangLabel(lang), target) {
+                            this.headers = mapOf("Referer" to mainUrl)
+                        }
+                    )
+                    Log.d(TAG, "subtitle ${if (local != null) "local" else "direct"} lang=$lang bytes=${vtt?.length ?: 0}")
+                } catch (e: Exception) {
+                    Log.w(TAG, "subtitle skipped ${e.javaClass.simpleName} $url")
+                }
+            }
+        }
+    }
+
+    /** جلب نص الترجمة عبر HTTP/1.1 — فارغ عند أي فشل. */
+    private fun fetchSubtitleVtt(url: String, cookie: String?): String? = try {
+        val conn = java.net.URL(url).openConnection() as java.net.HttpURLConnection
+        conn.requestMethod = "GET"
+        conn.connectTimeout = 8000
+        conn.readTimeout = 15_000
+        conn.instanceFollowRedirects = true
+        conn.setRequestProperty(
+            "User-Agent",
+            "Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 " +
+                "(KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36"
+        )
+        conn.setRequestProperty("Referer", mainUrl + "/")
+        conn.setRequestProperty("Accept", "text/vtt, text/plain, */*")
+        conn.setRequestProperty("Accept-Language", "ar,en;q=0.8")
+        conn.setRequestProperty("Accept-Encoding", "identity")
+        if (!cookie.isNullOrBlank()) conn.setRequestProperty("Cookie", "dd_bilet=$cookie")
+        val rc = conn.responseCode
+        if (rc !in 200..299) {
+            Log.w(TAG, "subtitle http $rc $url")
+            null
+        } else {
+            val text = conn.inputStream.bufferedReader(Charsets.UTF_8).use { it.readText() }
+            toWebVtt(text).takeIf { it.isNotBlank() }
+        }
+    } catch (e: Exception) {
+        Log.w(TAG, "subtitle fetch ${e.javaClass.simpleName} $url")
+        null
+    }
+
+    /**
+     * يحوّل أي صيغة ترجمة محتملة إلى WebVTT يقبله المشغّل.
+     *
+     * و**يُنقّي وسوم الموضع** من أسطر التوقيت: خوادم الترجمات تكتب
+     * `align:start position:10% line:0`، و`line:0` يثبّت النص في أعلى
+     * الشاشة — والمطلوب أسفل الفيديو. نُبقي التوقيتين فقط.
+     */
+    private fun toWebVtt(raw: String): String {
+        val t = raw.trim().removePrefix("\uFEFF").trim()
+        if (t.isEmpty()) return ""
+        if (t.startsWith("WEBVTT")) return sanitizeCues(t)
+        return try {
+            when {
+                t.startsWith("{") -> json3ToVtt(t)
+                t.startsWith("<") -> xmlToVtt(t)
+                t.contains("-->") -> sanitizeCues(t)
+                else -> ""
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "vtt convert failed: ${e.message}")
+            ""
+        }
+    }
+
+    /** يبقي التوقيتين ويطرح كل وسوم الموضع/المحاذاة/السطر. */
+    private fun sanitizeCues(vtt: String): String {
+        val sb = StringBuilder(vtt.length)
+        if (!vtt.trimStart().startsWith("WEBVTT")) sb.append("WEBVTT\n\n")
+        var hasCue = false
+        for (line in vtt.lines()) {
+            if (line.contains("-->")) {
+                val halves = line.split("-->", limit = 2)
+                val start = normTime(halves[0].trim())
+                val end = normTime(halves[1].trim().split(Regex("\\s+")).first())
+                if (start != null && end != null) {
+                    sb.append(start).append(" --> ").append(end).append('\n')
+                    hasCue = true
+                }
+            } else {
+                sb.append(line).append('\n')
+            }
+        }
+        return if (hasCue) sb.toString() else ""
+    }
+
+    /** `00:01:02,500` أو `01:02.500` ← `00:01:02.500`. */
+    private fun normTime(raw: String): String? {
+        val t = raw.trim().replace(',', '.')
+        if (t.isEmpty()) return null
+        val parts = t.split(':')
+        if (parts.size !in 2..3) return null
+        val hours = if (parts.size == 3) parts[0].toLongOrNull() ?: return null else 0L
+        val minutes = (if (parts.size == 3) parts[1] else parts[0]).toLongOrNull() ?: return null
+        val secPart = (if (parts.size == 3) parts[2] else parts[1]).toDoubleOrNull() ?: return null
+        val ms = hours * 3_600_000 + minutes * 60_000 + (secPart * 1000).toLong()
+        return ts(ms)
+    }
+
+    /** `json3`: `events[].segs[].utf8` مع `tStartMs`/`dDurationMs`. */
+    private fun json3ToVtt(raw: String): String {
+        val root = org.json.JSONObject(raw)
+        val events = root.optJSONArray("events") ?: return ""
+        val sb = StringBuilder("WEBVTT\n\n")
+        for (i in 0 until events.length()) {
+            val ev = events.optJSONObject(i) ?: continue
+            val segs = ev.optJSONArray("segs") ?: continue
+            val line = StringBuilder()
+            for (j in 0 until segs.length()) {
+                line.append(segs.optJSONObject(j)?.optString("utf8", "").orEmpty())
+            }
+            val text = line.toString().trim()
+            if (text.isEmpty()) continue
+            val start = ev.optDouble("tStartMs", 0.0).toLong()
+            val dur = ev.optDouble("dDurationMs", 0.0).toLong().coerceAtLeast(1L)
+            sb.append(ts(start)).append(" --> ").append(ts(start + dur)).append('\n')
+            sb.append(text).append("\n\n")
+        }
+        return if (sb.length <= 8) "" else sb.toString()
+    }
+
+    /** `xml`: `<text start="0.5" dur="1.2">…</text>`. */
+    private fun xmlToVtt(raw: String): String {
+        val sb = StringBuilder("WEBVTT\n\n")
+        val tagRe = Regex("""<text\b([^>]*)>([\s\S]*?)</text>""")
+        var found = false
+        for (m in tagRe.findAll(raw)) {
+            val attrs = m.groupValues[1]
+            val body = unescapeXml(m.groupValues[2]).replace('\n', ' ').trim()
+            if (body.isEmpty()) continue
+            val start = attrDouble(attrs, "start") ?: 0.0
+            val dur = attrDouble(attrs, "dur") ?: 2.0
+            sb.append(ts((start * 1000).toLong())).append(" --> ")
+                .append(ts(((start + dur) * 1000).toLong())).append('\n')
+            sb.append(body).append("\n\n")
+            found = true
+        }
+        return if (found) sb.toString() else ""
+    }
+
+    private fun attrDouble(attrs: String, name: String): Double? =
+        Regex("""\b$name\s*=\s*"([\d.]+)"""").find(attrs)
+            ?.groupValues?.get(1)?.toDoubleOrNull()
+
+    /**
+     * WebVTT timecode. `Locale.US` مقصود: بلاه يخرج `String.format` بأرقام
+     * عربية-هندية على هاتف عربي، وهو timecode لا يقبله المشغّل.
+     */
+    private fun ts(ms: Long): String {
+        val h = ms / 3_600_000
+        val m = (ms % 3_600_000) / 60_000
+        val s = (ms % 60_000) / 1000
+        val msec = ms % 1000
+        return String.format(java.util.Locale.US, "%02d:%02d:%02d.%03d", h, m, s, msec)
+    }
+
+    private fun unescapeXml(s: String): String = s
+        .replace("&amp;", "&").replace("&lt;", "<").replace("&gt;", ">")
+        .replace("&quot;", "\"").replace("&#39;", "'").replace("&apos;", "'")
+
     override suspend fun loadLinks(
         data: String,
         isCasting: Boolean,
@@ -600,56 +898,44 @@ class DramadunyamProvider(private val prefs: SharedPreferences? = null) : MainAP
             // فيظهر «لا روابط» — حقيقةٌ سريعة خيرٌ من دورانٍ لا ينتهي.
             var play: PlayResponse? = null
             var playRaw: String? = null
-            val ok = withTimeoutOrNull(30_000L) {
-                for (attempt in 1..3) {
+            val ok = withTimeoutOrNull(32_000L) {
+                for (attempt in 1..8) {
                     val r = getWithTicket("$mainUrl/play/$seriesId/$ep", referer = mainUrl)
                         ?: return@withTimeoutOrNull false
                     if (r.isSuccessful) {
-                        playRaw = r.text
-                        play = try {
+                        val parsed = try {
                             mapper.readValue(r.text, PlayResponse::class.java)
                         } catch (e: Exception) {
                             Log.e(TAG, "play parse FAILED series=$seriesId ep=$ep body=${r.text.take(300)}")
                             null
                         }
+                        // 200 بجسم `source_preparing` (retryable) ليس رابطاً:
+                        // المصدر لم يُجهَّز بعد، والمحاولة التالية تنجح غالباً.
+                        val notReady = parsed?.url.isNullOrBlank() &&
+                            (r.text.contains("source_preparing") || r.text.contains("\"retryable\":true"))
+                        if (notReady) {
+                            Log.d(TAG, "play preparing retry $attempt series=$seriesId ep=$ep")
+                            delay(2_000)
+                            continue
+                        }
+                        playRaw = r.text
+                        play = parsed
                         return@withTimeoutOrNull true
                     }
-                    if (r.code != 503) {
+                    if (r.code != 503 && r.code != 403 && r.code != 429) {
                         Log.e(TAG, "play HTTP ${r.code} series=$seriesId ep=$ep")
                         return@withTimeoutOrNull false
                     }
-                    Log.d(TAG, "play 503 retry $attempt series=$seriesId ep=$ep")
-                    delay(1500)
+                    Log.d(TAG, "play ${r.code} retry $attempt series=$seriesId ep=$ep")
+                    delay(2_000)
                 }
                 false
             }
             if (ok == null) {
-                Log.e(TAG, "play TIMEOUT 30s series=$seriesId ep=$ep")
+                Log.e(TAG, "play TIMEOUT 32s series=$seriesId ep=$ep")
                 return false
             }
             val p = play ?: return false
-
-            // كل الترجمات المضمّنة — دائمًا مطلقة على dramaflix.net، ورمز اللغة
-            // في `dil`؛ ثم لا رابطٌ مكرّر ولا لغةٌ مكرّرة.
-            if (showSubs()) {
-                val seenUrl = HashSet<String>()
-                val seenLang = HashSet<String>()
-                p.altyazilar.orEmpty().forEach { s ->
-                    val subRaw = s.src?.trim().orEmpty()
-                    if (subRaw.isEmpty()) return@forEach
-                    val subUrl = abs(subRaw)
-                    if (!seenUrl.add(subUrl)) return@forEach
-                    val rawLang = s.dil?.trim().orEmpty()
-                    val lang = normalizeSubLang(rawLang) ?: rawLang.ifEmpty { "ترجمة" }
-                    if (!seenLang.add(lang)) return@forEach
-                    try {
-                        subtitleCallback(newSubtitleFile(subLangLabel(lang), subUrl) {
-                            this.headers = mapOf("Referer" to mainUrl)
-                        })
-                    } catch (_: Exception) {
-                    }
-                }
-            }
 
             // الصيغة: `type` يقول hls/mp4، وله روابط بلا امتداد إطلاقاً
             // (mp4 حملة تنتهي بـ`mime_type=video_mp4`) فنُمرّره إلى FormatTag
@@ -695,6 +981,10 @@ class DramadunyamProvider(private val prefs: SharedPreferences? = null) : MainAP
                     headers = mapOf("Referer" to mainUrl)
                 }
             )
+
+            // الترجمات بعد بثّ الرابط: الجلب والتحويل يجريان في خيطٍ منفصل،
+            // فلا يتأخّر التشغيل. وإن تعذّر الجلب يبقى الرابط الأصلي بديلاً.
+            if (showSubs()) emitSubtitlesAsync(collectPlaySubtitles(p), subtitleCallback)
             true
         } catch (e: kotlinx.coroutines.CancellationException) {
             throw e
