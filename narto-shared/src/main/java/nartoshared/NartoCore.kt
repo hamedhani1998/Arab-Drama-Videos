@@ -1,5 +1,6 @@
 package nartoshared
 
+import android.content.SharedPreferences
 import com.fasterxml.jackson.annotation.JsonProperty
 import com.fasterxml.jackson.databind.DeserializationFeature
 import com.fasterxml.jackson.databind.ObjectMapper
@@ -292,6 +293,55 @@ internal fun ndCookieHeader(): Map<String, String> =
 // يعيد nartoGetPage المحاولة بكوكي جديد بدل أن يُسلّم نصًّا لا يحتوي أي بطاقة.
 internal fun isChallengePage(body: String): Boolean =
     body.length < 8_000 && body.contains("Checking your browser")
+
+/**
+ * مخزنُ صفوف الرئيسية على القرص (SharedPreferences).
+ *
+ * لماذا: CloudStream لا يرسم الرئيسية إلا بعد اكتمال **كل** الصفوف، وصفحة الموجز
+ * ٤٥٧KB/~٣٥ث على شبكة المستخدم (قياس ٢٠٢٦-١١)، فالإقلاع البارد كان ~٨١ث. الصفوف
+ * صغيرة بعد التحليل (١٢ عنصرًا)، فتُخزَّن كـJSON وتُعاد فورًا في الإقلاع التالي،
+ * ويُحدَّث الصفّ في الخلفية إن مرّت [NartoRowCache.STALE_AFTER_MS].
+ *
+ * التخزين تحسينٌ للأداء فقط: أي فشلٍ في القراءة/الكتابة يعود بالسلوك القديم (شبكة).
+ */
+class NartoRowCache(
+    private val prefs: SharedPreferences?,
+    private val prefix: String,
+) {
+    class Entry(val json: String, val at: Long)
+
+    fun get(key: String): Entry? {
+        val p = prefs ?: return null
+        return try {
+            val json = p.getString(slot(key), null)
+            if (json.isNullOrBlank() || json.length < 8) return null
+            Entry(json, p.getLong(slot(key) + "_at", 0L))
+        } catch (e: Exception) {
+            null
+        }
+    }
+
+    fun put(key: String, json: String) {
+        val p = prefs ?: return
+        try {
+            p.edit()
+                .putString(slot(key), json)
+                .putLong(slot(key) + "_at", System.currentTimeMillis())
+                .apply()
+        } catch (e: Exception) {
+            // تجاهُل: التخزين ليس جزءًا من العقد مع المستخدم.
+        }
+    }
+
+    /** مفتاحٌ قصيرٌ صالحٌ لأي استعلام عربي (لا يحتوي محارف غريبة). */
+    private fun slot(key: String): String =
+        prefix + Integer.toHexString(key.hashCode()) + "_" + key.length
+
+    companion object {
+        /** بعد هذه المدة يُعاد جلب الصفّ في الخلفية (الشاشة تُرسم من النسخة المخزّنة). */
+        const val STALE_AFTER_MS = 30 * 60_000L
+    }
+}
 
 // The server messages that mean "no playable source right now", as opposed to a network failure.
 internal val UNAVAILABLE_MESSAGES = setOf(

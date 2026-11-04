@@ -10,7 +10,12 @@ import com.lagradost.cloudstream3.utils.*
 import nartoshared.UA
 import nartoshared.loadNartoLinks
 import nartoshared.NartoFetch
+import nartoshared.NartoRowCache
 import nartoshared.nartoGetPage
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.launch
 
 private const val EDGE_HOST = "https://edge.narto-drama.com"
 
@@ -24,6 +29,9 @@ private const val SUGGEST_ROW = "/*suggest*/"
 private const val ROW_BUDGET_MS = 40_000L
 private const val ROW_GET_TIMEOUT_MS = 10_000L
 private const val ROW_GET_ATTEMPTS = 1
+
+// مفتاح الموجز في مخزن القرص (بقية المفاتيح هي استعلامات الصفوف نفسها).
+private const val HOME_CACHE_KEY = "home"
 
 // Standalone "Edge Narto Drama" extension — pinned to https://edge.narto-drama.com ONLY.
 // This provider is 100% independent: its own cache, its own refresh channel, its own cooldown
@@ -119,6 +127,11 @@ class EdgeNartoProvider(private val prefs: SharedPreferences? = null) : MainAPI(
     // renders identically under any tab name.
     private var homeFeedCache: String? = null
 
+    // ★ مخزن القرص + نطاق الخلفية (نفس تعليل NartoDrama): رسمٌ فوري بعد أول تشغيل
+    // بدل انتظار صفحة الموجز (٤٥٧KB/~٣٥ث) في كل إقلاع.
+    private val rowCache = NartoRowCache(prefs, "nte_v12_row_")
+    private val bgScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+
     // ---- Parse the ListItem JSON array embedded in a /search HTML page ----
     private fun parseSearchItems(html: String): List<SearchHit> {
         return try {
@@ -137,14 +150,29 @@ class EdgeNartoProvider(private val prefs: SharedPreferences? = null) : MainAPI(
                 }
             }
             if (arrEnd < 0) return emptyList()
+            parseItemsJson(html.substring(arrStart, arrEnd + 1))
+        } catch (e: Exception) {
+            emptyList()
+        }
+    }
+
+    /** نفس التحليل لكن من مصفوفة JSON جاهزة (النسخة المخزّنة على القرص). */
+    private fun parseItemsJson(json: String): List<SearchHit> =
+        try {
             mapper.readValue(
-                html.substring(arrStart, arrEnd + 1),
+                json,
                 object : com.fasterxml.jackson.core.type.TypeReference<List<SearchHit>>() {}
             ).filter { !it.url.isNullOrBlank() && !it.name.isNullOrBlank() }
         } catch (e: Exception) {
             emptyList()
         }
-    }
+
+    private fun itemsJson(items: List<SearchHit>): String? =
+        try {
+            mapper.writeValueAsString(items)
+        } catch (e: Exception) {
+            null
+        }
 
     private suspend fun fetchSearch(q: String, timeoutMs: Long = ROW_GET_TIMEOUT_MS, attempts: Int = ROW_GET_ATTEMPTS): String? {
         searchCache[q]?.let { return it }
@@ -179,9 +207,30 @@ class EdgeNartoProvider(private val prefs: SharedPreferences? = null) : MainAPI(
 
     private suspend fun fetchHomeItems(): List<SearchHit>? {
         homeFeedItems?.let { return it }
+
+        // ★ نسخة القرص أولًا (رسم فوري)، والتحديث في الخلفية إن مرّت مدة الصلاحية.
+        rowCache.get(HOME_CACHE_KEY)?.let { entry ->
+            val cached = parseItemsJson(entry.json)
+            if (cached.isNotEmpty()) {
+                homeFeedItems = cached
+                if (System.currentTimeMillis() - entry.at > NartoRowCache.STALE_AFTER_MS) {
+                    bgScope.launch { runCatching { refreshHomeFeed(force = true) } }
+                    android.util.Log.e(
+                        "EdgeNarto",
+                        "home feed from DISK age=${(System.currentTimeMillis() - entry.at) / 1000}s items=${cached.size}"
+                    )
+                }
+                return cached
+            }
+        }
+        return refreshHomeFeed(force = false)
+    }
+
+    /** جلب الموجز من الشبكة (single-flight) وتخزينه على القرص عند النجاح. */
+    private suspend fun refreshHomeFeed(force: Boolean): List<SearchHit>? {
         homeFeedLock.lock()
         try {
-            homeFeedItems?.let { return it }
+            if (!force) homeFeedItems?.let { return it }
             // دورتان (محاولتان × ١٢ث): الموجز هو مصدر كل الصفوف، فلا نسقط بعد فشل واحد.
             for (round in 1..2) {
                 val html = nartoGetPage(
@@ -193,11 +242,12 @@ class EdgeNartoProvider(private val prefs: SharedPreferences? = null) : MainAPI(
                     if (parsed.isNotEmpty()) {
                         homeFeedCache = html
                         homeFeedItems = parsed
+                        itemsJson(parsed)?.let { rowCache.put(HOME_CACHE_KEY, it) }
                         return parsed
                     }
                 }
             }
-            return null
+            return homeFeedItems
         } finally {
             homeFeedLock.unlock()
         }
@@ -221,6 +271,24 @@ class EdgeNartoProvider(private val prefs: SharedPreferences? = null) : MainAPI(
             // ★ And every fetch is wrapped in a single withTimeoutOrNull budget: even a frozen
             // network can never hold a row longer than ROW_BUDGET_MS, so the home screen always
             // paints. (It used to be two sequential budgets, 25+25 — measured 50 s per row.)
+            // ★ الصفّ من القرص أولًا: لا شبكة ولا انتظار (نفس تعليل NartoDrama).
+            if (!isSuggest) {
+                val cachedEntry = rowCache.get(q)
+                val cachedItems = cachedEntry?.let { parseItemsJson(it.json) } ?: emptyList()
+                if (cachedItems.isNotEmpty()) {
+                    val age = System.currentTimeMillis() - (cachedEntry?.at ?: 0L)
+                    if (age > NartoRowCache.STALE_AFTER_MS) bgScope.launch { refreshRow(q) }
+                    android.util.Log.e(
+                        "EdgeNarto",
+                        "getMainPage q=$q DISK items=${cachedItems.size} age=${age / 1000}s ms=${System.currentTimeMillis() - t0}"
+                    )
+                    return newHomePageResponse(
+                        request.name,
+                        cachedItems.take(12).mapNotNull { it.toSearchResponse() }
+                    )
+                }
+            }
+
             var fromFallback = false
             val items: List<SearchHit> = kotlinx.coroutines.withTimeoutOrNull(ROW_BUDGET_MS) {
                 if (isSuggest) {
@@ -229,8 +297,10 @@ class EdgeNartoProvider(private val prefs: SharedPreferences? = null) : MainAPI(
                     // محاولة قصيرة (٦ث، طلب واحد) لقسم هذا الصفّ ثم الموجز المشترك.
                     val own = fetchSearch(q, timeoutMs = 6_000L, attempts = 1)
                         ?.let { parseSearchItems(it) }
-                    if (!own.isNullOrEmpty()) own
-                    else {
+                    if (!own.isNullOrEmpty()) {
+                        itemsJson(own)?.let { rowCache.put(q, it) }
+                        own
+                    } else {
                         fromFallback = true
                         fetchHomeItems()
                     }
@@ -254,6 +324,15 @@ class EdgeNartoProvider(private val prefs: SharedPreferences? = null) : MainAPI(
             android.util.Log.e("EdgeNarto", "getMainPage ERROR", e)
             newHomePageResponse(request.name, emptyList())
         }
+    }
+
+    /** تحديث صفٍّ واحد في الخلفية (stale-while-revalidate). */
+    private suspend fun refreshRow(q: String) {
+        searchCache.remove(q)
+        val html = fetchSearch(q, timeoutMs = ROW_GET_TIMEOUT_MS, attempts = ROW_GET_ATTEMPTS) ?: return
+        val items = parseSearchItems(html)
+        if (items.isEmpty()) return
+        itemsJson(items)?.let { rowCache.put(q, it) }
     }
 
     override suspend fun search(query: String): List<SearchResponse>? {
