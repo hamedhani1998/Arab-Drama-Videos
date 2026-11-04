@@ -238,13 +238,21 @@ object YoutubeDashServer {
             val aMime = bareMime(audio.mimeType)
             val aCodecs = codecFor(aMime, audio.codec)
 
+            // لغة المسار تُمكّن المشغّل من عرض قائمة «الصوت» والتبديل بين اللغات.
+            // نتجاهل القيم غير القياسية (Default/Original) كي لا نكتب lang غير صالح.
+            val langAttr = audio.language
+                .takeIf { it.matches(Regex("""^[A-Za-z]{2,3}([-_][A-Za-z0-9]{2,8})*$""")) }
+                ?.replace('_', '-')
+                ?.lowercase()
+                ?.let { """ lang="$it"""" } ?: ""
+
             val aSegmentBase = if (audio.initRange != null && audio.indexRange != null) {
                 """<SegmentBase indexRange="${audio.indexRange}"><Initialization range="${audio.initRange}" /></SegmentBase>"""
             } else ""
 
             sb.append(
                 """
-                <AdaptationSet mimeType="$aMime" subsegmentAlignment="true" subsegmentStartsWithSAP="1">
+                <AdaptationSet mimeType="$aMime"$langAttr subsegmentAlignment="true" subsegmentStartsWithSAP="1">
                   <Representation id="$audioId" bandwidth="${if (audio.bitrate > 0) audio.bitrate else 128000}" codecs="$aCodecs">
                     <BaseURL>$cleanAudioUrl</BaseURL>
                     $aSegmentBase

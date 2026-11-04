@@ -200,7 +200,7 @@ class KingdomDramaSettingsBottomSheet(private val prefs: SharedPreferences) : Bo
                 EditTextPreference(ctx).apply {
                     key = KEY_SUB_LANGS
                     title = "لغات الترجمة المطلوبة"
-                    summary = "مثال: ar,en — اتركه فارغًا لعرض كل اللغات"
+                    summary = "مثال: ar,en — فارغ = العربية والإنجليزية"
                     setDefaultValue("")
                     dialogTitle = "لغات الترجمة المطلوبة"
                     setOnBindEditTextListener { it.inputType = android.text.InputType.TYPE_CLASS_TEXT }
