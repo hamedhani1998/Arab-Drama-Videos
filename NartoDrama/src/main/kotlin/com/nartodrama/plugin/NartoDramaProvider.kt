@@ -139,6 +139,10 @@ class NartoDramaProvider(private val prefs: SharedPreferences? = null) : MainAPI
     private val rowCache = NartoRowCache(prefs, "ntd_v12_row_")
     private val bgScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
+    // الصفوف التي خُدمت من القرص في هذه الجلسة: تُخدَم من القرص مرة واحدة فقط،
+    // فأي إعادة تحميلٍ لاحقة (سحب للتحديث) تذهب للشبكة فعلًا بدل إعادة نفس النسخة.
+    private val servedFromDisk = java.util.Collections.synchronizedSet(HashSet<String>())
+
     // ---- Parse the ListItem JSON array embedded in a /search HTML page ----
     private fun parseSearchItems(html: String): List<SearchHit> {
         return try {
@@ -285,7 +289,7 @@ class NartoDramaProvider(private val prefs: SharedPreferences? = null) : MainAPI
             // قبل ذلك كانت ميزانيتان متتاليتان (٢٥+٢٥) فقِيس على الجهاز صفٌّ استغرق ٥٠ ثانية.
             // ★ الصفّ من القرص أولًا: لا شبكة ولا انتظار — هذا ما يجعل الرئيسية تُرسم
             // فورًا في كل إقلاع بعد الأول. يُحدَّث في الخلفية إن مرّت مدة الصلاحية.
-            if (!isSuggest) {
+            if (!isSuggest && servedFromDisk.add(q)) {
                 val cachedEntry = rowCache.get(q)
                 val cachedItems = cachedEntry?.let { parseItemsJson(it.json) } ?: emptyList()
                 if (cachedItems.isNotEmpty()) {

@@ -132,6 +132,10 @@ class EdgeNartoProvider(private val prefs: SharedPreferences? = null) : MainAPI(
     private val rowCache = NartoRowCache(prefs, "nte_v12_row_")
     private val bgScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
+    // الصفوف التي خُدمت من القرص في هذه الجلسة: مرة واحدة فقط، كي يذهب
+    // «السحب للتحديث» إلى الشبكة فعلًا.
+    private val servedFromDisk = java.util.Collections.synchronizedSet(HashSet<String>())
+
     // ---- Parse the ListItem JSON array embedded in a /search HTML page ----
     private fun parseSearchItems(html: String): List<SearchHit> {
         return try {
@@ -272,7 +276,7 @@ class EdgeNartoProvider(private val prefs: SharedPreferences? = null) : MainAPI(
             // network can never hold a row longer than ROW_BUDGET_MS, so the home screen always
             // paints. (It used to be two sequential budgets, 25+25 — measured 50 s per row.)
             // ★ الصفّ من القرص أولًا: لا شبكة ولا انتظار (نفس تعليل NartoDrama).
-            if (!isSuggest) {
+            if (!isSuggest && servedFromDisk.add(q)) {
                 val cachedEntry = rowCache.get(q)
                 val cachedItems = cachedEntry?.let { parseItemsJson(it.json) } ?: emptyList()
                 if (cachedItems.isNotEmpty()) {
