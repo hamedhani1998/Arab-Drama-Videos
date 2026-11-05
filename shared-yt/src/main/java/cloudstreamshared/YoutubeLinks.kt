@@ -756,6 +756,8 @@ object YoutubeLinks {
         conn.setRequestProperty("User-Agent", UA)
         conn.setRequestProperty("Referer", referer)
         conn.setRequestProperty("Accept", "text/vtt, text/plain, */*")
+        // بلا هذا قد يردّ الخادم gzip، وقراءتنا الخام تُنتج بايتات غير نصية.
+        conn.setRequestProperty("Accept-Encoding", "identity")
         val rc = conn.responseCode
         if (rc !in 200..299) {
             ""
