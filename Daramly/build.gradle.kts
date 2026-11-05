@@ -1,4 +1,4 @@
-﻿version = 8
+﻿version = 9
 
 cloudstream {
     description = "Daramly - دراملي: دراما قصيرة صينية مترجمة ومدبلجة مع جميع السيرفرات والجودات"

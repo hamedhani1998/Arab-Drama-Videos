@@ -32,12 +32,31 @@ private data class SearchItem(
 // /api/episode/{slug}/{ep}
 private data class EpisodeItem(
     @JsonProperty("video_url") val videoUrl: String? = null,
+    @JsonProperty("video_url_fallback") val videoUrlFallback: String? = null,
+    val subs: List<SubtitleItem>? = null,
+    val servers: List<ServerItem>? = null,
+)
+
+// قد يحمل الرد أكثر من خادم لنفس الحلقة؛ كلاًّه برابطه وترجماته.
+private data class ServerItem(
+    val id: Int? = null,
+    val label: String? = null,
+    val source: String? = null,
+    @JsonProperty("video_url") val videoUrl: String? = null,
+    @JsonProperty("video_url_fallback") val videoUrlFallback: String? = null,
     val subs: List<SubtitleItem>? = null,
 )
 
 private data class SubtitleItem(
     val lang: String? = null,
     val url: String? = null,
+)
+
+/** سيرفر حلقة بعد تسوية الحقول (يُبنى من `servers` أو من أعلى الرد). */
+private data class EpServer(
+    val label: String,
+    val url: String,
+    val subs: List<SubtitleItem>?,
 )
 
 // أسماء لغاتٍ أرسلها الموقع بحروفٍ محلّيةّ لا تعرفها مكتبة التطبيق ولا رمز ISO
@@ -139,7 +158,11 @@ class Drama4AllProvider(private val prefs: SharedPreferences? = null) : MainAPI(
 
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse? {
         return try {
-            val url = "$mainUrl/${request.data}"
+            // ★ الموقع يدعم `?page=N` (قِيس: صفحة 2 تعطي أول عنصر مختلفاً) لكننا
+            //   كنّا نطلب الصفحة الأولى دائماً فتنتهي القائمة عند 50 عنصراً.
+            //   الصفحة الأولى تبقى بلا استعلام كي لا يتغيّر رابطها.
+            val url = if (page <= 1) "$mainUrl/${request.data}"
+            else "$mainUrl/${request.data}?page=$page"
             val doc = app.get(url, referer = mainUrl).document
             val items = doc.select("script")
                 .mapNotNull { el -> el.html().takeIf { it.contains("const LIBRARY") } }
@@ -301,9 +324,29 @@ class Drama4AllProvider(private val prefs: SharedPreferences? = null) : MainAPI(
             }
 
             val item = signedEpisode(internal, ep, m.groupValues[1]) ?: return false
-            val vUrl = item.videoUrl ?: return false
 
-            // 1) كل الترجمات — رابط مطلق + رمز لغة، ولغة واحدة لا تُكرَّر.
+            // ★ الردّ يحمل خوادم متعدّدة في `servers` إضافةً إلى `video_url` الأعلى.
+            //   كنّا نأخذ `video_url` وحده فتضيع بقية السيرفرات. نجمعها كلّها
+            //   (مع `video_url_fallback`) ونبقي رابطاً واحداً لكل URL.
+            val all = ArrayList<EpServer>()
+            fun addServer(label: String, url: String?, subs: List<SubtitleItem>?) {
+                val u = url?.trim()?.takeIf { it.isNotEmpty() } ?: return
+                all.add(EpServer(label, u, subs))
+            }
+            addServer("افتراضي", item.videoUrl, item.subs)
+            addServer("افتراضي · احتياطي", item.videoUrlFallback, item.subs)
+            for (s in item.servers.orEmpty()) {
+                val label = listOfNotNull(s.label?.trim(), s.source?.trim())
+                    .firstOrNull { it.isNotEmpty() } ?: "سيرفر"
+                addServer(label, s.videoUrl, s.subs ?: item.subs)
+                addServer("$label · احتياطي", s.videoUrlFallback, s.subs ?: item.subs)
+            }
+            if (all.isEmpty()) {
+                Log.e("Drama4All", "loadLinks no stream internal=$internal ep=$ep")
+                return false
+            }
+
+            // 1) كل الترجمات من كل السيرفرات — رابط مطلق + رمز لغة، ولغة واحدة لا تُكرَّر.
             //    قيست عائلتا الموقع على هذه الحلقة:
             //    • `sf_` تُعطى رابطاً مطلقاً على cdn1.nsstorage.space برمز `ar` — تعمل كما هي.
             //    • `nt_` (narto) تُعطى مساراً نسبياً `/local_subtitles/…` بتسميات محلّيةّ
@@ -316,28 +359,30 @@ class Drama4AllProvider(private val prefs: SharedPreferences? = null) : MainAPI(
             //    فالصيغتان `français` و`fr` لا تُنتجان لغتين للحلقة الواحدة.
             val seenSub = HashSet<String>()
             val seenLang = HashSet<String>()
-            item.subs?.forEach { s ->
-                val rawUrl = s.url?.trim() ?: return@forEach
-                if (rawUrl.isEmpty() || !seenSub.add(rawUrl)) return@forEach
-                val subUrl = when {
-                    rawUrl.startsWith("http://") || rawUrl.startsWith("https://") -> rawUrl
-                    rawUrl.startsWith("//") -> "https:$rawUrl"
-                    rawUrl.startsWith("/") -> mainUrl + rawUrl
-                    else -> "$mainUrl/$rawUrl"
-                }
-                val rawLang = s.lang?.trim().orEmpty()
-                val lang = when {
-                    rawLang.isEmpty() -> "ترجمة" // بلا تسمية أصلاً -> مرّة واحدة كما كان
+            val subUrls = HashSet<String>()
+            for (srv in all) {
+                for (s in srv.subs.orEmpty()) {
+                    val rawUrl = s.url?.trim() ?: continue
+                    if (rawUrl.isEmpty() || !seenSub.add(rawUrl)) continue
+                    val subUrl = when {
+                        rawUrl.startsWith("http://") || rawUrl.startsWith("https://") -> rawUrl
+                        rawUrl.startsWith("//") -> "https:$rawUrl"
+                        rawUrl.startsWith("/") -> mainUrl + rawUrl
+                        else -> "$mainUrl/$rawUrl"
+                    }
+                    if (!subUrls.add(subUrl)) continue
+                    val rawLang = s.lang?.trim().orEmpty()
                     // لغة غير معروفة فعلاً: نُبقي تسميتها بدل أن نُسمّيها «ترجمة»
                     // تسميةً كاذبة — الرمز المجهول يُعالَج في getLangTag() بالاسم نفسه.
-                    else -> normalizeSubLang(rawLang) ?: rawLang
+                    val lang = if (rawLang.isEmpty()) "ترجمة"
+                    else normalizeSubLang(rawLang) ?: rawLang
+                    if (!seenLang.add(lang)) continue
+                    try {
+                        subtitleCallback(newSubtitleFile(subLangLabel(lang), subUrl) {
+                            this.headers = mapOf("Referer" to mainUrl)
+                        })
+                    } catch (e: Exception) {}
                 }
-                if (!seenLang.add(lang)) return@forEach
-                try {
-                    subtitleCallback(newSubtitleFile(subLangLabel(lang), subUrl) {
-                        this.headers = mapOf("Referer" to mainUrl)
-                    })
-                } catch (e: Exception) {}
             }
 
             // 2) الجودة الحقيقية من مسار الرابط: nsstorage يبني المسار على هيئة /{lang}/{N}p/{hash}/...
@@ -355,46 +400,58 @@ class Drama4AllProvider(private val prefs: SharedPreferences? = null) : MainAPI(
                     }
             }
 
-            val isMp4 = vUrl.lowercase().contains(".mp4") || vUrl.lowercase().contains(".m4v")
-                || vUrl.lowercase().contains("mime_type=video_mp4")
-            // ★ ترتيب الجودات هنا بلا أثر: الفروع الثلاثة أدناه متنافسة، وواحد فقط
-            //   منها ينفّذ في كل حلقة — فالمصدر يبث رابطاً واحداً لا غير، ولا شيء
-            //   يُخزَّن ولا يُعاد ترتيبه (البث كما هو حرفياً).
-            if (isMp4) {
-                // nt_ family: ملف مباشر واحد (R2 .mp4) — الجودة هي الوحيدة المتوفرة من المصدر
-                val q = qualityFromPath(vUrl)
-                callback(
-                    newExtractorLink(source = name, name = FormatTag.tagged("ملف كامل ($q)", vUrl, ExtractorLinkType.VIDEO), url = vUrl, type = ExtractorLinkType.VIDEO) {
-                        referer = mainUrl
-                        quality = getQualityFromName(q)
-                        headers = mapOf("Referer" to mainUrl)
-                    }
-                )
-            } else {
-                // HLS: master (جودات متعددة) أم ملف media واحد؟
-                val streamText = try { app.get(vUrl, referer = mainUrl).text } catch (e: Exception) { "" }
-                if (streamText.contains("#EXT-X-STREAM-INF")) {
-                    // master كامل — يشمل كل الجودات المتوفرة، المشغّل يختارها
-                    callback(
-                        newExtractorLink(source = name, name = FormatTag.tagged("كل الجودات (متغير)", vUrl, ExtractorLinkType.M3U8), url = vUrl, type = ExtractorLinkType.M3U8) {
-                            referer = mainUrl
-                            quality = getQualityFromName("1080p")
-                            headers = mapOf("Referer" to mainUrl)
-                        }
-                    )
-                } else {
-                    // ملف media واحد — الجودة الحقيقية موجودة في المسار (sf_ family: single 1080p)
+            val seenUrl = HashSet<String>()
+            var emitted = 0
+            for (srv in all) {
+                val vUrl = srv.url
+                if (!seenUrl.add(vUrl)) continue
+                val prefix = when (srv.label) {
+                    "افتراضي" -> ""
+                    "افتراضي · احتياطي" -> "احتياطي · "
+                    else -> "${srv.label} · "
+                }
+                val isMp4 = vUrl.lowercase().contains(".mp4") || vUrl.lowercase().contains(".m4v")
+                    || vUrl.lowercase().contains("mime_type=video_mp4")
+                // ★ ترتيب الجودات هنا بلا أثر: الفروع الثلاثة أدناه متنافسة، وواحد فقط
+                //   منها ينفّذ في كل حلقة — فالمصدر يبث رابطاً واحداً لا غير، ولا شيء
+                //   يُخزَّن ولا يُعاد ترتيبه (البث كما هو حرفياً).
+                if (isMp4) {
+                    // nt_ family: ملف مباشر واحد (R2 .mp4) — الجودة هي الوحيدة المتوفرة من المصدر
                     val q = qualityFromPath(vUrl)
                     callback(
-                        newExtractorLink(source = name, name = FormatTag.tagged(q, vUrl, ExtractorLinkType.M3U8), url = vUrl, type = ExtractorLinkType.M3U8) {
+                        newExtractorLink(source = name, name = FormatTag.tagged("${prefix}ملف كامل ($q)", vUrl, ExtractorLinkType.VIDEO), url = vUrl, type = ExtractorLinkType.VIDEO) {
                             referer = mainUrl
                             quality = getQualityFromName(q)
                             headers = mapOf("Referer" to mainUrl)
                         }
                     )
+                } else {
+                    // HLS: master (جودات متعددة) أم ملف media واحد؟
+                    val streamText = try { app.get(vUrl, referer = mainUrl).text } catch (e: Exception) { "" }
+                    if (streamText.contains("#EXT-X-STREAM-INF")) {
+                        // master كامل — يشمل كل الجودات المتوفرة، المشغّل يختارها
+                        callback(
+                            newExtractorLink(source = name, name = FormatTag.tagged("${prefix}كل الجودات (متغير)", vUrl, ExtractorLinkType.M3U8), url = vUrl, type = ExtractorLinkType.M3U8) {
+                                referer = mainUrl
+                                quality = getQualityFromName("1080p")
+                                headers = mapOf("Referer" to mainUrl)
+                            }
+                        )
+                    } else {
+                        // ملف media واحد — الجودة الحقيقية موجودة في المسار (sf_ family: single 1080p)
+                        val q = qualityFromPath(vUrl)
+                        callback(
+                            newExtractorLink(source = name, name = FormatTag.tagged("$prefix$q", vUrl, ExtractorLinkType.M3U8), url = vUrl, type = ExtractorLinkType.M3U8) {
+                                referer = mainUrl
+                                quality = getQualityFromName(q)
+                                headers = mapOf("Referer" to mainUrl)
+                            }
+                        )
+                    }
                 }
+                emitted++
             }
-            true
+            emitted > 0
         } catch (e: Exception) {
             Log.e("Drama4All", "loadLinks FATAL", e)
             false

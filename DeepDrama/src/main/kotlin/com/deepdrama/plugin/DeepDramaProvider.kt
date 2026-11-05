@@ -102,6 +102,8 @@ class DeepDramaProvider(private val prefs: SharedPreferences?) : MainAPI() {
         Regex("""<h3 class="xr-card__title"[^>]*>(.*?)</h3>""", RegexOption.DOT_MATCHES_ALL)
     private val xrImgRe = Regex("""<img[^>]*\salt="([^"]*)"""")
     private val xrSrcRe = Regex("""<img[^>]*\ssrc="([^"]+)"""")
+    private val xrOriginalSrcRe = Regex("""<img[^>]*\sdata-original-src="([^"]+)"""")
+    private val xrDataSrcRe = Regex("""<img[^>]*\sdata-src="([^"]+)"""")
 
     /** زرّ خادم في صفحة المقال. */
     private val xrButtonRe =
@@ -155,9 +157,10 @@ class DeepDramaProvider(private val prefs: SharedPreferences?) : MainAPI() {
                 ?.takeIf { it.isNotBlank() } ?: continue
             val attrs = seriesImgRe.find(body)?.groupValues?.get(1).orEmpty()
             val posters = Regex("""\s+data-posters="([^"]*)"""").find(attrs)?.groupValues?.get(1)
-            val src = Regex("""\s+data-src="([^"]+)"""").find(attrs)?.groupValues?.get(1)
-                ?: Regex("""\s+src="([^"]+)"""").find(attrs)?.groupValues?.get(1)
-            out.add(DdCard(title, url, firstPoster(posters) ?: src, movie = false))
+            val original = Regex("""\s+data-original-src="([^"]+)"""").find(attrs)?.groupValues?.get(1)
+            val dataSrc = Regex("""\s+data-src="([^"]+)"""").find(attrs)?.groupValues?.get(1)
+            val src = Regex("""\s+src="([^"]+)"""").find(attrs)?.groupValues?.get(1)
+            out.add(DdCard(title, url, firstPoster(posters) ?: pickPoster(original, dataSrc, src), movie = false))
         }
         if (out.isNotEmpty()) return out
 
@@ -168,9 +171,13 @@ class DeepDramaProvider(private val prefs: SharedPreferences?) : MainAPI() {
             val h3 = xrTitleRe.find(body)?.groupValues?.get(1)?.let { stripTags(it) }
             val alt = xrImgRe.find(body)?.groupValues?.get(1)?.trim()
             val title = listOfNotNull(h3, alt).firstOrNull { !it.isNullOrBlank() } ?: continue
+            // ★ الرئيسية تستخدم lazy-load: `src` كثيراً `data:image/gif…` (14/34 في
+            //   القياس)، والرابط الحقيقي في `data-original-src`. بعضها يحمل
+            //   `&#038;`/`&amp;` داخل الاستعلام، فتُفكّ الترميزات قبل الإرسال.
+            val original = xrOriginalSrcRe.find(body)?.groupValues?.get(1)?.trim()
+            val dataSrc = xrDataSrcRe.find(body)?.groupValues?.get(1)?.trim()
             val src = xrSrcRe.find(body)?.groupValues?.get(1)?.trim()
-                ?.takeIf { !it.startsWith("data:") }
-            out.add(DdCard(title, url, src, movie = !isSeriesUrl(url)))
+            out.add(DdCard(title, url, pickPoster(original, dataSrc, src), movie = !isSeriesUrl(url)))
         }
         return out
     }
@@ -178,9 +185,38 @@ class DeepDramaProvider(private val prefs: SharedPreferences?) : MainAPI() {
     /** `data-posters` قائمة JSON مُهرَّبة (`&quot;` و`\/`) — نأخذ أول رابط صالح. */
     private fun firstPoster(raw: String?): String? {
         if (raw.isNullOrBlank()) return null
-        val s = raw.replace("&quot;", "\"").replace("&#039;", "'").replace("\\/", "/")
-        return Regex("""(https?:[^"]+)""").find(s)?.groupValues?.get(1)
-            ?.trim()?.takeIf { it.isNotBlank() }
+        val s = decodeEntities(raw).replace("\\/", "/")
+        return Regex("""(https?:[^"\s]+)""").find(s)?.groupValues?.get(1)
+            ?.trim()?.trimEnd(',', ']')?.takeIf { it.isNotBlank() && !it.startsWith("data:") }
+    }
+
+    /**
+     * أول غلاف صالح من عدّة سمات. `data-original-src` هو الأصل النظيف الذي
+     * يضعه الموقع احتياطاً لـlazy-load، و`src` قد يكون `data:` أو رابط WP
+     * الوسيط؛ نُفضّله ثم `data-src` ثم `src`، مع فكّ ترميزات HTML.
+     */
+    private fun pickPoster(vararg raws: String?): String? =
+        raws.asSequence()
+            .mapNotNull { it?.trim()?.takeIf { s -> s.isNotEmpty() } }
+            .map { decodeEntities(it) }
+            .map { it.replace("\\/", "/") }
+            .firstOrNull { it.startsWith("http://") || it.startsWith("https://") }
+
+    /**
+     * فكّ ترميزات HTML في الروابط: `&amp;` و`&#038;` هما ما يظهر في أغلفة
+     * الصفحة، وتركهما يجعل الاستعلام `auth_key=…&amp;process=…` فيفشل الجلب.
+     */
+    private fun decodeEntities(raw: String): String {
+        if (!raw.contains('&')) return raw
+        var s = raw
+            .replace("&quot;", "\"")
+            .replace("&apos;", "'")
+            .replace("&lt;", "<")
+            .replace("&gt;", ">")
+            .replace("&nbsp;", " ")
+        s = Regex("""&#0*38;|&#[xX]26;""").replace(s, "&")
+        s = Regex("""&#0*39;|&#[xX]27;""").replace(s, "'")
+        return s.replace("&amp;", "&")
     }
 
     private fun cardOf(c: DdCard): SearchResponse? {

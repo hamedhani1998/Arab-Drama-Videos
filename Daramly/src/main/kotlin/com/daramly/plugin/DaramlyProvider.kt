@@ -3,6 +3,7 @@ package com.daramly.plugin
 import android.content.SharedPreferences
 import android.util.Base64
 import android.util.Log
+import com.fasterxml.jackson.databind.JsonNode
 import com.fasterxml.jackson.databind.ObjectMapper
 import com.lagradost.cloudstream3.HomePageResponse
 import com.lagradost.cloudstream3.LoadResponse
@@ -17,11 +18,13 @@ import com.lagradost.cloudstream3.mainPageOf
 import com.lagradost.cloudstream3.newHomePageResponse
 import com.lagradost.cloudstream3.newMovieLoadResponse
 import com.lagradost.cloudstream3.newMovieSearchResponse
+import com.lagradost.cloudstream3.newSubtitleFile
 import com.lagradost.cloudstream3.utils.ExtractorLink
 import com.lagradost.cloudstream3.utils.ExtractorLinkType
 import com.lagradost.cloudstream3.utils.getQualityFromName
 import com.lagradost.cloudstream3.utils.loadExtractor
 import com.lagradost.cloudstream3.utils.newExtractorLink
+import com.lagradost.cloudstream3.utils.SubtitleHelper
 import cloudstreamshared.YoutubeLinks
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.async
@@ -463,6 +466,13 @@ class DaramlyProvider(private val prefs: SharedPreferences? = null) : MainAPI() 
             Log.w(TAG, "extractor FAILED $label $url :: ${e.message}")
         }
 
+        if (produced.isEmpty()) {
+            // بعض الاستضافات (voe) تُرجع صفحة تحويل JS بدل المشغّل. المُستخرِج
+            // المدمج يتعامل معها، لكن إن فشل نتبع التحويل بأنفسنا مرة واحدة كي
+            // لا يضيع السيرفر من القائمة.
+            retryViaRedirect(url, "$mainUrl/", subtitleCallback) { produced.add(it) }
+        }
+
         if (produced.isEmpty() && isMedia(url)) {
             produced.add(
                 newExtractorLink(
@@ -494,6 +504,34 @@ class DaramlyProvider(private val prefs: SharedPreferences? = null) : MainAPI() 
     private fun isMedia(url: String): Boolean =
         url.contains(".mp4", true) || url.contains(".m3u8", true) || url.contains(".webm", true)
 
+    /** يتبع `window.location(.href) = '<url>'` ثم يعيد المحاولة على الرابط الجديد. */
+    private suspend fun retryViaRedirect(
+        url: String,
+        referer: String,
+        subtitleCallback: (SubtitleFile) -> Unit,
+        add: (ExtractorLink) -> Unit,
+    ) {
+        val html = try {
+            app.get(url, referer = referer).text
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            return
+        }
+        val next = Regex("""window\.location(?:\.href)?\s*=\s*['"]([^'"]+)['"]""")
+            .findAll(html)
+            .mapNotNull { it.groupValues[1].trim().takeIf { u -> u.startsWith("http") } }
+            .firstOrNull { it != url }
+            ?: return
+        try {
+            loadExtractor(next, referer, { subtitleCallback(it) }) { add(it) }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            Log.w(TAG, "redirect extractor FAILED $next :: ${e.message}")
+        }
+    }
+
     /**
      * رامبل: صفحة التضمين تحمل كائن `ua` فيه `tar` (درجات mp4/hls بأحجامها)
      * و`hls.auto` (بثّ تلقائي). لا يوجد مُستخرِج مدمج لرامبل في التطبيق،
@@ -513,79 +551,171 @@ class DaramlyProvider(private val prefs: SharedPreferences? = null) : MainAPI() 
             return emptyList()
         }
 
-        val uaStart = html.indexOf("\"ua\":{")
-        if (uaStart < 0) return emptyList()
-        val json = balancedObject(html, html.indexOf('{', uaStart)) ?: return emptyList()
-        val ua = try {
-            mapper.readTree(json)
-        } catch (e: Exception) {
-            Log.w(TAG, "rumble json FAILED")
-            return emptyList()
-        }
-
         val out = ArrayList<ExtractorLink>()
+        val seenLinks = HashSet<String>()
+        val seenSubs = HashSet<String>()
         var topH = 0
 
-        val tar = ua.get("tar")
-        if (tar != null && tar.isObject) {
-            val names = tar.fieldNames()
-            while (names.hasNext()) {
-                val key = names.next()
-                val node = tar.get(key) ?: continue
-                val u = node.get("url")?.asText()?.replace("\\/", "/")?.takeIf { it.isNotBlank() } ?: continue
-                val meta = node.get("meta")
-                // مفتاح `tar` هو تسمية رامبل للجودة (240/360/480/720…)؛ و`meta.h`
-                // ارتفاعٌ فعليّ قد يكون رأسيًّا (640 لحلقة 360p عمودية) فلا يصلح
-                // للتسمية إلا عند غياب المفتاح الرقمي.
-                val labeled = key.toIntOrNull()
-                val h = labeled ?: (meta?.get("h")?.asInt() ?: 0)
-                val size = meta?.get("size")?.asLong() ?: 0L
-                if (h in 1..199) continue
-                topH = maxOf(topH, h)
-                val qName = if (h > 0) "${h}p" else "تلقائي"
-                val sizeText = if (size > 0) " · ${formatSize(size)}" else ""
-                out.add(
-                    newExtractorLink(
-                        source = name,
-                        name = "$label · Rumble · $qName$sizeText",
-                        url = u,
-                        type = ExtractorLinkType.M3U8,
-                    ) {
-                        this.quality = getQualityFromName(qName)
-                    },
+        // ★ كل إدخال `m.f["id"]={…}` يحمل `ua` (الدرجات) و`cc` (الترجمات) **شقيقين**،
+        //   و`cc` ليس داخل `ua` إطلاقاً — قِيس 2026-11-05 على مقطع دراملي:
+        //   `m.f["v7e8yi2"]={… "ua":{tar/hls…}, … "cc":{"ar":{"language":"Arabic","path":"…vtt"}}}`.
+        //   القراءة القديمة كانت `ua.get("cc")` (وهو مصفوفة في شكلٍ آخر) فأضاعت
+        //   الترجمة كلّها. نقرأ الإدخال كاملاً ثم نأخذ `ua` و`cc` منه.
+        val entries = ArrayList<Pair<JsonNode?, JsonNode?>>()
+        for (m in rumbleEntryRe.findAll(html)) {
+            val open = html.indexOf('{', m.range.last + 1)
+            val entry = balancedObject(html, open) ?: continue
+            // ★ لا نُحلّل الإدخال كاملاً: آخرُه قد يحوي JS خاماً
+            //   (`…,"viewer_id":"…",loaded:h()}`) فيرفضه محلّل JSON. نقتطع
+            //   الكائنين الشقيقين `ua` و`cc` من نصّ الإدخال وكلاهما JSON سليم.
+            val ua = jsonAt(entry, "\"ua\":{")
+                ?: jsonAt(entry, "\"u\":{")?.takeIf { it.has("tar") }
+            val cc = jsonAt(entry, "\"cc\":{")
+            entries.add(ua to cc)
+        }
+        if (entries.isEmpty()) {
+            // احتياط: صفحات قديمة بلا حاوية `m.f` — كائن `ua` وحده.
+            val uaStart = html.indexOf("\"ua\":{")
+            if (uaStart < 0) return emptyList()
+            val ua = balancedObject(html, html.indexOf('{', uaStart))
+                ?.let { runCatching { mapper.readTree(it) }.getOrNull() }
+                ?: return emptyList()
+            entries.add(ua to (ua.get("cc") ?: standaloneCc(html)))
+        }
+
+        for ((ua, cc) in entries) {
+            if (ua != null) {
+                val tar = ua.get("tar")
+                if (tar != null && tar.isObject) {
+                    val names = tar.fieldNames()
+                    while (names.hasNext()) {
+                        val key = names.next()
+                        val node = tar.get(key) ?: continue
+                        val u = node.get("url")?.asText()?.replace("\\/", "/")
+                            ?.takeIf { it.isNotBlank() } ?: continue
+                        val meta = node.get("meta")
+                        // مفتاح `tar` هو تسمية رامبل للجودة (240/360/480/720…)؛ و`meta.h`
+                        // ارتفاعٌ فعليّ قد يكون رأسيًّا (640 لحلقة 360p عمودية) فلا يصلح
+                        // للتسمية إلا عند غياب المفتاح الرقمي.
+                        val labeled = key.toIntOrNull()
+                        val h = labeled ?: (meta?.get("h")?.asInt() ?: 0)
+                        val size = meta?.get("size")?.asLong() ?: 0L
+                        if (h in 1..199) continue
+                        if (!seenLinks.add(u)) continue
+                        topH = maxOf(topH, h)
+                        val qName = if (h > 0) "${h}p" else "تلقائي"
+                        val sizeText = if (size > 0) " · ${formatSize(size)}" else ""
+                        out.add(
+                            newExtractorLink(
+                                source = name,
+                                name = "$label · Rumble · $qName$sizeText",
+                                url = u,
+                                type = ExtractorLinkType.M3U8,
+                            ) {
+                                this.quality = getQualityFromName(qName)
+                            },
+                        )
+                    }
+                }
+
+                val auto = ua.get("hls")?.get("auto")?.get("url")?.asText()?.replace("\\/", "/")
+                if (rumbleAutoEnabled() && !auto.isNullOrBlank() && seenLinks.add(auto)) {
+                    val qName = if (topH > 0) "${topH}p" else "تلقائي"
+                    out.add(
+                        newExtractorLink(
+                            source = name,
+                            name = "$label · Rumble · بثّ مباشر",
+                            url = auto,
+                            type = ExtractorLinkType.M3U8,
+                        ) {
+                            this.quality = getQualityFromName(qName)
+                        },
+                    )
+                }
+            }
+
+            // ترجمات الإدخال — كائن `{ar:{language,path}}` أو مصفوفة `[{language,url}]`.
+            if (subtitlesEnabled() && cc != null) {
+                emitRumbleSubs(cc, seenSubs, subtitleCallback)
+            }
+        }
+
+        Log.d(TAG, "rumble $label links=${out.size} subs=${seenSubs.size}")
+        return out
+    }
+
+    /** إدخالات رامبل: `m.f["<id>"]={…}` — قابلة للتعدّد (إعلان + مقطع). */
+    private val rumbleEntryRe = Regex("""m\.f\["[^"]*"]\s*=""")
+
+    /**
+     * `cc` في رامبل شكلان: كائنٌ مفتاحه رمز اللغة وقيمته `{language, path}`،
+     * أو مصفوفة `[{language, url}]`. نسلّم كل رابط مرة واحدة بلغةٍ مفهومة.
+     */
+    private suspend fun emitRumbleSubs(
+        cc: JsonNode,
+        seen: MutableSet<String>,
+        subtitleCallback: (SubtitleFile) -> Unit,
+    ) {
+        suspend fun add(url: String?, lang: String?) {
+            val u = url?.trim()?.replace("\\/", "/")?.takeIf { it.isNotBlank() } ?: return
+            val full = when {
+                u.startsWith("http://") || u.startsWith("https://") -> u
+                u.startsWith("//") -> "https:$u"
+                else -> "https://rumble.com/" + u.trimStart('/')
+            }
+            if (!seen.add(full)) return
+            subtitleCallback(newSubtitleFile(subLabel(lang ?: "ar"), full))
+        }
+
+        if (cc.isArray) {
+            for (n in cc) {
+                add(
+                    n.get("url")?.asText() ?: n.get("path")?.asText(),
+                    n.get("language")?.asText() ?: n.get("lang")?.asText(),
+                )
+            }
+        } else if (cc.isObject) {
+            val it = cc.fields()
+            while (it.hasNext()) {
+                val (key, n) = it.next()
+                add(
+                    n.get("path")?.asText() ?: n.get("url")?.asText(),
+                    n.get("language")?.asText() ?: n.get("lang")?.asText() ?: key,
                 )
             }
         }
+    }
 
-        val auto = ua.get("hls")?.get("auto")?.get("url")?.asText()?.replace("\\/", "/")
-        if (rumbleAutoEnabled() && !auto.isNullOrBlank()) {
-            val qName = if (topH > 0) "${topH}p" else "تلقائي"
-            out.add(
-                newExtractorLink(
-                    source = name,
-                    name = "$label · Rumble · بثّ مباشر",
-                    url = auto,
-                    type = ExtractorLinkType.M3U8,
-                ) {
-                    this.quality = getQualityFromName(qName)
-                },
-            )
-        }
+    /** آخر احتياط: كائن `"cc":{…}` مستقلّ في الصفحة (بلا حاوية إدخال). */
+    private fun standaloneCc(html: String): JsonNode? {
+        val i = html.indexOf("\"cc\":{")
+        if (i < 0) return null
+        val json = balancedObject(html, html.indexOf('{', i)) ?: return null
+        return runCatching { mapper.readTree(json) }.getOrNull()
+    }
 
-        // ترجمات التضمين إن وُجدت (`cc`: [{language, url}]) — فارغة في معظم المقاطع.
-        val cc = ua.get("cc")
-        if (subtitlesEnabled() && cc != null && cc.isArray) {
-            for (n in cc) {
-                val u = n.get("url")?.asText()?.replace("\\/", "/")?.trim()?.takeIf { it.isNotBlank() }
-                    ?: continue
-                val full = if (u.startsWith("http")) u else "https://rumble.com/" + u.trimStart('/')
-                val lang = n.get("language")?.asText()?.trim()?.takeIf { it.isNotBlank() } ?: "ar"
-                subtitleCallback(SubtitleFile(lang, full))
+    /**
+     * اسم اللغة كما يعرضه المشغّل: «العربية Arabic».
+     * الزوجُ مقصود: العرض يكتب الحقل حرفياً، والوسم/المرشِّح يحتاجان الاسم
+     * اللاتيني — والاسم العربي وحده يعطي وسم IETF فارغاً.
+     */
+    private fun subLabel(raw: String): String {
+        val r = raw.trim()
+        if (r.isEmpty()) return "العربية Arabic"
+        val tag = SubtitleHelper.fromCodeToLangTagIETF(r)
+            ?: SubtitleHelper.fromLanguageToTagIETF(r, true)
+        if (tag == null) {
+            return when (r.lowercase()) {
+                "arabic", "العربية" -> "العربية Arabic"
+                else -> r
             }
         }
-
-        Log.d(TAG, "rumble $label links=${out.size}")
-        return out
+        val ar = SubtitleHelper.fromTagToLanguageName(tag, "ar")
+        val en = SubtitleHelper.fromTagToEnglishLanguageName(tag)
+        if (ar.isNullOrBlank() && en.isNullOrBlank()) return r
+        if (ar.isNullOrBlank()) return en ?: r
+        if (en.isNullOrBlank() || ar.equals(en, true)) return ar
+        return "$ar $en"
     }
 
     /** كائن JSON متوازن الأقواس يبدأ عند `open` (يتجاهل الأقواس داخل السلاسل). */
@@ -614,6 +744,14 @@ class DaramlyProvider(private val prefs: SharedPreferences? = null) : MainAPI() 
             }
         }
         return null
+    }
+
+    /** يقتطع الكائن الذي يبدأ بعد `marker` ويُحلّله (الماركر جزءٌ من النصّ لا يُحلَّل). */
+    private fun jsonAt(scope: String, marker: String): JsonNode? {
+        val i = scope.indexOf(marker)
+        if (i < 0) return null
+        val json = balancedObject(scope, scope.indexOf('{', i)) ?: return null
+        return runCatching { mapper.readTree(json) }.getOrNull()
     }
 
     private fun formatSize(bytes: Long): String {
