@@ -18,7 +18,6 @@ import com.lagradost.cloudstream3.mainPageOf
 import com.lagradost.cloudstream3.newHomePageResponse
 import com.lagradost.cloudstream3.newMovieLoadResponse
 import com.lagradost.cloudstream3.newMovieSearchResponse
-import com.lagradost.cloudstream3.newSubtitleFile
 import com.lagradost.cloudstream3.utils.ExtractorLink
 import com.lagradost.cloudstream3.utils.ExtractorLinkType
 import com.lagradost.cloudstream3.utils.getQualityFromName
@@ -32,11 +31,13 @@ import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withTimeoutOrNull
 import org.jsoup.nodes.Document
 import org.jsoup.nodes.Element
 import java.net.URLEncoder
 
 private const val TAG = "Daramly"
+private const val SERVER_TIMEOUT_MS = 12_000L
 
 /** مسار تصنيف مُرمَّز (الموقع يفكّ `%20` وليس `+`). */
 private fun catPath(name: String): String =
@@ -380,7 +381,32 @@ class DaramlyProvider(private val prefs: SharedPreferences? = null) : MainAPI() 
     ): Boolean {
         if (servers.isEmpty()) return false
         val results = coroutineScope {
-            servers.map { (u, label) -> async { resolveServer(u, label, subtitleCallback) } }.awaitAll()
+            servers.map { (u, label) ->
+                async {
+                    // ★ عزل كل سيرفر: فشل سيرفر واحد (تحويل/شبكة/ترجمة) يجب ألا
+                    //   يُسقط بقية الروابط. `awaitAll` كان يعيد رمي أول استثناء
+                    //   فيضيع كل شيء ويظهر «لا توجد روابط».
+                    //   ومهلة قصيرة لكل سيرفر: voe قد يعلّق على مضيف التحويل
+                    //   فيمنع ظهور روابط رامبل الجاهزة.
+                    val res = try {
+                        withTimeoutOrNull(SERVER_TIMEOUT_MS) {
+                            resolveServer(u, label, subtitleCallback)
+                        }
+                    } catch (e: CancellationException) {
+                        throw e
+                    } catch (e: Throwable) {
+                        Log.e(TAG, "server FAILED $label $u :: ${e.message}", e)
+                        null
+                    }
+                    if (res == null) {
+                        Log.w(TAG, "server EMPTY/TIMEOUT $label $u")
+                        emptyList()
+                    } else {
+                        Log.d(TAG, "server OK $label links=${res.size}")
+                        res
+                    }
+                }
+            }.awaitAll()
         }
         var all = results.flatten()
         // ترتيب الجودات حسب إعداد المصدر.
@@ -394,6 +420,7 @@ class DaramlyProvider(private val prefs: SharedPreferences? = null) : MainAPI() 
             any = true
             callback(link)
         }
+        Log.d(TAG, "emitAll servers=${servers.size} links=${all.size}")
         return any
     }
 
@@ -613,6 +640,8 @@ class DaramlyProvider(private val prefs: SharedPreferences? = null) : MainAPI() 
                                 type = ExtractorLinkType.M3U8,
                             ) {
                                 this.quality = getQualityFromName(qName)
+                                this.referer = "https://rumble.com/"
+                                this.headers = mapOf("Referer" to "https://rumble.com/")
                             },
                         )
                     }
@@ -629,14 +658,25 @@ class DaramlyProvider(private val prefs: SharedPreferences? = null) : MainAPI() 
                             type = ExtractorLinkType.M3U8,
                         ) {
                             this.quality = getQualityFromName(qName)
+                            this.referer = "https://rumble.com/"
+                            this.headers = mapOf("Referer" to "https://rumble.com/")
                         },
                     )
                 }
             }
 
             // ترجمات الإدخال — كائن `{ar:{language,path}}` أو مصفوفة `[{language,url}]`.
+            // ★ لا نستخدم `newSubtitleFile` هنا: هي suspend وقد تختلف بصمتها بين
+            //   نُسخ النواة، وفشلها داخل كوروتين السيرفر كان يُسقط كل الروابط.
+            //   الباني المباشر `SubtitleFile` مستقرّ ولا يحتاج سياق تعليق.
             if (subtitlesEnabled() && cc != null) {
-                emitRumbleSubs(cc, seenSubs, subtitleCallback)
+                try {
+                    emitRumbleSubs(cc, seenSubs) { subtitleCallback(it) }
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Throwable) {
+                    Log.w(TAG, "rumble subs FAILED ${e.message}", e)
+                }
             }
         }
 
@@ -651,12 +691,12 @@ class DaramlyProvider(private val prefs: SharedPreferences? = null) : MainAPI() 
      * `cc` في رامبل شكلان: كائنٌ مفتاحه رمز اللغة وقيمته `{language, path}`،
      * أو مصفوفة `[{language, url}]`. نسلّم كل رابط مرة واحدة بلغةٍ مفهومة.
      */
-    private suspend fun emitRumbleSubs(
+    private fun emitRumbleSubs(
         cc: JsonNode,
         seen: MutableSet<String>,
         subtitleCallback: (SubtitleFile) -> Unit,
     ) {
-        suspend fun add(url: String?, lang: String?) {
+        fun add(url: String?, lang: String?) {
             val u = url?.trim()?.replace("\\/", "/")?.takeIf { it.isNotBlank() } ?: return
             val full = when {
                 u.startsWith("http://") || u.startsWith("https://") -> u
@@ -664,7 +704,7 @@ class DaramlyProvider(private val prefs: SharedPreferences? = null) : MainAPI() 
                 else -> "https://rumble.com/" + u.trimStart('/')
             }
             if (!seen.add(full)) return
-            subtitleCallback(newSubtitleFile(subLabel(lang ?: "ar"), full))
+            subtitleCallback(SubtitleFile(subLabel(lang ?: "ar"), full))
         }
 
         if (cc.isArray) {
