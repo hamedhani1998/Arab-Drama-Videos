@@ -8,9 +8,6 @@ import com.lagradost.cloudstream3.utils.ExtractorLink
 import com.lagradost.cloudstream3.utils.ExtractorLinkType
 import com.lagradost.cloudstream3.utils.loadExtractor
 import com.lagradost.cloudstream3.utils.newExtractorLink
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.GlobalScope
-import kotlinx.coroutines.launch
 import org.json.JSONObject
 import org.schabi.newpipe.extractor.ServiceList
 import org.schabi.newpipe.extractor.services.youtube.extractors.YoutubeStreamExtractor
@@ -40,8 +37,11 @@ object YoutubeLinks {
 
     private const val YT_REFERER = "https://www.youtube.com/"
 
-    /** لغات الترجمة الافتراضية حين لا يحدّد المصدر شيئًا. */
-    private val DEFAULT_SUB_LANGS = listOf("ar", "en")
+    /**
+     * لغات الترجمة المطلوبة إضافةً إلى المنشورة. لا نطلب إلا العربية افتراضيًا:
+     * يوتيوب لا ينشر العربية إلا نادرًا ويولّدها عند الطلب عبر `tlang`.
+     */
+    private val DEFAULT_SUB_LANGS = listOf("ar")
 
     /** خيارات يقرأها كل مصدر من إعداداته. */
     data class Options(
@@ -50,12 +50,31 @@ object YoutubeLinks {
         /** 0 = بلا حد. */
         val maxHeight: Int = 0,
         val subtitles: Boolean = true,
-        /** "ar,en" — فارغة = كل اللغات. */
+        /** "ar,en" — فارغة: كل المنشور + محاولة العربية. */
         val subLangs: Set<String> = emptySet(),
     )
 
-    /** حارس تكرار الترجمة: نفس الفيديو قد يُحلّ أكثر من مرة في نداءٍ واحد. */
-    private val subsEmitted = ConcurrentHashMap.newKeySet<String>()
+    /**
+     * حارس تكرار الترجمة: نفس الفيديو قد يُحلّ أكثر من مرة في `loadLinks`
+     * واحد (سيرفرات متعددة). الحارس مؤقّت لا دائم: تشغيل الفيديو مرة أخرى
+     * لاحقًا يجب أن يُظهر الترجمة من جديد.
+     */
+    private val subsEmittedAt = ConcurrentHashMap<String, Long>()
+    private const val SUBS_GUARD_MS = 10_000L
+
+    private fun claimSubtitles(videoId: String): Boolean {
+        val now = System.currentTimeMillis()
+        val it = subsEmittedAt.entries.iterator()
+        while (it.hasNext()) {
+            if (now - it.next().value > SUBS_GUARD_MS) it.remove()
+        }
+        while (true) {
+            val prev = subsEmittedAt[videoId]
+            if (prev == null) return subsEmittedAt.putIfAbsent(videoId, now) == null
+            if (now - prev < SUBS_GUARD_MS) return false
+            if (subsEmittedAt.replace(videoId, prev, now)) return true
+        }
+    }
 
     /** يستخرج معرّف الفيديو من أي صيغة رابط/معرّف يوتيوب. */
     fun videoIdOf(raw: String): String? {
@@ -253,16 +272,14 @@ object YoutubeLinks {
             }
 
             if (options.subtitles) {
-                // بعد بثّ الروابط: الترجمة تُجلب في خيطٍ منفصل فلا تؤخّر التشغيل،
-                // وتظهر في قائمة المشغّل حالما تصل (نفس نمط مصدر ARY).
-                val ext = extractor
-                val cb = subtitleCallback
-                GlobalScope.launch(Dispatchers.IO) {
-                    try {
-                        emitSubtitles(videoId, watchUrl, ext, logTag, options, cb)
-                    } catch (e: Exception) {
-                        Log.w(logTag, "YouTube $videoId subtitle job failed :: ${e.message}")
-                    }
+                // ★ متزامنة، لا في خيط منفصل: CloudStream يجمع الترجمات في
+                //   مجموعة محلية ويبني قائمتها بعد عودة `loadLinks`. أي إصدار
+                //   بعد العودة يضيع — وهذا سبب اختفاء الترجمات تمامًا.
+                //   الروابط أُرسلت أعلاه، فالمشغّل لا ينتظر هذه الخطوة ليعمل.
+                try {
+                    emitSubtitles(videoId, watchUrl, extractor, logTag, options, subtitleCallback)
+                } catch (e: Exception) {
+                    Log.w(logTag, "YouTube $videoId subtitles failed :: ${e.message}")
                 }
             }
 
@@ -301,6 +318,14 @@ object YoutubeLinks {
                 Log.w(logTag, "playabilityStatus=$status reason=${player.optJSONObject("playabilityStatus")?.optString("reason")}")
                 return 0
             }
+
+            // ترجمات صفحة watch — شبكة احتياطية كاملة: مسارات timedtext موجودة
+            // في `playerResponse` بكل اللغات المنشورة، فتُظهر الترجمة حتى لو
+            // فشل NewPipe كليًا.
+            if (options.subtitles) {
+                emitCaptionTracks(videoIdOf(watchUrl) ?: watchUrl, player, logTag, subtitleCallback)
+            }
+
             val sd = player.optJSONObject("streamingData") ?: return 0
 
             // منذ أواخر 2025 يوتيوب لا يضع `url` في `adaptiveFormats`، بل يكتفي
@@ -575,15 +600,16 @@ object YoutubeLinks {
     // ================================ الترجمة ================================
 
     /**
-     * يوتيوب ينشر مسار ترجمة واحدًا غالبًا، وبقية اللغات يولّدها عند الطلب عبر
-     * معامل `tlang` على رابط `timedtext` الموقَّع. لذلك لا نكتفي بما يعيده
-     * NewPipe، بل:
-     *  1) نجلب النص لكل لغة مطلوبة (الأصلية + اللغات المختارة) عبر HTTP/1.1.
-     *  2) نحوّله إلى WebVTT (xml / json3 / srv3).
-     *  3) نقدّمه من خادم محلي (`127.0.0.1`)، لا رابط يوتيوب مباشر.
+     * يصدّر الترجمات للمشغّل — **متزامنًا** قبل عودة `loadLinks`، لأن
+     * CloudStream يجمعها في مجموعة محلية ثم يبني القائمة بعد العودة؛ أي
+     * إصدار من خيطٍ منفصل يضيع (وهو سبب «الترجمة لا تظهر»).
      *
-     * ونُزيل توجيهات الموضع الرأسية (`line:…`) من كل لقطة: بعض ملفات يوتيوب
-     * تضع النص في أعلى الفيديو، والمشغّل يرسم WebVTT العادي في الأسفل.
+     *  1) كل مسار منشور على يوتيوب يُصدَّر فورًا برابط `fmt=vtt` مباشر:
+     *     صفر طلبات شبكة، وكل اللغات المنشورة تظهر دائمًا. نستبدل `fmt`
+     *     ولا نُلحقه، لأن رابط `timedtext` الموقَّع يحمل `fmt=ttml` أصلًا
+     *     ولصق معامل ثانٍ يُهمَل فيعود TTML وهو ما يرفضه المشغّل.
+     *  2) ثم أفضل جهد للغات المطلوبة غير المنشورة عبر `tlang` (العربية
+     *     افتراضيًا)، بميزانية زمنية قصيرة. إن فشلت تبقى المنشورة ظاهرة.
      */
     private suspend fun emitSubtitles(
         videoId: String,
@@ -593,21 +619,52 @@ object YoutubeLinks {
         options: Options,
         subtitleCallback: (SubtitleFile) -> Unit,
     ) {
-        // حارس التكرار: نفس الفيديو قد يُحلّ أكثر من مرة في نداءٍ واحد.
-        if (!subsEmitted.add(videoId)) return
+        val tracks = runCatching { extractor?.subtitlesDefault }
+            .getOrNull()?.filterNotNull() ?: emptyList()
+        if (tracks.isEmpty()) return
+        if (!claimSubtitles(videoId)) return
 
-        val tracks = runCatching { extractor?.subtitlesDefault }.getOrNull()?.filterNotNull() ?: emptyList()
-        val original = tracks.firstOrNull { !it.url.isNullOrBlank() } ?: return
-        val base = original.url ?: return
-        val originalLang = original.locale?.language?.takeIf { it.isNotBlank() } ?: "ar"
-
-        val wanted = LinkedHashSet<String>()
-        wanted.add(originalLang)
-        wanted.addAll(options.subLangs.ifEmpty { DEFAULT_SUB_LANGS.toSet() })
-
+        // (1) المنشور: رابط VTT مباشر، فورًا ودون شبكة.
+        val nativeLangs = LinkedHashSet<String>()
+        val seenTracks = HashSet<String>()
         var emitted = 0
-        for (lang in wanted) {
-            val text = fetchSubtitleText(base, lang, originalLang, watchUrl)
+        for (track in tracks) {
+            val raw = track.url?.takeIf { it.isNotBlank() } ?: continue
+            if (!seenTracks.add(raw)) continue
+            val lang = track.locale?.language?.takeIf { it.isNotBlank() } ?: "und"
+            nativeLangs.add(baseLang(lang))
+            subtitleCallback(
+                newSubtitleFile(subLangLabel(lang), vttUrl(raw)) {
+                    this.headers = mapOf("Referer" to YT_REFERER, "User-Agent" to UA)
+                }
+            )
+            emitted++
+        }
+        Log.d(logTag, "YouTube $videoId native subtitles=$emitted langs=$nativeLangs")
+        if (emitted == 0) return
+
+        // (2) المطلوب غير المنشور: `tlang` على الرابط الموقَّع (ميزانية 9ث).
+        val base = tracks.firstNotNullOfOrNull { t -> t.url?.takeIf { it.isNotBlank() } } ?: return
+        val originalLang = tracks.firstOrNull { !it.url.isNullOrBlank() }
+            ?.locale?.language?.takeIf { it.isNotBlank() } ?: "ar"
+
+        val requested = LinkedHashSet<String>()
+        requested.addAll(options.subLangs)
+        if (options.subLangs.isEmpty()) requested.addAll(DEFAULT_SUB_LANGS)
+
+        val missing = requested
+            .map { it.trim().lowercase() }
+            .filter { it.isNotEmpty() && baseLang(it) !in nativeLangs }
+            .distinct()
+            .take(3)
+        if (missing.isEmpty()) return
+
+        val started = System.currentTimeMillis()
+        val budget = 9_000L
+        for (lang in missing) {
+            val left = budget - (System.currentTimeMillis() - started)
+            if (left < 1_000L) break
+            val text = fetchSubtitleText(base, lang, originalLang, watchUrl, left)
             if (text.isBlank()) continue
             val vtt = toWebVtt(text)
             if (vtt.isBlank()) continue
@@ -617,50 +674,84 @@ object YoutubeLinks {
                     this.headers = mapOf("Referer" to YT_REFERER, "User-Agent" to UA)
                 }
             )
-            emitted++
-            Log.d(logTag, "subtitle ok lang=$lang bytes=${vtt.length}")
-        }
-
-        // احتياط أخير: لم ينجح أي جلب → رابط يوتيوب الأصلي بصيغة VTT.
-        if (emitted == 0) {
-            subtitleCallback(
-                newSubtitleFile(subLangLabel(originalLang), vttUrl(base)) {
-                    this.headers = mapOf("Referer" to YT_REFERER, "User-Agent" to UA)
-                }
-            )
-            Log.d(logTag, "subtitle direct fallback lang=$originalLang")
+            Log.d(logTag, "YouTube $videoId translated subtitle lang=$lang bytes=${vtt.length}")
         }
     }
 
     /**
+     * مسارات الترجمة من `playerResponse.captions` مباشرةً. تُسلَّم كلغة
+     * `fmt=vtt` بلا أي جلب، فحتى لو تعذّر استخراج أي رابط تشغيل تظل الترجمة
+     * ظاهرة في القائمة.
+     */
+    private suspend fun emitCaptionTracks(
+        videoId: String,
+        player: JSONObject,
+        logTag: String,
+        subtitleCallback: (SubtitleFile) -> Unit,
+    ) {
+        val list = player.optJSONObject("captions")
+            ?.optJSONObject("playerCaptionsTracklistRenderer")
+            ?.optJSONArray("captionTracks") ?: return
+        if (list.length() == 0) return
+        if (!claimSubtitles(videoId)) return
+
+        val seen = HashSet<String>()
+        var n = 0
+        for (i in 0 until list.length()) {
+            val t = list.optJSONObject(i) ?: continue
+            val base = t.optString("baseUrl").takeIf { it.isNotBlank() } ?: continue
+            if (!seen.add(base)) continue
+            val lang = t.optString("languageCode").ifBlank { "und" }
+            val name = t.optJSONObject("name")?.optString("simpleText")?.takeIf { it.isNotBlank() }
+            val label = name ?: subLangLabel(lang)
+            subtitleCallback(
+                newSubtitleFile(label, vttUrl(base)) {
+                    this.headers = mapOf("Referer" to YT_REFERER, "User-Agent" to UA)
+                }
+            )
+            n++
+        }
+        Log.d(logTag, "YouTube $videoId watch captions=$n")
+    }
+
+    /**
      * جلب نص الترجمة: الأصلية بلا `tlang`، وغيرها بـ`tlang`.
-     * `timedtext` قد يردّ 200 بجسد فارغ عند الحجب، ولذلك نحوّل ونتحقق هنا
-     * لا في موضع الاستعمال.
+     * نستبدل `fmt` بدل لصقه (المعامل الثاني يُهمَل)، ونتحقّق من قابلية
+     * التحويل هنا لا في موضع الاستعمال — فـ`timedtext` قد يردّ 200 بجسد
+     * فارغ عند الحجب.
      */
     private fun fetchSubtitleText(
         base: String,
         lang: String,
         originalLang: String,
         watchUrl: String,
+        budgetMs: Long,
     ): String {
-        val candidates = if (lang == originalLang) {
-            listOf(base, "$base&fmt=vtt", "$base&tlang=$lang")
+        val t = budgetMs.toInt().coerceIn(1_500, 9_000)
+        val connect = minOf(4_500, t)
+        val read = minOf(6_000, t)
+        val candidates = if (baseLang(lang) == baseLang(originalLang)) {
+            listOf(vttUrl(base), base, withFmt(base, "srv3"))
         } else {
-            listOf("$base&tlang=$lang", "$base&tlang=$lang&fmt=vtt")
+            listOf(
+                "$base&tlang=$lang",
+                withFmt("$base&tlang=$lang", "vtt"),
+            )
         }
         for (u in candidates) {
-            val body = httpGet(u, watchUrl)
+            if (u.isBlank()) continue
+            val body = httpGet(u, watchUrl, connect, read)
             if (body.isNotBlank() && toWebVtt(body).isNotBlank()) return body
         }
         return ""
     }
 
     /** HTTP/1.1 يدويًا: بعض الأجهزة/الشبكات يُقتل فيها طلب المشغّل (Cronet). */
-    private fun httpGet(url: String, referer: String): String = try {
+    private fun httpGet(url: String, referer: String, connectMs: Int, readMs: Int): String = try {
         val conn = java.net.URL(url).openConnection() as java.net.HttpURLConnection
         conn.requestMethod = "GET"
-        conn.connectTimeout = 8000
-        conn.readTimeout = 12000
+        conn.connectTimeout = connectMs
+        conn.readTimeout = readMs
         conn.instanceFollowRedirects = true
         conn.setRequestProperty("User-Agent", UA)
         conn.setRequestProperty("Referer", referer)
@@ -734,27 +825,110 @@ object YoutubeLinks {
         return if (sb.length <= 8) "" else sb.toString()
     }
 
-    /** `xml`: `<text start="0.5" dur="1.2">…</text>`. */
+    /**
+     * XML بيوتيوب بثلاث صيغ:
+     *  - `transcript`: `<text start="0.5" dur="1.2">…</text>`
+     *  - `ttml`: `<p begin="00:00:01.000" end="00:00:03.000">…</p>` (الافتراضية)
+     *  - `srv3`: `<p t="1000" d="2000">…</p>` (ميلي ثانية)
+     * تجاهل TTML سابقًا كان يجعل كل جلب يبدو فارغًا — فلا تظهر ترجمة أبدًا.
+     */
     private fun xmlToVtt(raw: String): String {
+        val transcript = transcriptToVtt(raw)
+        if (transcript.isNotBlank()) return transcript
+        val ttml = ttmlToVtt(raw)
+        if (ttml.isNotBlank()) return ttml
+        return srv3ToVtt(raw)
+    }
+
+    /** الصيغة النصّية القديمة: `<text start="0.5" dur="1.2">…</text>`. */
+    private fun transcriptToVtt(raw: String): String {
         val sb = StringBuilder("WEBVTT\n\n")
         val tagRe = Regex("""<text\b([^>]*)>([\s\S]*?)</text>""")
         var found = false
         for (m in tagRe.findAll(raw)) {
             val attrs = m.groupValues[1]
-            val body = unescapeXml(m.groupValues[2]).replace('\n', ' ').trim()
+            val body = stripTags(m.groupValues[2])
             if (body.isEmpty()) continue
-            val start = attrDouble(attrs, "start") ?: 0.0
-            val dur = attrDouble(attrs, "dur") ?: 2.0
-            sb.append(ts(start.toLong())).append(" --> ").append(ts((start + dur).toLong())).append('\n')
+            val start = attr(attrs, "start")?.toDoubleOrNull() ?: 0.0
+            val dur = attr(attrs, "dur")?.toDoubleOrNull() ?: 2.0
+            sb.append(ts((start * 1000).toLong()))
+                .append(" --> ")
+                .append(ts(((start + dur) * 1000).toLong()))
+                .append('\n')
             sb.append(body).append("\n\n")
             found = true
         }
         return if (found) sb.toString() else ""
     }
 
-    private fun attrDouble(attrs: String, name: String): Double? =
-        Regex("""\b$name\s*=\s*"([\d.]+)"""").find(attrs)
-            ?.groupValues?.get(1)?.toDoubleOrNull()
+    /** TTML: `<p begin="…" end="…">…</p>`؛ بعض الملفات تستعمل `dur`. */
+    private fun ttmlToVtt(raw: String): String {
+        if (!raw.contains("<p", true)) return ""
+        val sb = StringBuilder("WEBVTT\n\n")
+        val tagRe = Regex("""<p\b([^>]*)>([\s\S]*?)</p>""")
+        var found = false
+        for (m in tagRe.findAll(raw)) {
+            val attrs = m.groupValues[1]
+            val body = stripTags(m.groupValues[2])
+            if (body.isEmpty()) continue
+            val begin = parseTimecode(attr(attrs, "begin")) ?: continue
+            val end = parseTimecode(attr(attrs, "end"))
+                ?: parseTimecode(attr(attrs, "dur"))?.let { begin + it }
+                ?: (begin + 2000)
+            if (end <= begin) continue
+            sb.append(ts(begin)).append(" --> ").append(ts(end)).append('\n')
+            sb.append(body).append("\n\n")
+            found = true
+        }
+        return if (found) sb.toString() else ""
+    }
+
+    /** srv3: `<p t="1230" d="1870">…<br/>…</p>` — الأرقام ميلي ثانية. */
+    private fun srv3ToVtt(raw: String): String {
+        val sb = StringBuilder("WEBVTT\n\n")
+        val tagRe = Regex("""<p\b([^>]*)>([\s\S]*?)</p>""")
+        var found = false
+        for (m in tagRe.findAll(raw)) {
+            val attrs = m.groupValues[1]
+            val body = stripTags(m.groupValues[2])
+            if (body.isEmpty()) continue
+            val start = attr(attrs, "t")?.toLongOrNull()
+                ?: parseTimecode(attr(attrs, "begin"))
+                ?: continue
+            val dur = (attr(attrs, "d")?.toLongOrNull() ?: 2000L).coerceAtLeast(1L)
+            sb.append(ts(start)).append(" --> ").append(ts(start + dur)).append('\n')
+            sb.append(body).append("\n\n")
+            found = true
+        }
+        return if (found) sb.toString() else ""
+    }
+
+    private fun attr(attrs: String, name: String): String? =
+        Regex("""\b$name\s*=\s*"([^"]*)"""").find(attrs)?.groupValues?.get(1)
+
+    /** `00:00:01.500` أو `1.5s` أو `1500ms` → ميلي ثانية. */
+    private fun parseTimecode(raw: String?): Long? {
+        val s = raw?.trim()?.takeIf { it.isNotEmpty() } ?: return null
+        if (s.endsWith("ms", true)) return s.dropLast(2).trim().toDoubleOrNull()?.toLong()
+        val t = s.removeSuffix("s").removeSuffix("S").trim()
+        if (t.isEmpty()) return null
+        if (t.contains(":")) {
+            var total = 0.0
+            for (p in t.split(":")) total = total * 60 + (p.toDoubleOrNull() ?: return null)
+            return (total * 1000).toLong()
+        }
+        if (t.endsWith("f", true)) return null
+        return t.toDoubleOrNull()?.let { (it * 1000).toLong() }
+    }
+
+    /** يزيل وسوم الكيانات الداخلية (`<s>`, `<span>`, `<br/>`) ويوحّد الفراغات. */
+    private fun stripTags(raw: String): String = unescapeXml(
+        raw.replace(Regex("""<br\s*/?>"""), " ")
+            .replace(Regex("""<[^>]*>"""), "")
+    ).replace(Regex("""\s+"""), " ").trim()
+
+    private fun baseLang(code: String): String =
+        code.trim().lowercase().substringBefore('-').substringBefore('_')
 
     /** WebVTT timecode. `Locale.US` مقصود: الأرقام العربية-الهندية تُفسد الوقت. */
     private fun ts(ms: Long): String {
@@ -770,9 +944,11 @@ object YoutubeLinks {
         .replace("&quot;", "\"").replace("&#39;", "'").replace("&apos;", "'")
 
     /** يستبدل أي `fmt=` قائم بـ`vtt` بدل لصق معاملٍ ثانٍ يُهمَل. */
-    private fun vttUrl(url: String): String = when {
-        url.contains("fmt=") -> url.replace(Regex("""([?&])fmt=[^&]*"""), "$1fmt=vtt")
-        else -> url + (if (url.contains("?")) "&" else "?") + "fmt=vtt"
+    private fun vttUrl(url: String): String = withFmt(url, "vtt")
+
+    private fun withFmt(url: String, fmt: String): String = when {
+        url.contains("fmt=") -> url.replace(Regex("""([?&])fmt=[^&]*"""), "$1fmt=$fmt")
+        else -> url + (if (url.contains("?")) "&" else "?") + "fmt=$fmt"
     }
 
     /**
