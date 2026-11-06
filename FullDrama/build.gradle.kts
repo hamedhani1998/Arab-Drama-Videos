@@ -1,4 +1,4 @@
-version = 3
+version = 4
 
 cloudstream {
     description = "FullDrama - مسلسلات دراما كاملة مترجمة ومدبلجة بجودة عالية"

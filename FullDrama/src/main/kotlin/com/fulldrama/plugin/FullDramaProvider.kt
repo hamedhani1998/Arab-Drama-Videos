@@ -8,12 +8,26 @@ import cloudstreamshared.MediaProbe
 import cloudstreamshared.Mp4Head
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
 import java.net.URLEncoder
 
 private val mapper = ObjectMapper().registerKotlinModule()
     .configure(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES, false)
 
 private const val FD_MAIN = "https://www.full-drama.com"
+
+/** أقصى عدد صفحات بحث نجمعها (12 نتيجة/صفحة) — كي يبقى البحث سريعًا. */
+private const val SEARCH_MAX_PAGES = 3
+
+/** بطاقة من واجهة البحث JSON (‏`/api/dramas`). */
+private data class FdCard(
+    val id: String,
+    val slug: String,
+    val title: String,
+    val image: String,
+)
 
 // أقسام التصنيفات بترتيب قائمة الموقع — لكلٍّ مفتاح إظهار/إخفاء في الإعدادات
 // (الموقع لا يملك «منصات»؛ التصنيفات هي أقسامه المقابلة).
@@ -133,11 +147,107 @@ class FullDramaProvider(private val prefs: SharedPreferences?) : MainAPI() {
         return newHomePageResponse(request.name, items)
     }
 
+    /**
+     * بحث الموقع: صفحة `/search` صارت Next.js تُصيّر النتائج في المتصفّح فقط،
+     * و`/search?q=` تُحوَّل إلى `/search` بلا كلمة بحث (لذلك كان البحث يعيد
+     * قائمة فارغة). نقطة البحث الحقيقية هي واجهة JSON نفسها التي تناديها
+     * الصفحة: `/api/dramas?pageNum=N&keyword=...`، وعنوان العمل يُبنى من
+     * `id` و`slug` بنفس صيغة الموقع: `/detail/<id>/<slug>`.
+     */
     override suspend fun search(query: String): List<SearchResponse> {
-        val q = URLEncoder.encode(query, "UTF-8")
-        // /?s= يتجاهله الموقع صامتًا — نقطة البحث الصحيحة /search?q=
-        val doc = app.get("$mainUrl/search?q=$q").document
-        return parseCardsDoc(doc, java.util.HashSet())
+        val q = query.trim()
+        if (q.isEmpty()) return emptyList()
+        val enc = URLEncoder.encode(q, "UTF-8")
+
+        val first = fetchSearchPage(enc, 1)
+        if (first == null) {
+            // احتياط: إن تغيّرت الواجهة مستقبلًا، نجرّب صفحة HTML القديمة.
+            return try {
+                parseCardsDoc(app.get("$mainUrl/search?q=$enc").document, java.util.HashSet())
+            } catch (e: Exception) {
+                logD("FullDrama: search failed for '$q' :: ${e.message}")
+                emptyList()
+            }
+        }
+
+        val out = LinkedHashMap<String, SearchResponse>()
+        addSearchItems(first.first, out)
+
+        // بقيّة الصفحات معًا (لا بالتتابع) — البحث يبقى سريعًا.
+        val pages = minOf(first.second, SEARCH_MAX_PAGES)
+        if (pages > 1) {
+            val rest = coroutineScope {
+                (2..pages).map { p ->
+                    async {
+                        try {
+                            fetchSearchPage(enc, p)?.first ?: emptyList()
+                        } catch (e: kotlinx.coroutines.CancellationException) {
+                            throw e
+                        } catch (e: Throwable) {
+                            emptyList()
+                        }
+                    }
+                }.awaitAll()
+            }
+            rest.forEach { addSearchItems(it, out) }
+        }
+
+        logD("FullDrama: search '$q' pages=$pages hits=${out.size}")
+        return out.values.toList()
+    }
+
+    private suspend fun fetchSearchPage(enc: String, page: Int): Pair<List<FdCard>, Int>? {
+        val body = try {
+            app.get(
+                "$mainUrl/api/dramas?pageNum=$page&keyword=$enc",
+                headers = mapOf(
+                    "Accept" to "application/json",
+                    "Referer" to "$mainUrl/search",
+                ),
+            ).text
+        } catch (e: Exception) {
+            logD("FullDrama: search api page $page failed :: ${e.message}")
+            return null
+        }
+
+        val root = try {
+            mapper.readTree(body)
+        } catch (e: Exception) {
+            logD("FullDrama: search api bad json :: ${e.message}")
+            return null
+        } ?: return null
+
+        val pages = root.path("pages").asInt(0)
+        val items = mutableListOf<FdCard>()
+        for (n in root.path("items")) {
+            val id = n.path("id").asText("").trim()
+            if (id.isEmpty()) continue
+            val title = cleanTitle(n.path("title").asText(""))
+            if (title.isEmpty()) continue
+            items.add(
+                FdCard(
+                    id = id,
+                    slug = n.path("slug").asText("").trim(),
+                    title = title,
+                    image = n.path("image").asText(""),
+                )
+            )
+        }
+        return items to pages
+    }
+
+    private fun addSearchItems(items: List<FdCard>, out: MutableMap<String, SearchResponse>) {
+        for (c in items) {
+            val url = if (c.slug.isEmpty()) {
+                "$mainUrl/detail/${c.id}"
+            } else {
+                "$mainUrl/detail/${c.id}/${URLEncoder.encode(c.slug, "UTF-8")}"
+            }
+            if (out.containsKey(url)) continue
+            out[url] = newTvSeriesSearchResponse(c.title, url, TvType.TvSeries) {
+                this.posterUrl = c.image
+            }
+        }
     }
 
     override suspend fun load(url: String): LoadResponse {
