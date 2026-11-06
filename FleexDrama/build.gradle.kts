@@ -1,4 +1,4 @@
-version = 1
+version = 2
 
 cloudstream {
     description = "FleexDrama - دراما فليكس: مسلسلات وأفلام قصيرة مترجمة ومدبلجة مع كل السيرفرات والجودات وملفات الترجمة"

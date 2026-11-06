@@ -38,6 +38,10 @@ import java.net.URLEncoder
 
 private const val TAG = "Daramly"
 private const val SERVER_TIMEOUT_MS = 12_000L
+private const val DEAD_HOST_TIMEOUT_MS = 6_000L
+
+/** فحص سريع لرابط المشاهدة قبل تسليمه (يكشف المضيف الميت الذي يُظهر خطأ 2002). */
+private const val LINK_PROBE_TIMEOUT_MS = 3_500L
 
 /** مسار تصنيف مُرمَّز (الموقع يفكّ `%20` وليس `+`). */
 private fun catPath(name: String): String =
@@ -380,49 +384,74 @@ class DaramlyProvider(private val prefs: SharedPreferences? = null) : MainAPI() 
         callback: (ExtractorLink) -> Unit,
     ): Boolean {
         if (servers.isEmpty()) return false
-        val results = coroutineScope {
+        val lock = Mutex()
+        val seen = HashSet<String>()
+        var emitted = 0
+
+        coroutineScope {
             servers.map { (u, label) ->
                 async {
                     // ★ عزل كل سيرفر: فشل سيرفر واحد (تحويل/شبكة/ترجمة) يجب ألا
-                    //   يُسقط بقية الروابط. `awaitAll` كان يعيد رمي أول استثناء
-                    //   فيضيع كل شيء ويظهر «لا توجد روابط».
-                    //   ومهلة قصيرة لكل سيرفر: voe قد يعلّق على مضيف التحويل
-                    //   فيمنع ظهور روابط رامبل الجاهزة.
-                    val res = try {
-                        withTimeoutOrNull(SERVER_TIMEOUT_MS) {
-                            resolveServer(u, label, subtitleCallback)
-                        }
+                    //   يُسقط بقية الروابط. ومهلة قصيرة لكل سيرفر: voe قد يعلّق
+                    //   على مضيف التحويل فيمنع ظهور روابط رامبل الجاهزة.
+                    val timeout = if (isVoe(u)) DEAD_HOST_TIMEOUT_MS else SERVER_TIMEOUT_MS
+                    val links = try {
+                        withTimeoutOrNull(timeout) { resolveServer(u, label, subtitleCallback) }
+                            ?: emptyList()
                     } catch (e: CancellationException) {
                         throw e
                     } catch (e: Throwable) {
                         Log.e(TAG, "server FAILED $label $u :: ${e.message}", e)
-                        null
-                    }
-                    if (res == null) {
-                        Log.w(TAG, "server EMPTY/TIMEOUT $label $u")
                         emptyList()
-                    } else {
-                        Log.d(TAG, "server OK $label links=${res.size}")
-                        res
                     }
+
+                    // ★ لا نُسلّم رابطًا على مضيف ميت: المشغّل يعرضه «خطأ شبكة 2002»
+                    //   (ERROR_CODE_IO_NETWORK_CONNECTION_FAILED). نتحقق فقط من
+                    //   الاستضافات المشكوك فيها (voe) كي لا نُبطئ رامبل السليمة.
+                    val live = if (isVoe(u)) links.filter { reachable(it) } else links
+                    if (live.size != links.size) {
+                        Log.w(TAG, "server $label dropped ${links.size - live.size} dead link(s)")
+                    }
+                    val sorted = when (qualityOrder()) {
+                        "desc" -> live.sortedByDescending { it.quality }
+                        "asc" -> live.sortedBy { it.quality }
+                        else -> live
+                    }
+
+                    // ★ البثّ الفوري: نُسلّم روابط كل سيرفر لحظة جهوزيتها بدل انتظار
+                    //   `awaitAll` — روابط رامبل تظهر خلال ثانية، وvoe الميت يُهجر بمهلته.
+                    lock.withLock {
+                        for (l in sorted) {
+                            if (seen.add(l.url)) {
+                                emitted++
+                                callback(l)
+                            }
+                        }
+                    }
+                    Log.d(TAG, "server OK $label links=${live.size}")
                 }
             }.awaitAll()
         }
-        var all = results.flatten()
-        // ترتيب الجودات حسب إعداد المصدر.
-        all = when (qualityOrder()) {
-            "desc" -> all.sortedByDescending { it.quality }
-            "asc" -> all.sortedBy { it.quality }
-            else -> all
-        }
-        var any = false
-        for (link in all) {
-            any = true
-            callback(link)
-        }
-        Log.d(TAG, "emitAll servers=${servers.size} links=${all.size}")
-        return any
+
+        Log.d(TAG, "emitAll servers=${servers.size} links=$emitted")
+        return emitted > 0
     }
+
+    private fun isVoe(url: String): Boolean = url.contains("voe", ignoreCase = true)
+
+    /** هل الرابط يفتح فعلًا؟ ‏HEAD قصير: أي رمز HTTP يعني أن المضيف حيّ. */
+    private suspend fun reachable(link: ExtractorLink): Boolean =
+        withTimeoutOrNull(LINK_PROBE_TIMEOUT_MS) {
+            try {
+                val code = app.head(link.url, referer = link.referer ?: "$mainUrl/").code
+                code in 200..399 || code == 403 || code == 405 || code == 416
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Throwable) {
+                Log.w(TAG, "link probe FAILED ${link.url.take(80)} :: ${e.message}")
+                false
+            }
+        } ?: false
 
     /**
      * أزرار السيرفرات تحمل `data-src` = base64 معكوس. نفكّها إلى رابط الاستضافة
@@ -472,7 +501,11 @@ class DaramlyProvider(private val prefs: SharedPreferences? = null) : MainAPI() 
             return out.map { l ->
                 newExtractorLink(
                     source = name,
-                    name = if (l.name.isBlank()) label else "$label · ${l.name}",
+                    name = listOfNotNull(
+                        label,
+                        l.name.trim().takeIf { it.isNotBlank() },
+                        typeLabel(l.type, l.url),
+                    ).joinToString(" · "),
                     url = l.url,
                     type = l.type,
                 ) {
@@ -501,12 +534,13 @@ class DaramlyProvider(private val prefs: SharedPreferences? = null) : MainAPI() 
         }
 
         if (produced.isEmpty() && isMedia(url)) {
+            val mediaType = if (url.contains(".m3u8", true)) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
             produced.add(
                 newExtractorLink(
                     source = name,
-                    name = "$label · مباشر",
+                    name = "$label · ${typeLabel(mediaType, url)} · مباشر",
                     url = url,
-                    type = if (url.contains(".m3u8", true)) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO,
+                    type = mediaType,
                 ) {
                     this.referer = "$mainUrl/"
                 },
@@ -516,7 +550,11 @@ class DaramlyProvider(private val prefs: SharedPreferences? = null) : MainAPI() 
         return produced.map { l ->
             newExtractorLink(
                 source = name,
-                name = if (l.name.isBlank()) label else "$label · ${l.name}",
+                name = listOfNotNull(
+                    label,
+                    l.name.trim().takeIf { it.isNotBlank() },
+                    typeLabel(l.type, l.url),
+                ).joinToString(" · "),
                 url = l.url,
                 type = l.type,
             ) {
@@ -635,7 +673,7 @@ class DaramlyProvider(private val prefs: SharedPreferences? = null) : MainAPI() 
                         out.add(
                             newExtractorLink(
                                 source = name,
-                                name = "$label · Rumble · $qName$sizeText",
+                                name = "$label · Rumble · $qName · M3U8 (HLS)$sizeText",
                                 url = u,
                                 type = ExtractorLinkType.M3U8,
                             ) {
@@ -653,7 +691,7 @@ class DaramlyProvider(private val prefs: SharedPreferences? = null) : MainAPI() 
                     out.add(
                         newExtractorLink(
                             source = name,
-                            name = "$label · Rumble · بثّ مباشر",
+                            name = "$label · Rumble · بثّ تلقائي ABR · M3U8 (HLS) · $qName",
                             url = auto,
                             type = ExtractorLinkType.M3U8,
                         ) {
@@ -792,6 +830,25 @@ class DaramlyProvider(private val prefs: SharedPreferences? = null) : MainAPI() 
         if (i < 0) return null
         val json = balancedObject(scope, scope.indexOf('{', i)) ?: return null
         return runCatching { mapper.readTree(json) }.getOrNull()
+    }
+
+    /**
+     * نوعية الفيديو كما يراها المستخدم في قائمة السيرفرات:
+     * `M3U8 (HLS)` قائمة بثّ تجزئية، `MP4` ملف مباشر، `DASH` قائمة MPD.
+     */
+    private fun typeLabel(type: ExtractorLinkType, url: String): String = when (type) {
+        ExtractorLinkType.M3U8 -> "M3U8 (HLS)"
+        ExtractorLinkType.DASH -> "DASH (MPD)"
+        ExtractorLinkType.TORRENT -> "TORRENT"
+        ExtractorLinkType.MAGNET -> "MAGNET"
+        else -> when {
+            url.contains(".m3u8", true) -> "M3U8 (HLS)"
+            url.contains(".mpd", true) -> "DASH (MPD)"
+            url.contains(".mp4", true) -> "MP4"
+            url.contains(".webm", true) -> "WebM"
+            url.contains(".mkv", true) -> "MKV"
+            else -> "MP4"
+        }
     }
 
     private fun formatSize(bytes: Long): String {
