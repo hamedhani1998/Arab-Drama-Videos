@@ -1,27 +1,31 @@
 package com.dramagaze.plugin
 
 import cloudstreamshared.FormatTag
+import com.fasterxml.jackson.databind.JsonNode
+import com.fasterxml.jackson.databind.ObjectMapper
+import com.fasterxml.jackson.module.kotlin.registerKotlinModule
 import com.lagradost.cloudstream3.*
+import com.lagradost.cloudstream3.newSubtitleFile
 import com.lagradost.cloudstream3.utils.*
 import android.content.SharedPreferences
 import android.util.Log
 import org.jsoup.nodes.Document
 import java.net.URLEncoder
+import java.net.URLDecoder
 
 private const val UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0 Safari/537.36"
 
+private val mapper = ObjectMapper().registerKotlinModule()
+
 /**
- * DramaGaze (https://dramagaze.com) — كتالوج دراما قصيرة عمودية.
+ * DramaGaze (https://dramagaze.com) — كتالوج دراما قصيرة عمودية متعدد المزودين.
  *
- * بنية الموقع (تم فحصها):
- *  - الرئيسية /ar، والتصفح /ar/browse (كل التصنيفات)،
- *    /ar/browse/<category> (رومانسي، انتقام، ...)، والترقيم ?sort=new&page=N.
- *  - بطاقات التصفح: `<a href="/ar/drama/<slug>-<id>">` تحمل عنواناً و صورة
- *    (img.dramagaze.com).
- *  - التفاصيل /ar/drama/<slug>-<id> (محمية بـ Cloudflare — تُمرَّر ترويسات
- *    المتصفح الكاملة lest يُرفض 403).
- *  - روابط الحلقات/المشاهدة تُستخرج من صفحة التفاصيل، وروابط البث m3u8/mp4
- *    بالتعبير régulier من صفحة المشاهدة.
+ * البنية (تم فحصها):
+ * - التصفح: /ar/browse, /ar/browse/<category>, الترقيم ?sort=new&page=N
+ * - التفاصيل: /ar/drama/<slug>-<id> (محمية Cloudflare — تحتاج ترويسات كاملة)
+ * - المشاهدة: /ar/watch/<slug>-<id>/<ep> — مشغّل فيديو
+ * - المزودون: NetShort, ReelShort, StardustTV, KalosTV, Playlet, FlexTV, إلخ
+ *   لكلٍّ CDN خاص — نستخرج الروابط من HTML صفحة المشاهدة وسكربتات التهيئة
  */
 class DramaGazeProvider(private val prefs: SharedPreferences? = null) : MainAPI() {
     override var name = "DramaGaze"
@@ -52,7 +56,8 @@ class DramaGazeProvider(private val prefs: SharedPreferences? = null) : MainAPI(
     private fun headers(referer: String = mainUrl) = mapOf(
         "User-Agent" to UA,
         "Referer" to "$referer/",
-        "Accept" to "text/html,application/xhtml+xml",
+        "Accept" to "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language" to "ar,en;q=0.9",
     )
 
     private fun log(msg: String) { Log.d("DramaGaze", msg) }
@@ -90,13 +95,10 @@ class DramaGazeProvider(private val prefs: SharedPreferences? = null) : MainAPI(
 
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse? {
         return try {
-            val doc = app.get(browseUrl(request.data, page), referer = "$mainUrl/ar",
-                headers = headers("$mainUrl/ar")).document
+            val doc = app.get(browseUrl(request.data, page), referer = "$mainUrl/ar", headers = headers("$mainUrl/ar")).document
             val cards = parseCards(doc)
             if (cards.isEmpty()) null else newHomePageResponse(request.name, cards)
-        } catch (e: Exception) {
-            null
-        }
+        } catch (e: Exception) { null }
     }
 
     override suspend fun search(query: String): List<SearchResponse> {
@@ -104,8 +106,7 @@ class DramaGazeProvider(private val prefs: SharedPreferences? = null) : MainAPI(
         if (q.isEmpty()) return emptyList()
         return try {
             val enc = URLEncoder.encode(q, "UTF-8")
-            val doc = app.get("$mainUrl/ar/search?q=$enc", referer = "$mainUrl/ar",
-                headers = headers("$mainUrl/ar")).document
+            val doc = app.get("$mainUrl/ar/search?q=$enc", referer = "$mainUrl/ar", headers = headers("$mainUrl/ar")).document
             parseCards(doc)
         } catch (e: Exception) {
             log("DramaGaze: search failed for '$q' :: ${e.message}")
@@ -130,6 +131,28 @@ class DramaGazeProvider(private val prefs: SharedPreferences? = null) : MainAPI(
                 .ifEmpty { doc.select("meta[name=description]").attr("content") }
                 .ifEmpty { doc.select(".synopsis, .description").firstOrNull()?.text() ?: "" }
 
+            // استخراج عدد الحلقات الكلي من JSON-LD أو العناصر
+            var totalEpisodes: Int? = null
+            val jsonLd = doc.select("script[type=application/ld+json]")
+            for (script in jsonLd) {
+                try {
+                    val json = script.html().trim()
+                    if (json.contains("@type") && json.contains("TVSeries")) {
+                        val epMatch = Regex("\"numberOfEpisodes\"\\s*:\\s*(\\d+)").find(json)
+                        if (epMatch != null) {
+                            totalEpisodes = epMatch.groupValues?.get(1)?.toIntOrNull()
+                            break
+                        }
+                    }
+                } catch (_: Exception) {}
+            }
+            // fallback: من عناصر واجهة المستخدم
+            if (totalEpisodes == null) {
+                val epText = doc.select(".episodes, .episode-count, [class*=episode]").text()
+                val m = Regex("(\\d+)").find(epText)
+                totalEpisodes = m?.groupValues?.get(1)?.toIntOrNull()
+            }
+
             val eps = mutableListOf<Episode>()
             val seen = java.util.HashSet<Int>()
             doc.select("a[href*='/watch/']").forEach { a ->
@@ -147,6 +170,7 @@ class DramaGazeProvider(private val prefs: SharedPreferences? = null) : MainAPI(
                 })
             }
             if (eps.isEmpty()) {
+                // محاولة استخراج من playerConfig أو JSON مدمج
                 eps.add(newEpisode(url) { this.name = "الحلقة 1"; this.episode = 1 })
             }
             eps.sortBy { it.episode ?: 0 }
@@ -154,6 +178,7 @@ class DramaGazeProvider(private val prefs: SharedPreferences? = null) : MainAPI(
             return newTvSeriesLoadResponse(title, url, TvType.TvSeries, eps) {
                 this.posterUrl = poster
                 this.plot = plot
+                totalEpisodes?.let { this.tags = listOf("الحلقات: $it") }
             }
         } catch (e: Exception) {
             log("DramaGaze: load failed for $url :: ${e.message}")
@@ -167,35 +192,147 @@ class DramaGazeProvider(private val prefs: SharedPreferences? = null) : MainAPI(
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
-        val html = try { app.get(data, referer = "$mainUrl/ar", headers = headers("$mainUrl/ar")).text }
-        catch (e: Exception) { return false }
+        // data = URL صفحة المشاهدة
+        val html = try {
+            app.get(data, referer = "$mainUrl/ar", headers = headers("$mainUrl/ar")).text
+        } catch (e: Exception) {
+            log("DramaGaze: loadLinks fetch failed for $data :: ${e.message}")
+            return false
+        }
+
+        // تنظيف الهروب الشائع
         val fixed = html.replace("\\/", "/").replace("\\u0026", "&")
-        val patterns = listOf(
+
+        // محاولة 1: البحث عن إعدادات اللاعب في JavaScript
+        val playerConfigs = mutableListOf<String>()
+        val configPatterns = listOf(
+            Regex("""playerConfig\s*[:=]\s*(\{.*?\})""", RegexOption.DOT_MATCHES_ALL),
+            Regex("""sources\s*[:=]\s*(\[.*?\])""", RegexOption.DOT_MATCHES_ALL),
+            Regex("""playlist\s*[:=]\s*(\[.*?\])""", RegexOption.DOT_MATCHES_ALL),
+            Regex("""videoUrl\s*[:=]\s*["']([^"']+)["']"""),
+            Regex("""file\s*[:=]\s*["']([^"']+)["']"""),
+            Regex("""src\s*[:=]\s*["']([^"']+)["']"""),
+            Regex("""m3u8\s*[:=]\s*["']([^"']+)["']"""),
+            Regex("""mp4\s*[:=]\s*["']([^"']+)["']"""),
+            Regex("""hls\s*[:=]\s*["']([^"']+)["']"""),
+        )
+        for (rx in configPatterns) {
+            rx.findAll(fixed).forEach { m ->
+                val v = m.groupValues.getOrNull(1) ?: m.value
+                if (v.isNotEmpty()) playerConfigs.add(v)
+            }
+        }
+
+        // محاولة 2: البحث المباشر عن روابط m3u8/mp4 في HTML
+        val directUrls = mutableListOf<String>()
+        val directPatterns = listOf(
             Regex("""https?://[^"'\\\s]+\.m3u8[^"'\\\s]*"""),
             Regex("""https?://[^"'\\\s]+\.mp4[^"'\\\s]*"""),
-            Regex("""["']file["']\s*:\s*["']([^"']+)["']"""),
+            Regex("""https?://[^"'\\\s]+/master\.m3u8[^"'\\\s]*"""),
+            Regex("""https?://[^"'\\\s]+/index\.m3u8[^"'\\\s]*"""),
         )
-        var video: String? = null
-        for (rx in patterns) {
-            val m = rx.find(fixed) ?: continue
-            video = when {
-                rx.pattern.contains("file") -> m.groupValues.getOrNull(1) ?: m.value
-                else -> m.value
-            }.trim()
-            if (video.isNotEmpty() && video.startsWith("http")) break
+        for (rx in directPatterns) {
+            rx.findAll(fixed).forEach { m ->
+                val v = m.value.trim()
+                if (v.startsWith("http")) directUrls.add(v)
+            }
         }
-        if (video.isNullOrBlank()) return false
 
-        val isM3u8 = video.contains("m3u8", true)
-        val note = if (isM3u8) "HLS" else "MP4"
-        callback(
-            newExtractorLink(name, FormatTag.tagged("الحلقة ($note)", video,
-                if (isM3u8) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO), video,
-                if (isM3u8) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO) {
-                this.headers = headers("$mainUrl/ar")
-                this.referer = "$mainUrl/"
-                this.quality = getQualityFromName("720p")
-            })
+        // محاولة 3: البحث في سكربتات التهيئة المشفرة
+        val decodedUrls = mutableListOf<String>()
+        val encodedPatterns = listOf(
+            Regex("""["']([A-Za-z0-9+/=]{100,})["']"""),
+            Regex("""(?:src|file|url|m3u8|mp4|hls)\s*[:=]\s*["']([^"']*%[0-9A-F]{2}[^"']*)["']"""),
+        )
+        for (rx in encodedPatterns) {
+            rx.findAll(fixed).forEach { m ->
+                val v = m.groupValues.getOrNull(1) ?: m.value
+                if (v.isNotEmpty()) {
+                    try {
+                        val bytes = android.util.Base64.decode(v, android.util.Base64.DEFAULT)
+                        val decoded = String(bytes).trim()
+                        if (decoded.startsWith("http")) decodedUrls.add(decoded)
+                    } catch (_: Exception) {
+                        try {
+                            val decoded = URLDecoder.decode(v, "UTF-8").trim()
+                            if (decoded.startsWith("http")) decodedUrls.add(decoded)
+                        } catch (_: Exception) {}
+                    }
+                }
+            }
+        }
+
+        // تجميع جميع الروابط المكتشفة
+        val allUrls = (playerConfigs + directUrls + decodedUrls).distinct()
+            .filter { it.startsWith("http") && (it.contains(".m3u8") || it.contains(".mp4") || it.contains("/master.") || it.contains("/index.")) }
+
+        if (allUrls.isEmpty()) {
+            log("DramaGaze: no video URLs found for $data")
+            return false
+        }
+
+        // استخراج الترجمات (VTT/SRT)
+        val subtitles = mutableMapOf<String, String>()
+        val subPatterns = listOf(
+            Regex("""["'](?:src|file|url)["']\s*:\s*["']([^"']+\.(?:vtt|srt))[^"']*["']"""),
+            Regex("""<track[^>]+src=["']([^"']+\.(?:vtt|srt))[^"']*["']"""),
+            Regex("""subtitle[s]?\s*[:=]\s*\[?(.*?)\]?""", RegexOption.DOT_MATCHES_ALL),
+        )
+        for (rx in subPatterns) {
+            rx.findAll(fixed).forEach { m ->
+                val subJson = m.groupValues.getOrNull(1) ?: m.value
+                try {
+                    if (subJson.startsWith("[") || subJson.startsWith("{")) {
+                        val node = mapper.readTree(subJson)
+                        if (node.isArray) {
+                            node.forEach { item ->
+                                val lang = item.get("lang")?.asText() ?: item.get("language")?.asText() ?: item.get("srclang")?.asText() ?: "ar"
+                                val url = item.get("src")?.asText() ?: item.get("file")?.asText() ?: item.get("url")?.asText()
+                                if (url != null && url.startsWith("http")) subtitles[lang] = url
+                            }
+                        } else if (node.isObject) {
+                            val lang = node.get("lang")?.asText() ?: node.get("language")?.asText() ?: node.get("srclang")?.asText() ?: "ar"
+                            val url = node.get("src")?.asText() ?: node.get("file")?.asText() ?: node.get("url")?.asText()
+                            if (url != null && url.startsWith("http")) subtitles[lang] = url
+                        }
+                    }
+                } catch (_: Exception) {}
+            }
+        }
+
+        // تسجيل الترجمات
+        subtitles.forEach { (lang, url) ->
+            subtitleCallback(newSubtitleFile(lang, url))
+        }
+
+        // بناء روابط الاستخراج مع الجودات
+        val seenQualities = java.util.HashSet<String>()
+        for (videoUrl in allUrls) {
+            val isM3u8 = videoUrl.contains(".m3u8") || videoUrl.contains("/master.") || videoUrl.contains("/index.")
+            val type = if (isM3u8) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
+
+            val qualityFromUrl = when {
+                videoUrl.contains("1080") || videoUrl.contains("1920") -> "1080p"
+                videoUrl.contains("720") || videoUrl.contains("1280") -> "720p"
+                videoUrl.contains("480") || videoUrl.contains("854") -> "480p"
+                videoUrl.contains("360") || videoUrl.contains("640") -> "360p"
+                else -> "auto"
+            }
+
+            val qualityLabel = if (isM3u8) "HLS" else "MP4"
+            val label = "الحلقة ($qualityLabel${if (qualityFromUrl != "auto") " $qualityFromUrl" else ""})"
+
+            val key = "$type-$qualityFromUrl"
+            if (!seenQualities.add(key)) continue
+
+            callback(
+                newExtractorLink(name, FormatTag.tagged(label, videoUrl, type), videoUrl, type) {
+                    this.headers = headers("$mainUrl/ar")
+                    this.referer = "$mainUrl/"
+                    this.quality = getQualityFromName(qualityFromUrl)
+                }
+            )
+        }
         return true
     }
 }
