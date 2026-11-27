@@ -10,6 +10,7 @@ import com.lagradost.cloudstream3.utils.*
 import android.content.SharedPreferences
 import android.util.Log
 import org.jsoup.nodes.Document
+import org.jsoup.nodes.Element
 import java.net.URLEncoder
 import java.net.URLDecoder
 
@@ -18,15 +19,12 @@ private const val UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/53
 private val mapper = ObjectMapper().registerKotlinModule()
 
 /**
- * Dramix (https://dramix.tv) — كتالوج دراما قصيرة عمودية متعدد المزودين.
- *
- * البنية (تم فحصها):
- * - التصفح: /ar/new-dramas, /ar/trending, /ar/provider/<slug>
- * - التفاصيل: /ar/drama/<slug> — تحتوي بيانات JSON-LD وروابط الحلقات
- * - المشاهدة: /ar/watch/<slug>/<ep> — مشغّل فيديو يحمل المصدروالترجمات
- * - الفيديو يأتي من مزودين متعددين (BibiShort, FlexTV, MoboReels, BiliTV, إلخ)
- *   لكلٍّ CDN خاص به — نستخرج الروابط بالتعبير التنظيمي من HTML صفحة المشاهدة
- *   ومن سكربتات التهيئة (playerConfig, sources, إلخ).
+ * Dramix (https://dramix.tv) — كتالوج دراما قصيرة يجمع عدة مزودين.
+ * 
+ * آلية استخراج الفيديو:
+ * 1. صفحة المشاهدة /ar/watch/<slug>/<ep> تحتوي على iframe أو فيديو من المزود الأصلي
+ * 2. المزودون: BibiShort, FlexTV, MoboReels, BiliTV, FlareFlow, DramaNova, KalosTV, RapidTV, ReelShort, ShortMax
+ * 3. كل مزود له CDN خاص - نستخرج رابط iframe ثم نزور صفحة المزود لاستخراج الفيديو الفعلي
  */
 class DramixProvider(private val prefs: SharedPreferences? = null) : MainAPI() {
     override var name = "Dramix"
@@ -47,13 +45,35 @@ class DramixProvider(private val prefs: SharedPreferences? = null) : MainAPI() {
         "provider/kalostv" to "KalosTV",
         "provider/rapidtv" to "RapidTV",
         "provider/reelshort" to "ReelShort",
-        "provider/shortmax" to "ShortMax"
+        "provider/shortmax" to "ShortMax",
+        "provider/bibishort" to "BibiShort",
+        "provider/dotdrama" to "DotDrama",
+        "provider/dramabite" to "DramaBite",
+        "provider/dramabox" to "DramaBox",
+        "provider/dramawave" to "DramaWave",
+        "provider/flickreels" to "FlickReels",
+        "provider/freereels" to "FreeReels",
+        "provider/fundrama" to "FunDrama",
+        "provider/goodshort" to "GoodShort",
+        "provider/happyshort" to "HappyShort",
+        "provider/idrama" to "iDrama",
+        "provider/joyreels" to "JoyReels",
+        "provider/microdrama" to "MicroDrama",
+        "provider/reelbuzz" to "ReelBuzz",
+        "provider/reelife" to "Reelife",
+        "provider/shortical" to "Shortical",
+        "provider/stardusttv" to "StardustTV",
+        "provider/starshort" to "StarShort",
+        "provider/velolo" to "Velolo",
+        "provider/vigloo" to "Vigloo",
+        "provider/vyntage" to "Vyntage"
     )
 
     private fun headers(referer: String = mainUrl) = mapOf(
         "User-Agent" to UA,
         "Referer" to referer,
         "Accept" to "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language" to "ar,en;q=0.9",
     )
 
     private fun log(msg: String) { Log.d("Dramix", msg) }
@@ -120,14 +140,12 @@ class DramixProvider(private val prefs: SharedPreferences? = null) : MainAPI() {
             val plot = doc.select("meta[name=description]").attr("content")
                 .ifEmpty { doc.select(".synopsis, .description").firstOrNull()?.text() ?: "" }
 
-            // استخراج بيانات JSON-LD من الصفحة (Schema.org TVSeries)
             var totalEpisodes: Int? = null
             val jsonLd = doc.select("script[type=application/ld+json]")
             for (script in jsonLd) {
                 try {
                     val json = script.html().trim()
                     if (json.contains("@type") && json.contains("TVSeries")) {
-                        // يمكن أن يحتوي على numberOfEpisodes
                         val epMatch = Regex("\"numberOfEpisodes\"\\s*:\\s*(\\d+)").find(json)
                         if (epMatch != null) {
                             totalEpisodes = epMatch.groupValues?.get(1)?.toIntOrNull()
@@ -154,7 +172,6 @@ class DramixProvider(private val prefs: SharedPreferences? = null) : MainAPI() {
                 })
             }
             if (eps.isEmpty()) {
-                // fallback: محاولة استخراج من JSON-LD أو playerConfig
                 eps.add(newEpisode(url) { this.name = "الحلقة 1"; this.episode = 1 })
             }
             eps.sortBy { it.episode ?: 0 }
@@ -176,126 +193,255 @@ class DramixProvider(private val prefs: SharedPreferences? = null) : MainAPI() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
-        // data = URL صفحة المشاهدة
-        val html = try {
-            app.get(data, referer = mainUrl, headers = headers(mainUrl)).text
-        } catch (e: Exception) {
-            log("Dramix: loadLinks fetch failed for $data :: ${e.message}")
-            return false
-        }
-
-        // تنظيف الهروب الشائع
-        val fixed = html.replace("\\/", "/").replace("\\u0026", "&")
-
-        // محاولة 1: البحث عن إعدادات اللاعب في JavaScript (playerConfig, sources, playlist, إلخ)
-        val playerConfigs = mutableListOf<String>()
-        val configPatterns = listOf(
-            Regex("""playerConfig\s*[:=]\s*(\{.*?\})""", RegexOption.DOT_MATCHES_ALL),
-            Regex("""sources\s*[:=]\s*(\[.*?\])""", RegexOption.DOT_MATCHES_ALL),
-            Regex("""playlist\s*[:=]\s*(\[.*?\])""", RegexOption.DOT_MATCHES_ALL),
-            Regex("""videoUrl\s*[:=]\s*["']([^"']+)["']"""),
-            Regex("""file\s*[:=]\s*["']([^"']+)["']"""),
-            Regex("""src\s*[:=]\s*["']([^"']+)["']"""),
-        )
-        for (rx in configPatterns) {
-            rx.findAll(fixed).forEach { m ->
-                val v = m.groupValues.getOrNull(1) ?: m.value
-                if (v.isNotEmpty()) playerConfigs.add(v)
-            }
-        }
-
-        // محاولة 2: البحث المباشر عن روابط m3u8/mp4 في HTML
-        val directUrls = mutableListOf<String>()
-        val directPatterns = listOf(
-            Regex("""https?://[^"'\\\s]+\.m3u8[^"'\\\s]*"""),
-            Regex("""https?://[^"'\\\s]+\.mp4[^"'\\\s]*"""),
-            Regex("""https?://[^"'\\\s]+/master\.m3u8[^"'\\\s]*"""),
-            Regex("""https?://[^"'\\\s]+/index\.m3u8[^"'\\\s]*"""),
-        )
-        for (rx in directPatterns) {
-            rx.findAll(fixed).forEach { m ->
-                val v = m.value.trim()
-                if (v.startsWith("http")) directUrls.add(v)
-            }
-        }
-
-        // محاولة 3: البحث في سكربتات التهيئة المشفرة (base64, url-encoded)
-        val decodedUrls = mutableListOf<String>()
-        val encodedPatterns = listOf(
-            Regex("""["']([A-Za-z0-9+/=]{100,})["']"""), // base64 محتمل
-            Regex("""(?:src|file|url)\s*[:=]\s*["']([^"']*%[0-9A-F]{2}[^"']*)["']"""), // URL-encoded
-        )
-        for (rx in encodedPatterns) {
-            rx.findAll(fixed).forEach { m ->
-                val v = m.groupValues.getOrNull(1) ?: m.value
-                if (v.isNotEmpty()) {
-                    // محاولة فك base64
-                    try {
-                        val bytes = android.util.Base64.decode(v, android.util.Base64.DEFAULT)
-                        val decoded = String(bytes).trim()
-                        if (decoded.startsWith("http")) decodedUrls.add(decoded)
-                    } catch (_: Exception) {
-                        // محاولة فك URL-encoding
-                        try {
-                            val decoded = URLDecoder.decode(v, "UTF-8").trim()
-                            if (decoded.startsWith("http")) decodedUrls.add(decoded)
-                        } catch (_: Exception) {}
-                    }
+        // data = URL صفحة المشاهدة على dramix.tv
+        // نحتاج أولاً استخراج iframe أو رابط المزود، ثم زيارة صفحة المزود لاستخراج الفيديو
+        return try {
+            val watchDoc = app.get(data, referer = mainUrl, headers = headers(mainUrl)).document
+            
+            // البحث عن iframe يحتوي على المشغل
+            val iframes = watchDoc.select("iframe[src]")
+            var providerUrl: String? = null
+            var providerName = "Unknown"
+            
+            for (iframe in iframes) {
+                val src = iframe.attr("src")
+                if (src.contains("http") && (src.contains("reelshort") || src.contains("flextv") || 
+                    src.contains("moboreels") || src.contains("bilitv") || src.contains("bibishort") ||
+                    src.contains("kalostv") || src.contains("rapidtv") || src.contains("shortmax") ||
+                    src.contains("dramanova") || src.contains("flareflow"))) {
+                    providerUrl = if (src.startsWith("http")) src else "https:$src"
+                    break
                 }
             }
-        }
-
-        // تجميع جميع الروابط المكتشفة
-        val allUrls = (playerConfigs + directUrls + decodedUrls).distinct()
-            .filter { it.startsWith("http") && (it.contains(".m3u8") || it.contains(".mp4") || it.contains("/master.") || it.contains("/index.")) }
-
-        if (allUrls.isEmpty()) {
-            log("Dramix: no video URLs found for $data")
-            return false
-        }
-
-        // استخراج الترجمات (VTT/SRT)
-        val subtitles = mutableMapOf<String, String>() // lang -> url
-        val subPatterns = listOf(
-            Regex("""["'](?:src|file|url)["']\s*:\s*["']([^"']+\.(?:vtt|srt))[^"']*["']"""),
-            Regex("""<track[^>]+src=["']([^"']+\.(?:vtt|srt))[^"']*["']"""),
-            Regex("""subtitle[s]?\s*[:=]\s*\[?(.*?)\]?""", RegexOption.DOT_MATCHES_ALL),
-        )
-        for (rx in subPatterns) {
-            rx.findAll(fixed).forEach { m ->
-                val subJson = m.groupValues.getOrNull(1) ?: m.value
-                // محاولة تحليل JSON للترجمات
+            
+            // إذا لم يوجد iframe، نبحث عن روابط مباشرة في الصفحة
+            if (providerUrl == null) {
+                val html = watchDoc.html()
+                val fixed = html.replace("\\/", "/").replace("\\u0026", "&")
+                
+                // البحث عن روابط m3u8/mp4 مباشرة
+                val directUrls = mutableListOf<String>()
+                val directPatterns = listOf(
+                    Regex("""https?://[^"'\\\s]+\.m3u8[^"'\\\s]*"""),
+                    Regex("""https?://[^"'\\\s]+\.mp4[^"'\\\s]*"""),
+                    Regex("""https?://[^"'\\\s]+/master\.m3u8[^"'\\\s]*"""),
+                    Regex("""https?://[^"'\\\s]+/index\.m3u8[^"'\\\s]*"""),
+                )
+                for (rx in directPatterns) {
+                    rx.findAll(fixed).forEach { m ->
+                        val v = m.value.trim()
+                        if (v.startsWith("http")) directUrls.add(v)
+                    }
+                }
+                
+                if (directUrls.isNotEmpty()) {
+                    return processVideoUrls(directUrls.distinct(), data, subtitleCallback, callback)
+                }
+            }
+            
+            // إذا وجدنا iframe للمزود، نزور صفحته
+            if (providerUrl != null) {
+                log("Dramix: Found provider iframe: $providerUrl")
+                return tryExtractFromProvider(providerUrl, data, subtitleCallback, callback)
+            }
+            
+            // محاولة أخيرة: البحث في JSON-LD أو playerConfig
+            val html = watchDoc.html()
+            val fixed = html.replace("\\/", "/").replace("\\u0026", "&")
+            
+            val playerConfigs = mutableListOf<String>()
+            val configPatterns = listOf(
+                Regex("""playerConfig\s*[:=]\s*(\{.*?\})""", RegexOption.DOT_MATCHES_ALL),
+                Regex("""videoConfig\s*[:=]\s*(\{.*?\})""", RegexOption.DOT_MATCHES_ALL),
+                Regex("""sources\s*[:=]\s*(\[.*?\])""", RegexOption.DOT_MATCHES_ALL),
+                Regex("""playlist\s*[:=]\s*(\[.*?\])""", RegexOption.DOT_MATCHES_ALL),
+            )
+            for (rx in configPatterns) {
+                rx.findAll(fixed).forEach { m ->
+                    val v = m.groupValues.getOrNull(1) ?: m.value
+                    if (v.isNotEmpty()) playerConfigs.add(v)
+                }
+            }
+            
+            val jsonUrls = mutableListOf<String>()
+            for (config in playerConfigs) {
                 try {
-                    if (subJson.startsWith("[") || subJson.startsWith("{")) {
-                        val node = mapper.readTree(subJson)
-                        if (node.isArray) {
-                            node.forEach { item ->
-                                val lang = item.get("lang")?.asText() ?: item.get("language")?.asText() ?: item.get("srclang")?.asText() ?: "ar"
-                                val url = item.get("src")?.asText() ?: item.get("file")?.asText() ?: item.get("url")?.asText()
-                                if (url != null && url.startsWith("http")) subtitles[lang] = url
+                    if (config.startsWith("{") || config.startsWith("[")) {
+                        val node = mapper.readTree(config)
+                        val sources = node.path("sources") ?: node.path("playlist") ?: node.path("videoSources")
+                        if (sources.isArray) {
+                            for (src in sources) {
+                                val file = src.path("file").asText() ?: src.path("src").asText() ?: src.path("url").asText() ?: src.path("m3u8").asText() ?: src.path("hls").asText()
+                                if (file.startsWith("http")) jsonUrls.add(file)
                             }
-                        } else if (node.isObject) {
-                            val lang = node.get("lang")?.asText() ?: node.get("language")?.asText() ?: node.get("srclang")?.asText() ?: "ar"
-                            val url = node.get("src")?.asText() ?: node.get("file")?.asText() ?: node.get("url")?.asText()
-                            if (url != null && url.startsWith("http")) subtitles[lang] = url
+                        }
+                        if (!sources.isArray && sources.isObject) {
+                            val file = sources.path("file").asText() ?: sources.path("src").asText() ?: sources.path("url").asText()
+                            if (file.startsWith("http")) jsonUrls.add(file)
+                        }
+                        val rootFile = node.path("file").asText() ?: node.path("src").asText() ?: node.path("url").asText() ?: node.path("m3u8").asText() ?: node.path("hls").asText()
+                        if (rootFile.startsWith("http")) jsonUrls.add(rootFile)
+                    }
+                } catch (_: Exception) {}
+            }
+            
+            if (jsonUrls.isNotEmpty()) {
+                return processVideoUrls(jsonUrls.distinct(), data, subtitleCallback, callback)
+            }
+            
+            log("Dramix: no video source found for $data")
+            false
+        } catch (e: Exception) {
+            log("Dramix: loadLinks failed for $data :: ${e.message}")
+            false
+        }
+    }
+
+    private suspend fun tryExtractFromProvider(providerUrl: String, originalUrl: String, subtitleCallback: (SubtitleFile) -> Unit, callback: (ExtractorLink) -> Unit): Boolean {
+        return try {
+            // زيارة صفحة المزود
+            val providerDoc = app.get(providerUrl, referer = mainUrl, headers = headers(mainUrl)).document
+            val html = providerDoc.html().replace("\\/", "/").replace("\\u0026", "&")
+            
+            // محاولة 1: استخراج من JSON-LD
+            val jsonLd = providerDoc.select("script[type=application/ld+json]")
+            for (script in jsonLd) {
+                try {
+                    val node = mapper.readTree(script.html().trim())
+                    if (node.has("contentUrl")) {
+                        val url = node.path("contentUrl").asText()
+                        if (url.startsWith("http") && (url.contains(".m3u8") || url.contains(".mp4"))) {
+                            return processVideoUrls(listOf(url), originalUrl, subtitleCallback, callback)
+                        }
+                    }
+                    if (node.has("embedUrl")) {
+                        val embedUrl = node.path("embedUrl").asText()
+                        if (embedUrl.startsWith("http")) {
+                            // زيارة embed URL بشكل تكراري
+                            return tryExtractFromProvider(embedUrl, originalUrl, subtitleCallback, callback)
                         }
                     }
                 } catch (_: Exception) {}
             }
+            
+            // محاولة 2: البحث عن playerConfig في الصفحة
+            val playerConfigs = mutableListOf<String>()
+            val configPatterns = listOf(
+                Regex("""playerConfig\s*[:=]\s*(\{.*?\})""", RegexOption.DOT_MATCHES_ALL),
+                Regex("""videoConfig\s*[:=]\s*(\{.*?\})""", RegexOption.DOT_MATCHES_ALL),
+                Regex("""sources\s*[:=]\s*(\[.*?\])""", RegexOption.DOT_MATCHES_ALL),
+                Regex("""videoUrl\s*[:=]\s*["']([^"']+)["']"""),
+                Regex("""file\s*[:=]\s*["']([^"']+)["']"""),
+                Regex("""src\s*[:=]\s*["']([^"']+)["']"""),
+                Regex("""m3u8\s*[:=]\s*["']([^"']+)["']"""),
+                Regex("""hls\s*[:=]\s*["']([^"']+)["']"""),
+            )
+            for (rx in configPatterns) {
+                rx.findAll(html).forEach { m ->
+                    val v = m.groupValues.getOrNull(1) ?: m.value
+                    if (v.isNotEmpty()) playerConfigs.add(v)
+                }
+            }
+            
+            val jsonUrls = mutableListOf<String>()
+            for (config in playerConfigs) {
+                try {
+                    if (config.startsWith("{") || config.startsWith("[")) {
+                        val node = mapper.readTree(config)
+                        val sources = node.path("sources") ?: node.path("playlist") ?: node.path("videoSources")
+                        if (sources.isArray) {
+                            for (src in sources) {
+                                val file = src.path("file").asText() ?: src.path("src").asText() ?: src.path("url").asText() ?: src.path("m3u8").asText() ?: src.path("hls").asText()
+                                if (file.startsWith("http")) jsonUrls.add(file)
+                            }
+                        }
+                        if (!sources.isArray && sources.isObject) {
+                            val file = sources.path("file").asText() ?: sources.path("src").asText() ?: sources.path("url").asText()
+                            if (file.startsWith("http")) jsonUrls.add(file)
+                        }
+                        val rootFile = node.path("file").asText() ?: node.path("src").asText() ?: node.path("url").asText() ?: node.path("m3u8").asText() ?: node.path("hls").asText()
+                        if (rootFile.startsWith("http")) jsonUrls.add(rootFile)
+                    }
+                } catch (_: Exception) {}
+            }
+            
+            // محاولة 3: روابط مباشرة
+            val directUrls = mutableListOf<String>()
+            val directPatterns = listOf(
+                Regex("""https?://[^"'\\\s]+\.m3u8[^"'\\\s]*"""),
+                Regex("""https?://[^"'\\\s]+\.mp4[^"'\\\s]*"""),
+                Regex("""https?://[^"'\\\s]+/master\.m3u8[^"'\\\s]*"""),
+                Regex("""https?://[^"'\\\s]+/index\.m3u8[^"'\\\s]*"""),
+            )
+            for (rx in directPatterns) {
+                rx.findAll(html).forEach { m ->
+                    val v = m.value.trim()
+                    if (v.startsWith("http")) directUrls.add(v)
+                }
+            }
+            
+            val allUrls = (jsonUrls + directUrls).distinct()
+                .filter { it.startsWith("http") && (it.contains(".m3u8") || it.contains(".mp4") || it.contains("/master.") || it.contains("/index.") || it.contains("hls")) }
+            
+            if (allUrls.isNotEmpty()) {
+                return processVideoUrls(allUrls, originalUrl, subtitleCallback, callback)
+            }
+            
+            // محاولة 4: فك التشفير base64/URL-encoded
+            val decodedUrls = mutableListOf<String>()
+            val encodedPatterns = listOf(
+                Regex("""["']([A-Za-z0-9+/=]{100,})["']"""),
+                Regex("""(?:src|file|url|m3u8|hls)\s*[:=]\s*["']([^"']*%[0-9A-F]{2}[^"']*)["']"""),
+            )
+            for (rx in encodedPatterns) {
+                rx.findAll(html).forEach { m ->
+                    val v = m.groupValues.getOrNull(1) ?: m.value
+                    if (v.isNotEmpty()) {
+                        try {
+                            val bytes = android.util.Base64.decode(v, android.util.Base64.DEFAULT)
+                            val decoded = String(bytes).trim()
+                            if (decoded.startsWith("http")) decodedUrls.add(decoded)
+                        } catch (_: Exception) {
+                            try {
+                                val decoded = URLDecoder.decode(v, "UTF-8").trim()
+                                if (decoded.startsWith("http")) decodedUrls.add(decoded)
+                            } catch (_: Exception) {}
+                        }
+                    }
+                }
+            }
+            
+            val allDecoded = decodedUrls.distinct()
+                .filter { it.startsWith("http") && (it.contains(".m3u8") || it.contains(".mp4") || it.contains("/master.") || it.contains("/index.") || it.contains("hls")) }
+            
+            if (allDecoded.isNotEmpty()) {
+                return processVideoUrls(allDecoded, originalUrl, subtitleCallback, callback)
+            }
+            
+            log("Dramix: failed to extract video from provider: $providerUrl")
+            false
+        } catch (e: Exception) {
+            log("Dramix: provider extraction failed for $providerUrl :: ${e.message}")
+            false
         }
+    }
 
-        // تسجيل الترجمات
-        subtitles.forEach { (lang, url) ->
-            subtitleCallback(newSubtitleFile(lang, url))
-        }
-
-        // بناء روابط الاستخراج مع الجودات
+    private suspend fun processVideoUrls(
+        urls: List<String>,
+        referer: String,
+        subtitleCallback: (SubtitleFile) -> Unit,
+        callback: (ExtractorLink) -> Unit
+    ): Boolean {
+        // استخراج الترجمات من الصفحة الأصلية
+        extractSubtitles(referer, subtitleCallback)
+        
         val seenQualities = java.util.HashSet<String>()
-        for (videoUrl in allUrls) {
-            val isM3u8 = videoUrl.contains(".m3u8") || videoUrl.contains("/master.") || videoUrl.contains("/index.")
+        var hasLinks = false
+        
+        for (videoUrl in urls) {
+            val isM3u8 = videoUrl.contains(".m3u8") || videoUrl.contains("/master.") || videoUrl.contains("/index.") || videoUrl.contains("hls")
             val type = if (isM3u8) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
-
-            // محاولة استخراج الجودة من الرابط
+            
             val qualityFromUrl = when {
                 videoUrl.contains("1080") || videoUrl.contains("1920") -> "1080p"
                 videoUrl.contains("720") || videoUrl.contains("1280") -> "720p"
@@ -303,24 +449,63 @@ class DramixProvider(private val prefs: SharedPreferences? = null) : MainAPI() {
                 videoUrl.contains("360") || videoUrl.contains("640") -> "360p"
                 else -> "auto"
             }
-
+            
             val qualityLabel = if (isM3u8) "HLS" else "MP4"
-            val label = "الحلقة ($qualityLabel${if (qualityFromUrl != "auto") " $qualityFromUrl" else ""})"
-
-            // تجنب التكرار بالجودة نفسها
+            val label = "Dramix ($qualityLabel${if (qualityFromUrl != "auto") " $qualityFromUrl" else ""})"
+            
             val key = "$type-$qualityFromUrl"
             if (!seenQualities.add(key)) continue
-
+            
+            hasLinks = true
             callback(
                 newExtractorLink(name, FormatTag.tagged(label, videoUrl, type), videoUrl, type) {
                     this.headers = headers(mainUrl)
-                    this.referer = mainUrl
+                    this.referer = referer
                     this.quality = getQualityFromName(qualityFromUrl)
                 }
             )
         }
-        return true
+        return hasLinks
     }
 
-    private fun abs(u: String): String = if (u.startsWith("http")) u else "$mainUrl$u"
+    private suspend fun extractSubtitles(pageUrl: String, subtitleCallback: (SubtitleFile) -> Unit) {
+        try {
+            val doc = app.get(pageUrl, referer = mainUrl, headers = headers(mainUrl)).document
+            val html = doc.html().replace("\\/", "/").replace("\\u0026", "&")
+            
+            val subtitles = mutableMapOf<String, String>()
+            val subPatterns = listOf(
+                Regex("""["'](?:src|file|url)["']\s*:\s*["']([^"']+\.(?:vtt|srt))[^"']*["']"""),
+                Regex("""<track[^>]+src=["']([^"']+\.(?:vtt|srt))[^"']*["']"""),
+                Regex("""subtitle[s]?\s*[:=]\s*\[?(.*?)\]?""", RegexOption.DOT_MATCHES_ALL),
+            )
+            for (rx in subPatterns) {
+                rx.findAll(html).forEach { m ->
+                    val subJson = m.groupValues.getOrNull(1) ?: m.value
+                    try {
+                        if (subJson.startsWith("[") || subJson.startsWith("{")) {
+                            val node = mapper.readTree(subJson)
+                            if (node.isArray) {
+                                node.forEach { item ->
+                                    val lang = item.path("lang").asText() ?: item.path("language").asText() ?: item.path("srclang").asText() ?: "ar"
+                                    val url = item.path("src").asText() ?: item.path("file").asText() ?: item.path("url").asText()
+                                    if (url.startsWith("http")) subtitles[lang] = url
+                                }
+                            } else if (node.isObject) {
+                                val lang = node.path("lang").asText() ?: node.path("language").asText() ?: node.path("srclang").asText() ?: "ar"
+                                val url = node.path("src").asText() ?: node.path("file").asText() ?: node.path("url").asText()
+                                if (url.startsWith("http")) subtitles[lang] = url
+                            }
+                        }
+                    } catch (_: Exception) {}
+                }
+            }
+            
+            subtitles.forEach { (lang, url) ->
+                subtitleCallback(newSubtitleFile(lang, url))
+            }
+        } catch (e: Exception) {
+            log("Dramix: subtitle extraction failed :: ${e.message}")
+        }
+    }
 }
